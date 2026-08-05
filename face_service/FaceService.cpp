@@ -55,7 +55,7 @@ void WINAPI FaceService::ServiceMain(DWORD argc, LPWSTR* argv) {
     service.m_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     service.m_status.dwCurrentState = SERVICE_START_PENDING;
     service.m_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN
-        | SERVICE_ACCEPT_SESSIONCHANGE;
+        | SERVICE_ACCEPT_SESSIONCHANGE | SERVICE_ACCEPT_POWEREVENT;
     service.m_status.dwWin32ExitCode = NO_ERROR;
     service.m_status.dwServiceSpecificExitCode = 0;
     service.m_status.dwCheckPoint = 0;
@@ -122,6 +122,16 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
     case SERVICE_CONTROL_SHUTDOWN:
         pService->Stop();
         return NO_ERROR;
+    case SERVICE_CONTROL_POWEREVENT: {
+        // PBT_APMRESUMESUSPEND = resumed from sleep/hibernate. The camera may
+        // still be in low-power recovery, so force a fresh camera init on the
+        // next auth instead of reusing a stale SourceReader.
+        if (eventType == PBT_APMRESUMESUSPEND) {
+            FACELOGIN_INFO(L"Power resume event — forcing camera re-init on next auth");
+            pService->m_resumedFlag.store(true);
+        }
+        return NO_ERROR;
+    }
     case SERVICE_CONTROL_SESSIONCHANGE: {
         // Only respond to LOGON (user signed in) and LOGOFF (user signed out).
         // Ignore other events like WTS_SESSION_LOCK (7), WTS_SESSION_UNLOCK (8),
@@ -376,6 +386,14 @@ void FaceService::Run() {
                     FACELOGIN_INFO(L"DS camera initialized on demand for auth");
                 }
             } else {
+                // After a system resume the camera may still be in low-power
+                // recovery. Drop the stale instance so Initialize() rebuilds a
+                // fresh SourceReader instead of reusing the one that stalled.
+                if (m_resumedFlag.exchange(false) && m_webcamMF) {
+                    FACELOGIN_INFO(L"Resume detected — rebuilding MF camera");
+                    m_webcamMF->Shutdown();
+                    m_webcamMF.reset();
+                }
                 if (!m_webcamMF) {
                     m_webcamMF = std::make_unique<WebcamCapture>();
                     if (!m_webcamMF->Initialize(1280, 720, Utf8ToWstr(m_config.camera_device))) {
@@ -436,12 +454,17 @@ void FaceService::Stop() {
 bool FaceService::ProcessAuthRequest() {
     FACELOGIN_INFO(L"Starting face authentication...");
 
+    // Single grab helper used by ALL auth stages (match, anti-spoof, blink,
+    // final verify): it applies the configured camera rotation so every stage
+    // operates on identically-oriented frames. Previously rotation was only
+    // applied in the match loop, leaving the liveness/verify stages to process
+    // unrotated frames — with 90/270 rotation the face was sideways there and
+    // detection/landmarks/EAR failed, blocking unlock.
     auto grabFrame = [this](dlib::matrix<dlib::rgb_pixel>& f) -> bool {
-        if (m_isServiceMode)
-            return m_webcamDS->GrabFrame(f);
-        if (m_webcamMF)
-            return m_webcamMF->GrabFrame(f);
-        return false;
+        bool ok = m_isServiceMode ? m_webcamDS->GrabFrame(f)
+                                  : (m_webcamMF ? m_webcamMF->GrabFrame(f) : false);
+        if (ok) RotateFrame(f, m_config.camera_rotation);
+        return ok;
     };
 
     if (m_store->GetUserCount() == 0) {
@@ -492,11 +515,24 @@ bool FaceService::ProcessAuthRequest() {
 
         if (!grabFrame(frame)) {
             if (!m_running) return false;
+            // A stalled camera (e.g. after resume) self-shut-down in
+            // GrabFrame. Rebuild it here so auth can continue instead of
+            // spinning on a dead SourceReader until timeout.
+            if (m_webcamMF && !m_webcamMF->IsInitialized()) {
+                FACELOGIN_INFO(L"MF camera stalled — re-initializing");
+                m_webcamMF->Shutdown();
+                m_webcamMF.reset();
+                m_webcamMF = std::make_unique<WebcamCapture>();
+                if (!m_webcamMF->Initialize(1280, 720, Utf8ToWstr(m_config.camera_device))) {
+                    FACELOGIN_ERROR(L"MF camera re-init failed");
+                    m_webcamMF.reset();
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(30));
             continue;
         }
 
-        RotateFrame(frame, m_config.camera_rotation);
+        // (grabFrame above already applied camera rotation)
 
         // Face detection: SCRFD detects and yields the 5 keypoints directly
         // (gnkps variant) — no separate landmark model. Alignment to 112×112
