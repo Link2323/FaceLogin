@@ -230,8 +230,9 @@ bool FaceService::Initialize() {
 
     // Load SCRFD ONNX detector (gnkps variant — group-norm keypoints, the
     // rotation-fix family; provides the 5 alignment keypoints directly).
+    // 10g tier: ~3.4x faster than 34g at -1% WIDER Face (96.17→95.19).
     m_onnxDetector = std::make_unique<OnnxDetector>();
-    std::wstring onnxDetPath = m_modelsDir + L"\\det_34g_gnkps.onnx";
+    std::wstring onnxDetPath = m_modelsDir + L"\\det_10g_gnkps.onnx";
     if (m_onnxDetector->Initialize(onnxDetPath)) {
         FACELOGIN_INFO(L"SCRFD detector loaded");
     } else {

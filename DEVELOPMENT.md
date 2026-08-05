@@ -477,7 +477,7 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除，仅保留 DeepPixBiS 静默�
 
 | 类 | 模型 | 输入 | 输出 | 用途 |
 |---|---|---|---|---|
-| `OnnxDetector` | SCRFD gnkps (`det_34g_gnkps.onnx`) | 640×640 直接拉伸 | 检测框+5点关键点 | 人脸检测 |
+| `OnnxDetector` | SCRFD gnkps (`det_10g_gnkps.onnx`) | 640×640 直接拉伸 | 检测框+5点关键点 | 人脸检测 |
 | `OnnxRecognizer` | InsightFace buffalo_l (`w600k_r50.onnx`) | 112×112 对齐人脸 | 512维嵌入 | 人脸识别 |
 | `OnnxAntiSpoof` | DeepPixBiS (`OULU_Protocol_2_model_0_0.onnx`) | 224×224 bbox 裁剪 | 活体分数 [0,1] | 静默反欺诈 |
 
@@ -786,7 +786,7 @@ C:\Program Files\FaceLogin\               # 安装目录 (用户可选)
 │   ├── credential_provider.log
 │   └── enrollment.log
 └── models/
-    ├── det_34g_gnkps.onnx                           (~39 MB)
+    ├── det_10g_gnkps.onnx                           (~15.5 MB)
     ├── w600k_r50.onnx                               (~174 MB)
     └── OULU_Protocol_2_model_0_0.onnx                (~13 MB)
 
@@ -806,7 +806,7 @@ C:\ProgramData\FaceLogin\                   # 数据目录
 
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
-| `det_34g_gnkps.onnx` | ~39 MB | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，旋转脸修复族） | InsightFace / hf-mirror |
+| `det_10g_gnkps.onnx` | ~15.5 MB | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档 ~3.4× 快于 34g） | hf-mirror |
 | `w600k_r50.onnx` | ~174 MB | buffalo_l IResNet-50 512维嵌入 | InsightFace / hf-mirror |
 | `OULU_Protocol_2_model_0_0.onnx` | ~13 MB | DeepPixBiS 静默反欺诈 | MiniFASNet |
 

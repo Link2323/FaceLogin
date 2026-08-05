@@ -178,7 +178,7 @@ wails build -clean -platform windows/amd64
 
 | 文件 | 用途 | 下载 |
 |---|---|---|
-| `det_34g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体） | `scripts/download_models.ps1` |
+| `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g） | `scripts/download_models.ps1` |
 | `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入 | `scripts/download_models.ps1` |
 | `OULU_Protocol_2_model_0_0.onnx` | 静默反欺诈 | 随安装包分发 |
 

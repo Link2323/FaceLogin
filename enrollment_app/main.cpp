@@ -63,7 +63,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Check models exist. The enrollment app uses the ONNX pipeline
     // exclusively (SCRFD detection + InsightFace recognition); no landmark
     // model is loaded at runtime anymore (the 5 keypoints come from SCRFD).
-    std::wstring detPath = modelsDir + L"\\det_34g_gnkps.onnx";
+    std::wstring detPath = modelsDir + L"\\det_10g_gnkps.onnx";
     std::wstring recPath = modelsDir + L"\\w600k_r50.onnx";
 
     if (GetFileAttributesW(detPath.c_str()) == INVALID_FILE_ATTRIBUTES ||

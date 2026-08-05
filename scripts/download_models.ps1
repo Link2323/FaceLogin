@@ -1,7 +1,15 @@
 # FaceLogin Model Download Script
 # Downloads the model files required by the v1.5 pipeline:
-#   - det_34g_gnkps.onnx   (SCRFD 34g group-norm keypoints detector, ~39 MB)
+#   - det_10g_gnkps.onnx   (SCRFD 10g group-norm keypoints detector, ~15.5 MB)
 #   - w600k_r50.onnx       (InsightFace ResNet50 recognizer, ~174 MB)
+#
+# NOTE on det_10g_gnkps.onnx: the source repo (kunkunlin1221/face-detection_scrfd-10g-gnkps)
+# exports with two convention differences vs the C++ decoder: outputs interleaved
+# per stride (box_8/score_8/lmk5pt_8, ...) AND box/lmk pre-scaled by stride
+# (Mul(8/16/32) inside the graph — decoding would place keypoints stride-times
+# too far out). scripts/normalize_scrfd_export.py strips the Muls and reorders
+# the outputs; run it after downloading. (The 34g detector it replaced was
+# already in the decoder's convention — see git history.)
 #
 # The OULU anti-spoof model (OULU_Protocol_2_model_0_0.onnx) is small and
 # bundled with the installer, so it is not fetched here.
@@ -28,9 +36,9 @@ New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
 # Model URLs (verified 2026-08-05; byte sizes are exact)
 $models = @(
     @{
-        Name = "det_34g_gnkps.onnx"
-        Url  = "https://hf-mirror.com/RuteNL/SCRFD-face-detection-ONNX/resolve/main/34g_gnkps.onnx"
-        Size = 39424525
+        Name = "det_10g_gnkps.onnx"
+        Url  = "https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/main/scrfd_10g_gnkps_fp32.onnx"
+        Size = 16273449
     },
     @{
         Name = "w600k_r50.onnx"
@@ -77,7 +85,7 @@ Write-Host ""
 Write-Host "Models location: $ModelsDir"
 Write-Host ""
 Write-Host "Required files:"
-Write-Host "  1. det_34g_gnkps.onnx (~39 MB)"
+Write-Host "  1. det_10g_gnkps.onnx (~15.5 MB; normalize with scripts/normalize_scrfd_export.py)"
 Write-Host "  2. w600k_r50.onnx (~174 MB)"
 Write-Host "  3. OULU_Protocol_2_model_0_0.onnx (bundled with the installer)"
 Write-Host ""

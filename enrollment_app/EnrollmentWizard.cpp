@@ -270,8 +270,9 @@ bool EnrollmentWizard::StartPreview() {
 
     // Load SCRFD ONNX detector (gnkps variant — provides the 5 alignment
     // keypoints directly; no separate landmark model anymore).
+    // 10g tier: ~3.4x faster than 34g at -1% WIDER Face (96.17→95.19).
     m_onnxDetector = std::make_unique<OnnxDetector>();
-    std::wstring detPath = modelsDir + L"\\det_34g_gnkps.onnx";
+    std::wstring detPath = modelsDir + L"\\det_10g_gnkps.onnx";
     if (!m_onnxDetector->Initialize(detPath)) {
         FACELOGIN_ERROR(L"SCRFD detector failed to load — enrollment unavailable");
         m_webcam->Shutdown();
