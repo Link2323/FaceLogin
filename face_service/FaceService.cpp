@@ -535,36 +535,24 @@ bool FaceService::ProcessAuthRequest() {
 
         // (grabFrame above already applied camera rotation)
 
-        // Per-stage timing (A0): lets -standalone measure detect/embed cost
-        // per frame, for comparing detector/thread settings.
-        auto tDetect = std::chrono::steady_clock::now();
-
         // Face detection: SCRFD detects and yields the 5 keypoints directly
         // (gnkps variant) — no separate landmark model. Alignment to 112×112
         // happens inside ComputeEmbedding via a similarity transform.
         std::optional<CredentialStore::MatchResult> match;
 
         auto onnxDet = m_onnxDetector->DetectLargestFace(frame);
-        long long detectMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - tDetect).count();
         if (!onnxDet) {
-            FACELOGIN_INFO(L"Frame perf: detect=%lldms (no face)", detectMs);
             std::this_thread::sleep_for(std::chrono::milliseconds(30));
             continue;
         }
 
         // Embedding + match: ONNX (the only recognizer).
-        auto tEmbed = std::chrono::steady_clock::now();
         auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, onnxDet->kps);
         if (!onnxEmb.empty()) {
             // Pass the true dimensionality (512-D) so FindBestMatch compares
             // against same-dimension stored embeddings only.
             match = m_store->FindBestMatch(onnxEmb.data(), onnxEmb.size(), m_matchThreshold);
         }
-        long long embedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - tEmbed).count();
-        FACELOGIN_INFO(L"Frame perf: detect=%lldms embed+match=%lldms",
-                       detectMs, embedMs);
 
         if (match) {
             consecutiveMatches++;
@@ -577,22 +565,6 @@ bool FaceService::ProcessAuthRequest() {
                 continue;
             }
         } else {
-            // Diagnosis aid: nearest stored-face distance on every miss
-            // (DEBUG level only — invisible in service mode). Also feeds the
-            // r50 other-person/photo distance calibration TODO.
-            {
-                float nearest = 1e10f;
-                for (const auto& u : m_store->GetUsers()) {
-                    for (const auto& f : u.faces) {
-                        if (f.embedding.size() != onnxEmb.size()) continue;
-                        float d = m_onnxRecognizer->Distance(f.embedding, onnxEmb.data());
-                        if (d < nearest) nearest = d;
-                    }
-                }
-                if (nearest < 1e9f)
-                    FACELOGIN_INFO(L"No match: nearest distance=%.4f (threshold=%.2f)",
-                                   nearest, m_matchThreshold);
-            }
             // Soft consensus: a miss DECAYS the counter by 1 instead of fully
             // resetting to 0. A single intermittent bad frame (motion, blink,
             // momentary profile turn, partial occlusion) then no longer forces
@@ -689,10 +661,6 @@ bool FaceService::ProcessAuthRequest() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
                     livenessPassed = (totalChecked > 0 && passCount >= passRequired);
-                    long long asMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - asStart).count();
-                    FACELOGIN_INFO(L"Anti-spoof stage: %d/%d passed in %lldms",
-                                   passCount, totalChecked, asMs);
                     if (!livenessPassed) {
                         FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
                                        passCount, totalChecked, passRequired);
@@ -762,11 +730,6 @@ bool FaceService::ProcessAuthRequest() {
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     }
-
-                    long long verifyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - verifyStart).count();
-                    FACELOGIN_INFO(L"Final verify stage: %s in %lldms",
-                                   verifyOk ? L"passed" : L"failed", verifyMs);
 
                     if (!verifyOk) {
                         FACELOGIN_WARN(L"Final match verify failed \u2014 face swap detected");
