@@ -168,13 +168,7 @@ inline float EstimateYawDeg(const float kps[10]) {
     float eyeDist = std::sqrt((rex - lex) * (rex - lex) + (rey - ley) * (rey - ley));
     if (eyeDist < 1e-4f) return 0.0f;
 
-    // Calibrated on 2026-08-05 with the developer's face: at actual 30° turns,
-    // k=1.86 read −27° (right) and +28.5° (left). Per-side k implied: 2.11
-    // (right) / 1.98 (left); k=2.05 balances both (reads +29.2 / +30.8). The
-    // model is exact under weak perspective, so the estimate tracks the true
-    // angle up to ~35°; beyond that it underestimates slightly (perspective +
-    // landmark position), which the enrollment gate's ±10° tolerance absorbs.
-    constexpr float kYawCalibration = 2.05f;  // eyeDist/protrusion ratio (measured)
+    constexpr float kYawCalibration = 1.86f;  // eyeDist/protrusion ratio (measured)
     return std::atan(kYawCalibration * (nx - midX) / eyeDist) * 180.0f / 3.14159265358979f;
 }
 
