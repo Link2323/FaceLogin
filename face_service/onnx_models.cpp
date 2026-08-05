@@ -5,8 +5,25 @@
 #include <fstream>
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <cstdlib>
 
 namespace facelogin {
+
+// ONNX intra-op thread count. Defaults to the machine's logical cores (capped
+// at 8 — beyond that sync overhead eats the gains on these models), so the
+// 34/10 GFLOPs SCRFD detector isn't stuck on 2 threads. Overridable via the
+// FACELOGIN_ONNX_THREADS env var (e.g. to sweep 2/4/6/8 when benchmarking).
+static int OnnxThreadCount() {
+    if (const char* env = std::getenv("FACELOGIN_ONNX_THREADS")) {
+        int n = std::atoi(env);
+        if (n > 0) return n;
+    }
+    int n = static_cast<int>(std::thread::hardware_concurrency());
+    if (n <= 0) return 2;   // query failed — conservative default
+    if (n > 8) return 8;
+    return n;
+}
 
 // ============================================================================
 // Low-light enhancement (shared by recognizer + anti-spoof)
@@ -56,7 +73,7 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
     try {
         m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLogin");
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(2);
+        opts.SetIntraOpNumThreads(OnnxThreadCount());
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         std::wstring wpath(modelPath.begin(), modelPath.end());
@@ -182,7 +199,7 @@ bool OnnxDetector::Initialize(const std::wstring& modelPath) {
     try {
         m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLogin");
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(2);
+        opts.SetIntraOpNumThreads(OnnxThreadCount());
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         std::wstring wpath(modelPath.begin(), modelPath.end());
@@ -449,7 +466,7 @@ bool OnnxAntiSpoof::Initialize(const std::wstring& modelPath) {
     try {
         m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLogin");
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(2);
+        opts.SetIntraOpNumThreads(OnnxThreadCount());
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         std::wstring wpath(modelPath.begin(), modelPath.end());
