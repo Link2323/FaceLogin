@@ -26,9 +26,31 @@
 // re-enumerate and call GetSerialization(), which then packs and returns
 // the ready credentials.
 //
+// Trigger algorithm (auto-trigger after dismiss):
+//   The first keypress that dismisses the lock-screen wallpaper generates a
+//   burst of input (KEYDOWN + KEYUP, the latter arriving up to ~500ms after
+//   our baseline recorded between KEYDOWN and KEYUP during DLL load).  We
+//   cannot tell from GetLastInputInfo() whether a tick belongs to that
+//   dismiss-burst or to a later intentional press, so we must wait until the
+//   dismiss-burst has FULLY ended before doing anything -- otherwise the
+//   KEYUP would fire StartAuth() prematurely.
+//
+//   "Fully ended" = no new input for QUIESCE_MS.  Once the dismiss wave goes
+//   quiet, we StartAuth() IMMEDIATELY -- the user does NOT need to press a
+//   second key.  Their single dismiss press is treated as the trigger.
+//   (Trade-off: there is no way to "just dismiss" without starting face
+//   recognition.  Dismissing the lock screen always starts auth.)
+//
+//   State per iteration:
+//     lastInputTick     — highest input timestamp seen so far (>= baseline)
+//     lastInputEndWall  — wall-clock tick of when we last saw a new input
+//     armed             — true once the dismiss wave has gone quiet for
+//                          QUIESCE_MS; on becoming true we fire StartAuth()
+//                          right away and exit the loop.
+//
 // The thread stops when:
-//   - New input is detected and StartAuth() is called, OR
-//   - The stop event is signaled (UnAdvise / destructor / 30s timeout), OR
+//   - The dismiss wave goes quiet and StartAuth() is auto-triggered, OR
+//   - The stop event is signaled (UnAdvise / destructor), OR
 //   - UnAdvise() sets m_pCredentialEvents = nullptr and the thread notices
 
 struct InputDetectionContext {
@@ -40,11 +62,20 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     FaceLoginCredential* pCred = ctx->pCred;
     delete ctx;
 
-    FACELOGIN_INFO(L"[InputThread] Started — polling for user input every 200ms");
+    FACELOGIN_INFO(L"[InputThread] Started — polling for user input every 100ms");
 
-    const DWORD pollIntervalMs = 200;
+    const DWORD pollIntervalMs = 100;
+    const DWORD QUIESCE_MS = 400;   // gap that ends an input "wave"
     const DWORD timeoutSec = 30;
     DWORD startTick = GetTickCount();
+
+    // Adaptive-quiescence state.  lastInputTick is seeded with the baseline
+    // so any input that occurred BEFORE our DLL loaded (i.e. the dismiss
+    // KEYDOWN) is ignored and never counts as a new wave.
+    DWORD baseline = pCred->m_waitingStartTick;
+    DWORD lastInputTick = baseline;     // input-timestamp space (GetLastInputInfo)
+    DWORD lastInputEndWall = 0;         // wall-clock space (GetTickCount)
+    bool armed = false;                 // current wave has gone quiet
 
     // Loop forever (until the stop event is signaled).  The 30s timeout does
     // NOT kill the thread — it only restarts the idle window so a user who
@@ -60,11 +91,16 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         // Idle-window timeout: restart the window instead of exiting, so a
         // late keypress still works. (Previously the thread exited after 30s
         // of no input, leaving no path to restart it — a later keypress did
-        // nothing.)
+        // nothing.)  Also reset the adaptive state so the next wave is
+        // evaluated cleanly.
         DWORD elapsedMs = GetTickCount() - startTick;
         if (elapsedMs > timeoutSec * 1000) {
             FACELOGIN_INFO(L"[InputThread] 30s idle — restarting idle window");
             startTick = GetTickCount();
+            baseline = pCred->m_waitingStartTick;
+            lastInputTick = baseline;
+            lastInputEndWall = 0;
+            armed = false;
             continue;
         }
 
@@ -72,17 +108,33 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         LASTINPUTINFO lii = {};
         lii.cbSize = sizeof(lii);
         if (GetLastInputInfo(&lii)) {
-            // 1s threshold: the first keypress to dismiss the lock-screen
-            // wallpaper generates both KEYDOWN and KEYUP events.  KEYUP
-            // arrives up to ~500ms after our baseline (recorded between
-            // KEYDOWN and KEYUP during DLL load).  We require >1000ms
-            // past baseline, which cleanly skips KEYUP while still
-            // detecting the user's genuine second keystroke.
-            DWORD threshold = pCred->m_waitingStartTick + 2000;
-            if (lii.dwTime > threshold) {
-                FACELOGIN_INFO(L"[InputThread] NEW input detected! (last=%lu > threshold=%lu, diff=%ld)",
-                              lii.dwTime, threshold,
-                              static_cast<LONG>(lii.dwTime - pCred->m_waitingStartTick));
+            bool newInput = (lii.dwTime > lastInputTick);
+
+            if (newInput) {
+                // Part of (or the start of) the dismiss wave (KEYDOWN/KEYUP).
+                // Note the wall-clock moment we saw it so we can detect when
+                // the wave goes quiet, then auto-trigger.
+                lastInputTick = lii.dwTime;
+                lastInputEndWall = GetTickCount();
+                armed = false;
+            }
+
+            // Arm once the current wave has been quiet for QUIESCE_MS.
+            // lastInputEndWall==0 means we've never seen a post-baseline
+            // input yet, so there's nothing to arm against.
+            if (!armed && lastInputEndWall != 0 &&
+                GetTickCount() - lastInputEndWall >= QUIESCE_MS) {
+                armed = true;
+                FACELOGIN_INFO(L"[InputThread] Dismiss wave quiet for %lums — "
+                              L"auto-triggering (no second keypress required)",
+                              QUIESCE_MS);
+                // Auto-trigger: the dismiss wave (KEYDOWN+KEYUP) has fully
+                // ended, so the user's single dismiss press is enough.
+                // Start auth immediately instead of waiting for another wave.
+                FACELOGIN_INFO(L"[InputThread] Auto-triggered after dismiss "
+                              L"(last=%lu, baseline=%lu, elapsed=%lums)",
+                              lastInputTick, baseline,
+                              static_cast<DWORD>(lastInputTick - baseline));
                 pCred->StartAuth();
                 break;
             }
