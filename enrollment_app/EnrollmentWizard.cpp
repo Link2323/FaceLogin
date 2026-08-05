@@ -17,6 +17,7 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 #include <chrono>
 
 #pragma comment(lib, "ole32.lib")
@@ -238,7 +239,6 @@ EnrollmentWizard::EnrollmentWizard() {
     }
 
     m_webcam     = std::make_unique<WebcamCapture>();
-    m_detector   = std::make_unique<FaceDetector>();
     m_store.SetDataDir(m_dataDir);
 
     m_config = LoadConfig(m_dataDir);
@@ -267,17 +267,11 @@ bool EnrollmentWizard::StartPreview() {
     }
 
     std::wstring modelsDir = m_dataDir + L"\\models";
-    std::wstring shapePath = modelsDir + L"\\shape_predictor_68_face_landmarks.dat";
 
-    if (!m_detector->Initialize(shapePath)) {
-        FACELOGIN_ERROR(L"Failed to load shape predictor");
-        m_webcam->Shutdown();
-        return false;
-    }
-
-    // Load SCRFD ONNX detector (the only detector).
+    // Load SCRFD ONNX detector (gnkps variant — provides the 5 alignment
+    // keypoints directly; no separate landmark model anymore).
     m_onnxDetector = std::make_unique<OnnxDetector>();
-    std::wstring detPath = modelsDir + L"\\det_500m.onnx";
+    std::wstring detPath = modelsDir + L"\\det_34g_gnkps.onnx";
     if (!m_onnxDetector->Initialize(detPath)) {
         FACELOGIN_ERROR(L"SCRFD detector failed to load — enrollment unavailable");
         m_webcam->Shutdown();
@@ -286,7 +280,7 @@ bool EnrollmentWizard::StartPreview() {
 
     // Load InsightFace ONNX recognizer (the only recognizer).
     m_onnxRecognizer = std::make_unique<OnnxRecognizer>();
-    std::wstring onnxPath = modelsDir + L"\\w600k_mbf.onnx";
+    std::wstring onnxPath = modelsDir + L"\\w600k_r50.onnx";
     if (!m_onnxRecognizer->Initialize(onnxPath)) {
         FACELOGIN_ERROR(L"ONNX recognizer failed to load — enrollment unavailable");
         m_webcam->Shutdown();
@@ -306,14 +300,18 @@ bool EnrollmentWizard::StartPreview() {
     // dlib recognizer/detector were removed — pure ONNX. recognition_model
     // and detector config values are ignored.
 
-    // Validate liveness method
+    // Validate liveness method — no blink fallback anymore (the dlib 68-point
+    // model is gone). Anti-spoof unavailable → liveness off.
+    if (m_livenessMethod == LivenessMethod::Blink) {
+        FACELOGIN_WARN(L"liveness_method=blink no longer supported (dlib 68-point removed) — using anti-spoof");
+        m_livenessMethod = LivenessMethod::AntiSpoof;
+    }
     if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-        FACELOGIN_WARN(L"Anti-spoof configured but unavailable, falling back to blink");
-        m_livenessMethod = LivenessMethod::Blink;
+        FACELOGIN_WARN(L"Anti-spoof configured but unavailable — liveness disabled (insecure)");
+        m_livenessMethod = LivenessMethod::None;
     }
 
     FACELOGIN_INFO(L"Liveness method: %hs | Preview started: 1280x720",
-                  m_livenessMethod == LivenessMethod::Blink ? "blink" :
                   m_livenessMethod == LivenessMethod::AntiSpoof ? "antispoof" : "none");
 
     m_previewRunning = true;
@@ -337,13 +335,13 @@ bool EnrollmentWizard::StartPreview() {
             if (m_onnxDetector) {
                 auto det = m_onnxDetector->DetectLargestFace(frame);
                 if (det) {
-                    std::vector<facelogin::FaceWithLandmarks> faces;
-                    FaceWithLandmarks fwl;
+                    std::vector<facelogin::FaceWithKps> faces;
+                    FaceWithKps fwl;
                     fwl.rect = dlib::rectangle(static_cast<long>(det->x1),
                                                static_cast<long>(det->y1),
                                                static_cast<long>(det->x2),
                                                static_cast<long>(det->y2));
-                    fwl.landmarks = m_detector->GetLandmarks(frame, fwl.rect);
+                    for (int k = 0; k < 10; k++) fwl.kps[k] = det->kps[k];
                     faces.push_back(std::move(fwl));
                     faceJson = FacesToJson(faces);
                 }
@@ -502,7 +500,7 @@ std::string EnrollmentWizard::EncodeJPEGBase64(const dlib::matrix<dlib::rgb_pixe
 // ============================================================================
 
 std::string EnrollmentWizard::FacesToJson(
-    const std::vector<facelogin::FaceWithLandmarks>& faces) {
+    const std::vector<facelogin::FaceWithKps>& faces) {
     std::ostringstream js;
     js << "[";
     for (size_t fi = 0; fi < faces.size(); fi++) {
@@ -514,12 +512,20 @@ std::string EnrollmentWizard::FacesToJson(
            << ",\"w\":" << static_cast<int>(f.rect.width())
            << ",\"h\":" << static_cast<int>(f.rect.height())
            << ",\"landmarks\":[";
-        for (unsigned long i = 0; i < f.landmarks.num_parts(); i++) {
+        for (int i = 0; i < 5; i++) {
             if (i > 0) js << ",";
-            js << static_cast<int>(f.landmarks.part(i).x()) << ","
-               << static_cast<int>(f.landmarks.part(i).y());
+            js << static_cast<int>(f.kps[i * 2]) << ","
+               << static_cast<int>(f.kps[i * 2 + 1]);
         }
-        js << "]}";
+        js << "]";
+        // Estimated head yaw in degrees (positive = turned toward own left).
+        // Exposed for the preview overlay and multi-angle enrollment gating.
+        js << ",\"yaw\":" << EstimateYawDeg(f.kps);
+        // While capturing, the JS overlay color-codes the yaw readout against
+        // this angle's gate.
+        if (m_capturing)
+            js << ",\"targetYaw\":" << kAngleTargets[m_captureAngle];
+        js << "}";
     }
     js << "]";
     return js.str();
@@ -538,29 +544,44 @@ std::string EnrollmentWizard::GetUsername() const {
     return result;
 }
 
-bool EnrollmentWizard::CaptureFaceSamples() {
+bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
     if (m_capturing) return false;
+    if (angleIndex < 0 || angleIndex > 2) {
+        FACELOGIN_ERROR(L"CaptureFaceSamples: invalid angle %d", angleIndex);
+        return false;
+    }
 
     // Join previous capture thread if it exists (prevents std::terminate on reassignment)
     if (m_captureThread.joinable())
         m_captureThread.join();
 
     m_capturing = true;
-    m_samplesCollected = 0;
-    m_embeddings.clear();
+    m_captureAngle = angleIndex;
+    if (angleIndex == 0) {
+        // New capture round: reset everything. Later angles append to the
+        // flat m_embeddings vector (grouped in angle order).
+        m_samplesCollected = 0;
+        m_embeddings.clear();
+        m_angleSampleCounts[0] = m_angleSampleCounts[1] = m_angleSampleCounts[2] = 0;
+    }
     m_livenessPassed = false;
-    m_livenessChecking = true;
+    m_livenessChecking = (angleIndex == 0);
 
-    m_captureThread = std::thread([this]() {
-        // Phase 1: Liveness check (blink, anti-spoof, or none)
+    m_captureThread = std::thread([this, angleIndex]() {
+        // Phase 1: Liveness check — only at the front position (angle 0).
+        // Later angles skip it: identity was already proven at the front;
+        // they only add pose coverage.
         LivenessMethod method = m_livenessMethod;
-        FACELOGIN_INFO(L"Enrollment: starting liveness check (method=%hs)",
-                      method == LivenessMethod::Blink ? "blink" :
-                      method == LivenessMethod::AntiSpoof ? "antispoof" : "none");
-
         bool livenessPassed = false;
 
-        if (method == LivenessMethod::None) {
+        if (angleIndex == 0) {
+            FACELOGIN_INFO(L"Enrollment: starting liveness check (method=%hs)",
+                          method == LivenessMethod::AntiSpoof ? "antispoof" : "none");
+        }
+
+        if (angleIndex != 0) {
+            livenessPassed = true;
+        } else if (method == LivenessMethod::None) {
             livenessPassed = true;
         } else if (method == LivenessMethod::AntiSpoof) {
             int totalChecks = AntiSpoofCheckCount(m_antiSpoofThreshold);
@@ -579,19 +600,15 @@ bool EnrollmentWizard::CaptureFaceSamples() {
                     if (m_latestFrame.size() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
                     frame = m_latestFrame;
                 }
-                // Detect with SCRFD, extract 68-point landmarks.
-                dlib::full_object_detection asLandmarks;
+                // Detect with SCRFD — the bbox is enough for DeepPixBiS.
                 auto asDet = m_onnxDetector->DetectLargestFace(frame);
-                if (asDet) {
-                    dlib::rectangle asRect(static_cast<long>(asDet->x1),
-                                           static_cast<long>(asDet->y1),
-                                           static_cast<long>(asDet->x2),
-                                           static_cast<long>(asDet->y2));
-                    asLandmarks = m_detector->GetLandmarks(frame, asRect);
-                }
-                if (asLandmarks.num_parts() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
+                if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
 
-                float score = m_antiSpoof->Predict(frame, asLandmarks);
+                float score = m_antiSpoof->Predict(frame,
+                    dlib::rectangle(static_cast<long>(asDet->x1),
+                                    static_cast<long>(asDet->y1),
+                                    static_cast<long>(asDet->x2),
+                                    static_cast<long>(asDet->y2)));
                 totalChecked++;
                 if (score >= m_antiSpoofThreshold) passCount++; // config-driven threshold
                 FACELOGIN_INFO(L"Enrollment anti-spoof frame %d: score=%.3f (pass=%d)",
@@ -600,42 +617,8 @@ bool EnrollmentWizard::CaptureFaceSamples() {
             }
             livenessPassed = (totalChecked > 0 && passCount >= passRequired);
         } else {
-            // blink (default)
-            LivenessDetector liveness;
-            liveness.Configure(kDefaultEarThreshold, kDefaultBlinkFrames,
-                               m_config.blink_glasses_mode);
-            auto livenessStart = std::chrono::steady_clock::now();
-            bool blinked = false;
-            while (m_capturing && !blinked) {
-                auto elapsed = std::chrono::steady_clock::now() - livenessStart;
-                if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= 8) {
-                    FACELOGIN_WARN(L"Enrollment liveness timeout");
-                    break;
-                }
-                dlib::matrix<dlib::rgb_pixel> frame;
-                {
-                    std::lock_guard<std::mutex> lock(m_frameCacheMutex);
-                    if (m_latestFrame.size() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
-                    frame = m_latestFrame;
-                }
-                // Detect with SCRFD, extract 68-point landmarks for EAR.
-                dlib::full_object_detection livenessLandmarks;
-                auto livenessDet = m_onnxDetector->DetectLargestFace(frame);
-                if (livenessDet) {
-                    dlib::rectangle lRect(static_cast<long>(livenessDet->x1),
-                                          static_cast<long>(livenessDet->y1),
-                                          static_cast<long>(livenessDet->x2),
-                                          static_cast<long>(livenessDet->y2));
-                    livenessLandmarks = m_detector->GetLandmarks(frame, lRect);
-                }
-                if (livenessLandmarks.num_parts() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
-                if (liveness.ProcessFrame(livenessLandmarks)) {
-                    blinked = true;
-                    FACELOGIN_INFO(L"Enrollment: blink detected");
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(33));
-            }
-            livenessPassed = blinked;
+            // Unreachable: StartPreview maps Blink → AntiSpoof.
+            livenessPassed = false;
         }
 
         m_livenessChecking = false;
@@ -648,9 +631,16 @@ bool EnrollmentWizard::CaptureFaceSamples() {
 
         m_livenessPassed = true;
 
-        // Phase 2: Collect face samples
+        // Phase 2: Collect yaw-gated face samples for this angle. Frames are
+        // accepted only inside the gate (|yaw − target| ≤ 10°, face ≥ 60px,
+        // detection score ≥ 0.5) — out-of-gate frames are ignored, not failed.
+        const int targetYaw = kAngleTargets[angleIndex];
+        constexpr float kYawTolerance = 10.0f;
+        constexpr float kMinFaceSizePx = 60.0f;
+        constexpr float kMinDetScore = 0.5f;
+
         int failCount = 0;
-        for (int i = 0; i < TARGET_SAMPLES && m_capturing;) {
+        while (m_angleSampleCounts[angleIndex] < kAngleTargetFrames && m_capturing) {
             // Read the latest frame from the frame-grab thread (no camera contention)
             dlib::matrix<dlib::rgb_pixel> frame;
             {
@@ -662,27 +652,30 @@ bool EnrollmentWizard::CaptureFaceSamples() {
                 frame = m_latestFrame;
             }
 
-            // Detect with SCRFD (the only detector), extract 68-point landmarks.
-            dlib::full_object_detection landmarks;
+            // Detect with SCRFD — the 5 keypoints drive the alignment inside
+            // ComputeEmbedding (no landmark model).
             auto onnxDet = m_onnxDetector->DetectLargestFace(frame);
-            if (onnxDet) {
-                dlib::rectangle rect(static_cast<long>(onnxDet->x1),
-                                     static_cast<long>(onnxDet->y1),
-                                     static_cast<long>(onnxDet->x2),
-                                     static_cast<long>(onnxDet->y2));
-                landmarks = m_detector->GetLandmarks(frame, rect);
+            if (!onnxDet) {
+                if (++failCount > 600) { m_capturing = false; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
             }
-            if (landmarks.num_parts() == 0) {
-                if (++failCount > 300) { m_capturing = false; break; }
+
+            // Yaw gate: only frames near the target angle count as samples.
+            m_lastYaw = EstimateYawDeg(onnxDet->kps);
+            const float faceW = onnxDet->x2 - onnxDet->x1;
+            if (std::abs(m_lastYaw - targetYaw) > kYawTolerance ||
+                faceW < kMinFaceSizePx || onnxDet->score < kMinDetScore) {
+                failCount = 0;   // waiting for the user to turn — not a failure
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
 
             // Compute the embedding with InsightFace ONNX (the only recognizer).
             // Store the FULL 512-D embedding (no truncation).
-            auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, landmarks);
+            auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, onnxDet->kps);
             if (onnxEmb.empty()) {
-                if (++failCount > 300) { m_capturing = false; break; }
+                if (++failCount > 600) { m_capturing = false; break; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -693,7 +686,8 @@ bool EnrollmentWizard::CaptureFaceSamples() {
 
             failCount = 0;
             m_embeddings.push_back(std::move(emb));
-            m_samplesCollected = ++i;
+            m_angleSampleCounts[angleIndex]++;
+            m_samplesCollected++;
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
         }
         m_capturing = false;
@@ -726,6 +720,27 @@ static std::string WstrToUtf8Escaped(const std::wstring& ws) {
         }
     }
     return out;
+}
+
+// ============================================================================
+// Multi-angle capture status (polled by JS during capture)
+// ============================================================================
+
+std::string EnrollmentWizard::GetCaptureStatus() {
+    static constexpr const wchar_t* kAngleLabels[3] = {L"正面", L"左转", L"右转"};
+    std::ostringstream js;
+    int total = m_angleSampleCounts[0] + m_angleSampleCounts[1] + m_angleSampleCounts[2];
+    js << "{\"angle\":" << m_captureAngle
+       << ",\"label\":\"" << WstrToUtf8(kAngleLabels[m_captureAngle]) << "\""
+       << ",\"targetYaw\":" << kAngleTargets[m_captureAngle]
+       << ",\"collected\":" << m_angleSampleCounts[m_captureAngle]
+       << ",\"target\":" << kAngleTargetFrames
+       << ",\"yaw\":" << m_lastYaw
+       << ",\"total\":" << total
+       << ",\"livenessChecking\":" << (m_livenessChecking ? "true" : "false")
+       << ",\"livenessPassed\":" << (m_livenessPassed ? "true" : "false")
+       << ",\"done\":" << (m_capturing ? "false" : "true") << "}";
+    return js.str();
 }
 
 // Notify the FaceLogin service to reload the user database after a write.
@@ -876,103 +891,129 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
                                           const std::wstring& label) {
     if (m_embeddings.empty()) { FACELOGIN_ERROR(L"No face samples"); return false; }
 
-    // Embedding consistency check: verify all samples are from the same person.
-    // Compute average pairwise distance — if it exceeds the cap, reject.
-    // Same-person distances are typically well below 0.80 (the ONNX boundary);
-    // different people exceed it.
-    //
-    // The cap is calibrated via EmbeddingThresholdForDim: 512-D InsightFace
-    // ONNX uses 0.80 (measured same-person boundary, see credential_store.h).
-    {
-        double totalDist = 0.0;
-        int pairs = 0;
-        for (size_t i = 0; i < m_embeddings.size(); i++) {
-            for (size_t j = i + 1; j < m_embeddings.size(); j++) {
-                double sum = 0.0;
-                for (long k = 0; k < m_embeddings[i].size(); k++) {
-                    double diff = m_embeddings[i](k) - m_embeddings[j](k);
-                    sum += diff * diff;
-                }
-                totalDist += std::sqrt(sum);
-                pairs++;
-            }
-        }
-        double avgPairDist = (pairs > 0) ? totalDist / pairs : 0.0;
-        // All samples share one dimensionality (enrollment uses one recognizer).
-        size_t dim = m_embeddings.empty() ? 0 : static_cast<size_t>(m_embeddings[0].size());
-        float maxAllowed = EmbeddingThresholdForDim(0.45f, dim);
-        FACELOGIN_INFO(L"Enrollment consistency: avg pairwise dist=%.4f (max=%.3f, %d pairs, %zu-D)",
-                      avgPairDist, maxAllowed, pairs, dim);
-        if (avgPairDist > maxAllowed) {
-            FACELOGIN_ERROR(L"Embedding consistency check failed: avg pairwise dist %.4f > %.3f. "
-                           L"Samples may be from different faces.", avgPairDist, maxAllowed);
-            return false;
-        }
+    // Group samples by capture angle. Capture is sequential, so the flat
+    // m_embeddings vector is already grouped in angle order.
+    struct AngleGroup { size_t begin; size_t count; const wchar_t* label; };
+    static constexpr const wchar_t* kAngleLabels[3] = {L"正面", L"左转", L"右转"};
+    std::vector<AngleGroup> groups;
+    size_t begin = 0;
+    for (int a = 0; a < 3; a++) {
+        if (m_angleSampleCounts[a] > 0)
+            groups.push_back({begin, static_cast<size_t>(m_angleSampleCounts[a]), kAngleLabels[a]});
+        begin += m_angleSampleCounts[a];
     }
+    if (groups.empty()) { FACELOGIN_ERROR(L"No face samples"); return false; }
+    const bool multiAngle = groups.size() > 1;
 
-    // Average the samples. Initialize to the samples' dimensionality — the
-    // matrix adds require matching sizes (dlib asserts otherwise).
-    dlib::matrix<float, 0, 1> avgEmbedding;
-    if (!m_embeddings.empty()) {
-        avgEmbedding.set_size(m_embeddings[0].size());
-        avgEmbedding = 0;
-        for (const auto& emb : m_embeddings) {
-            if (emb.size() != avgEmbedding.size()) continue;  // defensive
-            avgEmbedding += emb;
-        }
-        avgEmbedding /= static_cast<float>(m_embeddings.size());
-    }
+    // All samples share one dimensionality (enrollment uses one recognizer).
+    size_t dim = static_cast<size_t>(m_embeddings[0].size());
 
     m_store.LoadDatabase();
 
-    // Copy the average embedding into a plain float vector (full dimensionality —
-    // 512-D for ONNX, 128-D for dlib). Never truncate.
-    std::vector<float> ef(static_cast<size_t>(avgEmbedding.size()));
-    for (long i = 0; i < avgEmbedding.size(); i++)
-        ef[static_cast<size_t>(i)] = avgEmbedding(static_cast<long>(i));
+    // Consistency + averaging are done PER ANGLE GROUP — cross-angle samples
+    // are NEVER averaged (the embedding space is pose-sensitive; a cross-angle
+    // average drifts toward the match boundary, see docs/side-face-plan-v2).
+    for (size_t gi = 0; gi < groups.size(); gi++) {
+        const AngleGroup& g = groups[gi];
 
-    // create-or-append (1.3.0): the same account may hold several faces.
-    // First-time enrollment stores the (protected) password and face #1;
-    // subsequent enrollments APPEND a face and leave the stored password
-    // untouched (the user is the logged-on session owner, already trusted).
-    size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
-    uint32_t newFaceId = 0;
-    if (idx >= m_store.GetUsers().size()) {
-        // First face for this account — protect the password now.
-        std::vector<uint8_t> protectedPassword;
-        if (passwordless) {
-            protectedPassword = { facelogin::kPasswordlessSentinelByte };
-            FACELOGIN_INFO(L"Storing passwordless enrollment (sentinel) for %s",
-                           m_username.c_str());
+        // Embedding consistency check: verify all samples in this angle group
+        // are from the same person. Compute average pairwise distance — if it
+        // exceeds the cap, reject.
+        // Same-person distances are typically well below 0.80 (the ONNX
+        // boundary); different people exceed it.
+        //
+        // The cap is calibrated via EmbeddingThresholdForDim: 512-D InsightFace
+        // ONNX uses 0.80 (measured same-person boundary, see credential_store.h).
+        {
+            double totalDist = 0.0;
+            int pairs = 0;
+            for (size_t i = g.begin; i < g.begin + g.count; i++) {
+                for (size_t j = i + 1; j < g.begin + g.count; j++) {
+                    double sum = 0.0;
+                    for (size_t k = 0; k < dim; k++) {
+                        double diff = m_embeddings[i](static_cast<long>(k)) -
+                                      m_embeddings[j](static_cast<long>(k));
+                        sum += diff * diff;
+                    }
+                    totalDist += std::sqrt(sum);
+                    pairs++;
+                }
+            }
+            double avgPairDist = (pairs > 0) ? totalDist / pairs : 0.0;
+            float maxAllowed = EmbeddingThresholdForDim(0.45f, dim);
+            FACELOGIN_INFO(L"Enrollment consistency [%ls]: avg pairwise dist=%.4f (max=%.3f, %d pairs, %zu-D)",
+                          g.label, avgPairDist, maxAllowed, pairs, dim);
+            if (avgPairDist > maxAllowed) {
+                FACELOGIN_ERROR(L"Enrollment consistency check failed [%ls]: avg pairwise dist %.4f > %.3f. "
+                               L"Samples may be from different faces.", g.label, avgPairDist, maxAllowed);
+                return false;
+            }
+        }
+
+        // Average this group's samples. Initialize to the samples'
+        // dimensionality — the matrix adds require matching sizes.
+        dlib::matrix<float, 0, 1> avgEmbedding;
+        avgEmbedding.set_size(static_cast<long>(dim));
+        avgEmbedding = 0;
+        for (size_t i = g.begin; i < g.begin + g.count; i++) {
+            const auto& emb = m_embeddings[i];
+            if (emb.size() != avgEmbedding.size()) continue;  // defensive
+            avgEmbedding += emb;
+        }
+        avgEmbedding /= static_cast<float>(g.count);
+
+        // Copy the average embedding into a plain float vector (full
+        // dimensionality — 512-D for ONNX). Never truncate.
+        std::vector<float> ef(static_cast<size_t>(avgEmbedding.size()));
+        for (long i = 0; i < avgEmbedding.size(); i++)
+            ef[static_cast<size_t>(i)] = avgEmbedding(static_cast<long>(i));
+
+        // create-or-append (1.3.0): the same account may hold several faces.
+        // First-time enrollment stores the (protected) password and face #1;
+        // subsequent enrollments APPEND a face and leave the stored password
+        // untouched (the user is the logged-on session owner, already trusted).
+        // In multi-angle mode each angle is one AddFace: the create branch
+        // runs for angle 0, the append branch for angles 1-2.
+        std::wstring groupLabel = multiAngle ? g.label : label;
+        size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+        uint32_t newFaceId = 0;
+        if (idx >= m_store.GetUsers().size()) {
+            // First face for this account — protect the password now.
+            std::vector<uint8_t> protectedPassword;
+            if (passwordless) {
+                protectedPassword = { facelogin::kPasswordlessSentinelByte };
+                FACELOGIN_INFO(L"Storing passwordless enrollment (sentinel) for %s",
+                               m_username.c_str());
+            } else {
+                protectedPassword = DpapiUtil::Protect(
+                    reinterpret_cast<const uint8_t*>(password.c_str()),
+                    static_cast<UINT>(password.size() * sizeof(wchar_t)));
+                if (protectedPassword.empty()) { FACELOGIN_ERROR(L"DPAPI encryption failed"); return false; }
+            }
+            if (!m_store.AddFace(m_username, m_upn, m_sid, protectedPassword, ef, groupLabel, &newFaceId)) {
+                FACELOGIN_ERROR(L"Failed to create enrollment for %s", m_username.c_str());
+                return false;
+            }
         } else {
-            protectedPassword = DpapiUtil::Protect(
-                reinterpret_cast<const uint8_t*>(password.c_str()),
-                static_cast<UINT>(password.size() * sizeof(wchar_t)));
-            if (protectedPassword.empty()) { FACELOGIN_ERROR(L"DPAPI encryption failed"); return false; }
+            // Append a face to an existing account. AddFace ignores the password
+            // argument here, so the stored password/sentinel is preserved.
+            if (m_store.GetUsers()[idx].faces.size() >= facelogin::kMaxFacesPerUser) {
+                FACELOGIN_ERROR(L"Cannot append: %s already has %zu faces (max %zu)",
+                                m_username.c_str(), m_store.GetUsers()[idx].faces.size(),
+                                facelogin::kMaxFacesPerUser);
+                return false;
+            }
+            if (!m_store.AddFace(m_username, m_upn, m_sid, {}, ef, groupLabel, &newFaceId)) {
+                FACELOGIN_ERROR(L"Failed to append face for %s", m_username.c_str());
+                return false;
+            }
         }
-        if (!m_store.AddFace(m_username, m_upn, m_sid, protectedPassword, ef, label, &newFaceId)) {
-            FACELOGIN_ERROR(L"Failed to create enrollment for %s", m_username.c_str());
-            return false;
-        }
-    } else {
-        // Append a face to an existing account. AddFace ignores the password
-        // argument here, so the stored password/sentinel is preserved.
-        if (m_store.GetUsers()[idx].faces.size() >= facelogin::kMaxFacesPerUser) {
-            FACELOGIN_ERROR(L"Cannot append: %s already has %zu faces (max %zu)",
-                            m_username.c_str(), m_store.GetUsers()[idx].faces.size(),
-                            facelogin::kMaxFacesPerUser);
-            return false;
-        }
-        if (!m_store.AddFace(m_username, m_upn, m_sid, {}, ef, label, &newFaceId)) {
-            FACELOGIN_ERROR(L"Failed to append face for %s", m_username.c_str());
-            return false;
-        }
+        FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D%s, angle=%ls)",
+                       m_username.c_str(), newFaceId, ef.size(),
+                       passwordless ? L", passwordless" : L"", g.label);
     }
-    if (!m_store.SaveDatabase()) { FACELOGIN_ERROR(L"Failed to save database"); return false; }
 
-    FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D%s)",
-                   m_username.c_str(), newFaceId, ef.size(),
-                   passwordless ? L", passwordless" : L"");
+    if (!m_store.SaveDatabase()) { FACELOGIN_ERROR(L"Failed to save database"); return false; }
 
     // Notify service to reload database
     HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_WRITE, 0, nullptr,
@@ -987,6 +1028,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
     }
     return true;
 }
+
 
 // ============================================================================
 // Multi-face management (1.3.0)

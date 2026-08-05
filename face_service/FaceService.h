@@ -5,8 +5,6 @@
 #include <memory>
 #include <atomic>
 
-#include "face_detector.h"
-#include "liveness_detector.h"
 #include "liveness_types.h"
 #include "onnx_models.h"
 #include "webcam_capture.h"
@@ -27,8 +25,9 @@ namespace facelogin {
 //   3. Run() is the main loop: accept pipe connections, process auth requests
 //
 // The face recognition pipeline:
-//   Webcam -> HOG face detection -> 68-point landmarks -> 128-D embedding
-//   -> Match against stored DB -> EAR blink liveness check -> Send credentials
+//   Webcam -> SCRFD detection (+5 keypoints) -> 5-point similarity alignment
+//   -> 512-D embedding -> Match against stored DB -> DeepPixBiS silent
+//   anti-spoof check -> Send credentials
 
 class FaceService {
 public:
@@ -65,7 +64,6 @@ private:
 
     // Components
     std::unique_ptr<PipeServer> m_pipeServer;
-    std::unique_ptr<FaceDetector> m_detector;           // 68-point shape predictor (landmarks)
     std::unique_ptr<OnnxDetector> m_onnxDetector;       // SCRFD (face detection)
     std::unique_ptr<OnnxRecognizer> m_onnxRecognizer;   // InsightFace (recognition)
     std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;        // MiniFASNetV2 (optional)
@@ -75,7 +73,7 @@ private:
 
     // Configuration
     AppConfig m_config;
-    LivenessMethod m_livenessMethod = LivenessMethod::Blink;
+    LivenessMethod m_livenessMethod = LivenessMethod::AntiSpoof;
     float m_antiSpoofThreshold = 0.30f;
 
     bool m_isServiceMode = false;  // set by ServiceMain

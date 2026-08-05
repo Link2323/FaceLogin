@@ -1,4 +1,5 @@
 #include "onnx_models.h"
+#include "face_align.h"
 #include "../common/logger.h"
 #include <dlib/image_transforms.h>
 #include <fstream>
@@ -143,12 +144,11 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
 }
 
 std::vector<float> OnnxRecognizer::ComputeEmbedding(
-    const dlib::matrix<dlib::rgb_pixel>& image,
-    const dlib::full_object_detection& landmarks) {
-    // Align face using dlib's chip extraction, then ONNX infer
-    auto chipDetails = dlib::get_face_chip_details(landmarks, 112, 0.25);
+    const dlib::matrix<dlib::rgb_pixel>& image, const float kps[10]) {
+    // Align via 5-point similarity transform (InsightFace convention), then
+    // ONNX infer. No landmark model involved — SCRFD provides the keypoints.
     dlib::matrix<dlib::rgb_pixel> faceChip;
-    dlib::extract_image_chip(image, chipDetails, faceChip);
+    if (!AlignFace5(image, kps, 112, faceChip)) return {};
     return ComputeEmbedding(faceChip);
 }
 
@@ -565,13 +565,12 @@ float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& faceChip) {
 }
 
 float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                              const dlib::full_object_detection& landmarks) {
+                              const dlib::rectangle& rect) {
     // DeepPixBiS works with a simple bbox crop (no landmark alignment).
     // Use a tight crop of the face bbox with a small 1.1x margin. Measured
     // empirically: the previous 1.5x half-size (3x total) included too much
     // background and drove real-face scores down to ~0.3-0.45, near the
     // threshold. A tight crop raises real scores to ~0.5-0.6+.
-    dlib::rectangle rect = landmarks.get_rect();
     long cx = rect.left() + rect.width() / 2;
     long cy = rect.top() + rect.height() / 2;
     long halfSize = static_cast<long>(std::max(rect.width(), rect.height()) / 2 * 1.1f);

@@ -5,7 +5,10 @@ build/
 vcpkg_installed/
 vcpkg/
 
-# Model files (large, downloaded separately)
+# Model files (large, downloaded separately — see scripts/download_models.ps1)
+# All ONNX models are excluded from the repo; the installer bundles them from
+# local disk via embed.FS, so a fresh clone needs to fetch them before building.
+*.onnx
 models/*.dat
 models/*.bz2
 
@@ -40,6 +43,7 @@ __pycache__/
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Wails
 installer/FaceLoginSetup/build/

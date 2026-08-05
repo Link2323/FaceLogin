@@ -302,6 +302,7 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"RenameFace") *ids = 29;
     else if (n == L"CheckAccountTypeChanged") *ids = 30;
     else if (n == L"RefreshAccountIdentity") *ids = 31;
+    else if (n == L"GetCaptureStatus") *ids = 32;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -353,7 +354,18 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 2:  m_wizard->StopPreview(); break;
         case 3:  if (res) *res = MakeInt(m_wizard->GetSampleCount()); break;
         case 4:  if (res) *res = MakeStr(m_wizard->GetUsername()); break;
-        case 5:  if (res) *res = MakeBool(m_wizard->CaptureFaceSamples()); break;
+        case 5: {
+            // Multi-angle capture: optional int argument = angle index
+            // (0=front, 1=left +30°, 2=right −30°); defaults to 0 when absent.
+            int angle = 0;
+            if (p->cArgs >= 1) {
+                if (p->rgvarg[0].vt == VT_I4)      angle = p->rgvarg[0].lVal;
+                else if (p->rgvarg[0].vt == VT_R8) angle = static_cast<int>(p->rgvarg[0].dblVal);
+                else return DISP_E_BADPARAMCOUNT;
+            }
+            if (res) *res = MakeBool(m_wizard->CaptureFaceSamples(angle));
+            break;
+        }
         case 6: {
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
@@ -438,6 +450,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             if (res) *res = MakeBool(m_wizard->RefreshAccountIdentity(pass));
             break;
         }
+        case 32: if (res) *res = MakeStr(m_wizard->GetCaptureStatus()); break;
         default: return DISP_E_MEMBERNOTFOUND;
         }
         return S_OK;

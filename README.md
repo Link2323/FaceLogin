@@ -178,10 +178,11 @@ wails build -clean -platform windows/amd64
 
 | 文件 | 用途 | 下载 |
 |---|---|---|
-| `shape_predictor_68_face_landmarks.dat` | 面部地标提取 | `scripts/download_models.ps1` |
-| `det_500m.onnx` | SCRFD 人脸检测 | [InsightFace](https://github.com/deepinsight/insightface) |
-| `w600k_mbf.onnx` | InsightFace 人脸识别 | [InsightFace](https://github.com/deepinsight/insightface) |
-| `OULU_Protocol_2_model_0_0.onnx` | 静默反欺诈 | [MiniFASNet](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing) |
+| `det_34g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体） | `scripts/download_models.ps1` |
+| `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入 | `scripts/download_models.ps1` |
+| `OULU_Protocol_2_model_0_0.onnx` | 静默反欺诈 | 随安装包分发 |
+
+> v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）。
 
 ---
 

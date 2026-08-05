@@ -1,11 +1,15 @@
 # FaceLogin Model Download Script
-# Downloads the required model files for face detection and recognition.
+# Downloads the model files required by the v1.5 pipeline:
+#   - det_34g_gnkps.onnx   (SCRFD 34g group-norm keypoints detector, ~39 MB)
+#   - w600k_r50.onnx       (InsightFace ResNet50 recognizer, ~174 MB)
 #
-# Prerequisites: 7-Zip installed at default location, or manually decompress .bz2 files.
+# The OULU anti-spoof model (OULU_Protocol_2_model_0_0.onnx) is small and
+# bundled with the installer, so it is not fetched here.
 #
-# Note: the recognition/detection models are ONNX (InsightFace SCRFD + w600k_mbf,
-# MiniFASNet anti-spoof) bundled with the installer. This script only downloads
-# the dlib shape predictor used for 68-point landmarks.
+# Sources are HuggingFace mirrors reachable from mainland China
+# (huggingface.co direct is blocked there; hf-mirror.com works).
+# The dlib 68-point shape predictor is no longer used (v1.5 replaced it with
+# SCRFD's own 5 keypoints — see docs/side-face-plan-v2.md).
 
 param(
     [string]$ModelsDir = "$env:ProgramData\FaceLogin\models"
@@ -21,62 +25,43 @@ Write-Host ""
 # Create directory
 New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
 
-# Model URLs
+# Model URLs (verified 2026-08-05; byte sizes are exact)
 $models = @(
     @{
-        Name = "shape_predictor_68_face_landmarks.dat"
-        Url  = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
-        Size = "~61 MB compressed, ~97 MB extracted"
+        Name = "det_34g_gnkps.onnx"
+        Url  = "https://hf-mirror.com/RuteNL/SCRFD-face-detection-ONNX/resolve/main/34g_gnkps.onnx"
+        Size = 39424525
+    },
+    @{
+        Name = "w600k_r50.onnx"
+        Url  = "https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/main/w600k_r50.onnx"
+        Size = 174383860
     }
 )
 
-# Check for 7-Zip
-$sevenZip = "$env:ProgramFiles\7-Zip\7z.exe"
-if (-not (Test-Path $sevenZip)) {
-    $sevenZip = "$env:ProgramFiles(x86)\7-Zip\7z.exe"
-}
-if (-not (Test-Path $sevenZip)) {
-    Write-Host "WARNING: 7-Zip not found at default location." -ForegroundColor Yellow
-    Write-Host "You can still download the .bz2 files manually and decompress them."
-    Write-Host "Download URLs are listed below."
-    $sevenZip = $null
-}
-
 foreach ($model in $models) {
-    $datFile = Join-Path $ModelsDir $model.Name
-    $bz2File = "$datFile.bz2"
+    $file = Join-Path $ModelsDir $model.Name
 
-    if (Test-Path $datFile) {
-        Write-Host "[SKIP] $($model.Name) already exists." -ForegroundColor Green
-        $fileInfo = Get-Item $datFile
-        Write-Host "       Size: $([math]::Round($fileInfo.Length / 1MB, 1)) MB"
-        continue
+    if (Test-Path $file) {
+        $fileInfo = Get-Item $file
+        if ($fileInfo.Length -eq $model.Size) {
+            Write-Host "[SKIP] $($model.Name) already exists (size OK)." -ForegroundColor Green
+            continue
+        }
+        Write-Host "[RESUME] $($model.Name) exists but size mismatch ($($fileInfo.Length) vs $($model.Size)). Redownloading." -ForegroundColor Yellow
     }
 
     Write-Host "[DOWNLOAD] $($model.Name)" -ForegroundColor Yellow
     Write-Host "  URL: $($model.Url)"
-    Write-Host "  Expected: $($model.Size)"
+    Write-Host "  Expected: $([math]::Round($model.Size / 1MB, 1)) MB"
 
     try {
-        Invoke-WebRequest -Uri $model.Url -OutFile $bz2File -ErrorAction Stop
-        Write-Host "  Download complete." -ForegroundColor Green
-
-        if ($sevenZip) {
-            Write-Host "  Extracting with 7-Zip..."
-            & $sevenZip e "$bz2File" -o"$ModelsDir" -y | Out-Null
-
-            if (Test-Path $datFile) {
-                Remove-Item $bz2File -Force
-                Write-Host "  Extraction complete. File ready." -ForegroundColor Green
-                $fileInfo = Get-Item $datFile
-                Write-Host "  Size: $([math]::Round($fileInfo.Length / 1MB, 1)) MB"
-            } else {
-                Write-Host "  ERROR: Extraction failed. The .bz2 file is at: $bz2File" -ForegroundColor Red
-                Write-Host "  Please decompress it manually." -ForegroundColor Red
-            }
+        Invoke-WebRequest -Uri $model.Url -OutFile $file -ErrorAction Stop
+        $fileInfo = Get-Item $file
+        if ($fileInfo.Length -ne $model.Size) {
+            Write-Host "  WARNING: size $($fileInfo.Length) != expected $($model.Size) — file may be corrupt." -ForegroundColor Red
         } else {
-            Write-Host "  Saved to: $bz2File"
-            Write-Host "  Please decompress this .bz2 file manually (7-Zip or similar)."
+            Write-Host "  Download complete. Size verified." -ForegroundColor Green
         }
     }
     catch {
@@ -92,8 +77,9 @@ Write-Host ""
 Write-Host "Models location: $ModelsDir"
 Write-Host ""
 Write-Host "Required files:"
-Write-Host "  1. shape_predictor_68_face_landmarks.dat (~97 MB)"
-Write-Host "  (ONNX models det_500m.onnx / w600k_mbf.onnx / OULU_Protocol_2_model_0_0.onnx are bundled with the installer)"
+Write-Host "  1. det_34g_gnkps.onnx (~39 MB)"
+Write-Host "  2. w600k_r50.onnx (~174 MB)"
+Write-Host "  3. OULU_Protocol_2_model_0_0.onnx (bundled with the installer)"
 Write-Host ""
-Write-Host "Next step: Run the FaceLoginSetup.exe installer, or place the model in the install dir."
+Write-Host "Next step: Run the FaceLoginSetup.exe installer, or place the models in the install dir."
 Write-Host "============================================" -ForegroundColor Cyan

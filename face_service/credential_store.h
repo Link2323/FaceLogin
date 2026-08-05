@@ -18,9 +18,12 @@ namespace facelogin {
 // is invalid.
 //
 // For 512-D ONNX we return a fixed 0.80, calibrated from measured data:
-//   same-person matches on this system: 0.14–0.80
-//   other-person photo match:           0.94–0.99
-// (0.80 cleanly separates them; 1.0 admitted a photo.)
+//   w600k_mbf (pre-v1.5): same-person 0.14–0.80, other-person photo 0.94–0.99
+//   w600k_r50  (v1.5):    same-person 0.43–0.78 (mean ~0.58, 15 frames from
+//                         multi-angle enrollment, 2026-08-05)
+// (0.80 separates them; 1.0 admitted a photo. The r50 margin at 0.80 is thin
+// — worst same-person frame was 0.7784 (mid-turn motion). Recalibrate when
+// r50 other-person/photo distances are measurable.)
 // Any other (legacy) dimension falls back to the base threshold.
 inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
     if (dim >= 256) return 0.80f;             // ONNX 512-D: measured safe boundary

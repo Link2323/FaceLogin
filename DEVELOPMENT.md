@@ -54,11 +54,9 @@ FaceLogin/
 │   ├── CMakeLists.txt
 │   ├── main.cpp                    # 服务入口 (SCM / standalone)
 │   ├── FaceService.cpp/h           # 服务核心逻辑 + 认证主循环
-│   ├── face_detector.cpp/h         # HOG人脸检测 + 68点地标提取
-│   ├── face_recognizer.cpp/h       # dlib ResNet-34 128维嵌入
-│   ├── liveness_detector.cpp/h     # EAR眨眼活体检测
+│   ├── face_align.h                # 5点相似变换对齐 + 偏航角估计 (header-only)
 │   ├── liveness_types.h            # 活体检测方法枚举
-│   ├── onnx_models.cpp/h           # ONNX 模型封装 (SCRFD / buffalo_s / MiniFASNet)
+│   ├── onnx_models.cpp/h           # ONNX 模型封装 (SCRFD gnkps / w600k_r50 / DeepPixBiS)
 │   ├── webcam_capture.cpp/h        # Media Foundation 摄像头
 │   ├── webcam_capture_dshow.cpp/h  # DirectShow 摄像头 (Session 0 服务模式)
 │   ├── pipe_server.cpp/h           # 命名管道服务端 (DACL安全)
@@ -437,59 +435,41 @@ ServiceMain()
 
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
-| `recognition_model` | `"both"` | 识别模型: dlib / onnx / both |
-| `detector` | `"scrfd"` | 检测器: dlib_hog / scrfd |
-| `liveness_method` | `"blink"` | 活体方法: blink / antispoof / none |
-| `match_threshold` | 0.30 | 欧氏距离阈值 (越小越严格) |
+| `recognition_model` | `"onnx"` | 保留兼容 (仅 onnx 支持) |
+| `detector` | `"scrfd"` | 保留兼容 (仅 scrfd 支持) |
+| `liveness_method` | `"antispoof"` | 活体方法: antispoof / none (blink 已随 dlib 68点移除, 配置兼容映射到 antispoof) |
+| `match_threshold` | 0.30 | 欧氏距离阈值 (512-D 经 EmbeddingThresholdForDim 用 0.80) |
 | `anti_spoof_threshold` | 0.30 | 反欺诈阈值 (越高越严格) |
 
-### 5.3 人脸检测 (`face_detector.h/cpp`)
+### 5.3 人脸对齐 (`face_align.h`)
+
+v1.5 起不再使用 dlib 68 点形状预测器。SCRFD (gnkps 变体) 直接输出 5 关键点（左右眼/鼻/左右嘴角），对齐由纯几何完成:
 
 ```cpp
-class FaceDetector {
-    dlib::frontal_face_detector m_hogDetector;  // HOG检测器 (内置)
-    dlib::shape_predictor m_shapePredictor;       // 68点地标模型
-};
+bool EstimateSimilarityTransform(const float src[10], const float dst[10], float out[6]);
+void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image, const float m[6], int size, ...);
+float EstimateYawDeg(const float kps[10]);   // 偏航角估计 (弱透视模型, k=2.05 实测标定)
 ```
 
-**初始化**: 加载 `shape_predictor_68_face_landmarks.dat` (~97 MB)
-
-**方法**:
-- `Detect()`: 返回所有检测到的人脸 + 68点地标
-- `DetectLargestFace()`: 返回面积最大的人脸（离摄像头最近）
-- `GetLandmarks()`: 对给定矩形提取地标
+**原理**: 5 点 → InsightFace 标准参考框 (112×112) 的最小二乘相似变换（旋转+等比缩放+平移，无剪切），双线性逆映射采样。偏航角 = atan(k·鼻尖水平偏移/视眼距)，符号约定：头转向自己左侧为正。
 
 ### 5.4 人脸识别 (`onnx_models.h/cpp`)
 
 ```cpp
 class OnnxRecognizer {
-    // InsightFace w600k_mbf ONNX (512-D embedding)
+    // InsightFace w600k_r50 ONNX (512-D embedding)
 };
 ```
 
-**初始化**: 加载 `w600k_mbf.onnx` (ONNX Runtime)
+**初始化**: 加载 `w600k_r50.onnx` (ONNX Runtime, ~174 MB)
 
-**嵌入计算**: 输入对齐后的 RGB 帧 + 地标 → 输出 512 维浮点向量
+**嵌入计算**: 输入对齐后的 112×112 帧 → 输出 512 维浮点向量 (L2 归一化)
 
-**匹配**: 欧氏距离比对，默认阈值 0.30（512-D 用 0.80）。同时检查最佳匹配 / 次佳匹配比 < 0.75（防误匹配）。
+**匹配**: 欧氏距离比对，512-D 用 0.80（实测同人边界 0.14-0.80，见 credential_store.h）。同时检查最佳匹配 / 次佳匹配比 < 0.75（防误匹配）。
 
-### 5.5 活体检测 (`liveness_detector.h/cpp`)
+### 5.5 活体检测
 
-基于 **Eye Aspect Ratio (EAR)** 的眨眼检测:
-
-```
-EAR = (||P2-P6|| + ||P3-P5||) / (2 * ||P1-P4||)
-
-地标索引 (dlib 68点):
-  左眼: 36-41, 右眼: 42-47
-  EAR_avg = (EAR_left + EAR_right) / 2
-```
-
-**参数**:
-- 闭眼阈值: EAR < 0.20
-- 确认帧数: 连续 2 帧 (闭合阶段; 之后需连续 2 帧睁眼去抖)
-- 正常 EAR 范围: 睁开 ~0.22-0.30, 闭合 ~0.12-0.17
-- 参数由 `liveness_detector.h` 的 `kDefaultEarThreshold` / `kDefaultBlinkFrames` 定义，认证与注册两端共用
+v1.5 起 blink (EAR) 活体随 dlib 68 点移除，仅保留 DeepPixBiS 静默反欺诈（无需眨眼，侧脸时眼睛信息不全也不受影响）。配置 `liveness_method: "blink"` 会自动映射到 antispoof 并记录警告。
 
 ### 5.6 ONNX 模型 (`onnx_models.h/cpp`)
 
@@ -497,9 +477,9 @@ EAR = (||P2-P6|| + ||P3-P5||) / (2 * ||P1-P4||)
 
 | 类 | 模型 | 输入 | 输出 | 用途 |
 |---|---|---|---|---|
-| `OnnxDetector` | SCRFD (`det_500m.onnx`) | 图像 (letterbox) | 检测框+5点关键点 | 人脸检测 |
-| `OnnxRecognizer` | InsightFace buffalo_s (`w600k_mbf.onnx`) | 112×112 对齐人脸 | 128维嵌入 | 人脸识别 |
-| `OnnxAntiSpoof` | MiniFASNetV2 (`OULU_Protocol_2_model_0_0.onnx`) | 80×80 对齐人脸 | 活体分数 [0,1] | 静默反欺诈 |
+| `OnnxDetector` | SCRFD gnkps (`det_34g_gnkps.onnx`) | 640×640 直接拉伸 | 检测框+5点关键点 | 人脸检测 |
+| `OnnxRecognizer` | InsightFace buffalo_l (`w600k_r50.onnx`) | 112×112 对齐人脸 | 512维嵌入 | 人脸识别 |
+| `OnnxAntiSpoof` | DeepPixBiS (`OULU_Protocol_2_model_0_0.onnx`) | 224×224 bbox 裁剪 | 活体分数 [0,1] | 静默反欺诈 |
 
 所有 ONNX 模型放置在 `%PROGRAMDATA%\FaceLogin\models\` 下。
 
@@ -806,10 +786,9 @@ C:\Program Files\FaceLogin\               # 安装目录 (用户可选)
 │   ├── credential_provider.log
 │   └── enrollment.log
 └── models/
-    ├── shape_predictor_68_face_landmarks.dat       (~97 MB)
-    ├── det_500m.onnx                                 (~16 MB)
-    ├── w600k_mbf.onnx                                 (~6 MB)
-    └── OULU_Protocol_2_model_0_0.onnx                 (~1 MB)
+    ├── det_34g_gnkps.onnx                           (~39 MB)
+    ├── w600k_r50.onnx                               (~174 MB)
+    └── OULU_Protocol_2_model_0_0.onnx                (~13 MB)
 
 C:\ProgramData\FaceLogin\                   # 数据目录
 ├── data/
@@ -827,12 +806,12 @@ C:\ProgramData\FaceLogin\                   # 数据目录
 
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
-| `shape_predictor_68_face_landmarks.dat` | ~97 MB | 68点面部地标提取 | dlib.net |
-| `det_500m.onnx` | ~16 MB | SCRFD 人脸检测 | InsightFace |
-| `w600k_mbf.onnx` | ~6 MB | buffalo_s MobileFaceNet 512维嵌入 | InsightFace |
-| `OULU_Protocol_2_model_0_0.onnx` | ~1 MB | MiniFASNetV2 静默反欺诈 | MiniFASNet |
+| `det_34g_gnkps.onnx` | ~39 MB | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，旋转脸修复族） | InsightFace / hf-mirror |
+| `w600k_r50.onnx` | ~174 MB | buffalo_l IResNet-50 512维嵌入 | InsightFace / hf-mirror |
+| `OULU_Protocol_2_model_0_0.onnx` | ~13 MB | DeepPixBiS 静默反欺诈 | MiniFASNet |
 
-下载脚本: `scripts/download_models.ps1` 可下载 dlib shape predictor 模型。ONNX 模型（det_500m / w600k_mbf / OULU）随安装包分发。
+下载脚本: `scripts/download_models.ps1` 可下载前两个模型（国内可直连 hf-mirror.com）。OULU 随安装包分发。
+v1.5 起不再使用 dlib 68 点形状预测器：SCRFD 直接输出 5 关键点，由相似变换对齐（`face_align.h`）完成摆正。
 
 ---
 

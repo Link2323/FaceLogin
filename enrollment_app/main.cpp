@@ -61,17 +61,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
     // Check models exist. The enrollment app uses the ONNX pipeline
-    // exclusively (SCRFD detection + InsightFace recognition); the dlib
-    // recognizer was removed, so check the models actually loaded at runtime:
-    // shape predictor (landmarks) and the ONNX recognizer. The legacy dlib
-    // recognizer/hog detector models are no longer required.
-    std::wstring shapePath = modelsDir + L"\\shape_predictor_68_face_landmarks.dat";
-    std::wstring recPath   = modelsDir + L"\\w600k_mbf.onnx";
+    // exclusively (SCRFD detection + InsightFace recognition); no landmark
+    // model is loaded at runtime anymore (the 5 keypoints come from SCRFD).
+    std::wstring detPath = modelsDir + L"\\det_34g_gnkps.onnx";
+    std::wstring recPath = modelsDir + L"\\w600k_r50.onnx";
 
-    if (GetFileAttributesW(shapePath.c_str()) == INVALID_FILE_ATTRIBUTES ||
+    if (GetFileAttributesW(detPath.c_str()) == INVALID_FILE_ATTRIBUTES ||
         GetFileAttributesW(recPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::wstring msg = L"Face recognition models are missing.\n\n"
-            L"Expected files:\n  " + shapePath + L"\n  " + recPath;
+            L"Expected files:\n  " + detPath + L"\n  " + recPath;
         MessageBoxW(nullptr, msg.c_str(), L"Models Not Found", MB_ICONERROR);
         return 1;
     }

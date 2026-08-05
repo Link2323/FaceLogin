@@ -3,7 +3,6 @@
 #include <onnxruntime_cxx_api.h>
 #include <dlib/matrix.h>
 #include <dlib/pixel.h>
-#include <dlib/image_processing.h>
 #include <string>
 #include <vector>
 #include <memory>
@@ -24,9 +23,8 @@ namespace facelogin {
 // boundary are untouched.
 void ApplyLowLightEnhance(dlib::matrix<dlib::rgb_pixel>& chip);
 
-// ONNX-based face recognition using InsightFace buffalo_s (w600k_mbf).
-// Replaces dlib ResNet-34 with the more accurate MobileFaceNet @ WebFace600K.
-// Embedding dimension: 128 (compatible with existing users.dat storage).
+// ONNX-based face recognition using InsightFace (w600k_mbf / w600k_r50).
+// Embedding dimension: 512 (auto-detected from the model output).
 class OnnxRecognizer {
 public:
     OnnxRecognizer() = default;
@@ -34,15 +32,15 @@ public:
 
     bool Initialize(const std::wstring& modelPath);
 
-    // Compute 128-D embedding from a face chip (already aligned, 112x112 RGB).
+    // Compute 512-D embedding from a face chip (already aligned, 112x112 RGB).
     // Returns empty vector on failure.
     std::vector<float> ComputeEmbedding(const dlib::matrix<dlib::rgb_pixel>& faceChip);
 
-    // Convenience: compute embedding from a full frame + landmarks.
-    // Handles alignment to 112x112 internally.
-    std::vector<float> ComputeEmbedding(
-        const dlib::matrix<dlib::rgb_pixel>& image,
-        const dlib::full_object_detection& landmarks);
+    // Convenience: compute embedding from a full frame + the 5 SCRFD
+    // keypoints (source-pixel coordinates). Aligns to 112×112 internally
+    // via a similarity transform (see face_align.h).
+    std::vector<float> ComputeEmbedding(const dlib::matrix<dlib::rgb_pixel>& image,
+                                        const float kps[10]);
 
     // Euclidean distance between two embeddings.
     static float Distance(const std::vector<float>& a, const std::vector<float>& b);
@@ -107,9 +105,9 @@ private:
                                    float& outScaleX, float& outScaleY);
 };
 
-// Silent anti-spoofing detection (MiniFASNetV2).
+// Silent anti-spoofing detection (DeepPixBiS).
 // Distinguishes real faces from printed photos, screen replays, and 3D masks.
-// Input: aligned face chip (80x80 RGB)
+// Input: bbox-cropped face chip (224x224 RGB)
 // Output: scalar score (higher = more likely real face)
 class OnnxAntiSpoof {
 public:
@@ -123,9 +121,10 @@ public:
     // Returns -1.0f on error.
     float Predict(const dlib::matrix<dlib::rgb_pixel>& faceChip);
 
-    // Convenience: align from landmarks + full image, then predict.
+    // Convenience: crop the face bbox (tight 1.1x margin) + full image,
+    // then predict. DeepPixBiS does not use landmark alignment.
     float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                  const dlib::full_object_detection& landmarks);
+                  const dlib::rectangle& rect);
 
     // Thresholded convenience: returns true if face is judged real.
     bool IsReal(const dlib::matrix<dlib::rgb_pixel>& faceChip, float threshold = 0.3f);

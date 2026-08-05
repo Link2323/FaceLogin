@@ -49,9 +49,9 @@ func EnsureConfigDefaults(configPath string) error {
 		// No config yet — start from a full default so the app loads sane
 		// values on first run (the app's own defaults mirror these).
 		cfg = map[string]any{
-			"recognition_model":   "both",
+			"recognition_model":   "onnx",
 			"detector":            "scrfd",
-			"liveness_method":     "blink",
+			"liveness_method":     "antispoof",
 			"match_threshold":     0.30,
 			"anti_spoof_threshold": 0.30,
 			"blink_glasses_mode":  false,
