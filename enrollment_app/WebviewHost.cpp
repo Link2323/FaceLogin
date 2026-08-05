@@ -303,6 +303,7 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"CheckAccountTypeChanged") *ids = 30;
     else if (n == L"RefreshAccountIdentity") *ids = 31;
     else if (n == L"GetCaptureStatus") *ids = 32;
+    else if (n == L"ClearStaleAccountUpn") *ids = 33;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -451,6 +452,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             break;
         }
         case 32: if (res) *res = MakeStr(m_wizard->GetCaptureStatus()); break;
+        case 33: if (res) *res = MakeBool(m_wizard->ClearStaleAccountUpn()); break;
         default: return DISP_E_MEMBERNOTFOUND;
         }
         return S_OK;
