@@ -54,7 +54,6 @@ func EnsureConfigDefaults(configPath string) error {
 			"liveness_method":     "antispoof",
 			"match_threshold":     0.30,
 			"anti_spoof_threshold": 0.30,
-			"blink_glasses_mode":  false,
 			"low_light_enhance":   false,
 			"camera_rotation":     0,
 		}

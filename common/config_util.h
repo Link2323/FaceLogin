@@ -14,10 +14,6 @@ struct AppConfig {
     LivenessMethod liveness_method        = LivenessMethod::AntiSpoof;
     float          match_threshold        = 0.30f;
     float          anti_spoof_threshold   = 0.30f;       // DeepPixBiS pixel map threshold
-    // Blink-detection mode. false (default) = CLASSIC stable algorithm (averaged
-    // EAR + fixed threshold). true = GLASSES mode (adaptive per-eye baseline +
-    // single-eye + pose gate) — for users whose glasses destabilize classic EAR.
-    bool           blink_glasses_mode     = false;
     // Low-light enhancement. false (default) = no preprocessing. true = apply
     // brightness normalization to dark face chips before recognition AND
     // anti-spoof, so matches/scores don't degrade in dark scenes.
