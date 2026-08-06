@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 
 namespace facelogin {
 
@@ -139,7 +140,17 @@ AppConfig ConfigFromJson(const std::string& json) {
     auto live = jsonGetString(json, "liveness_method");
     if (!live.empty()) cfg.liveness_method = LivenessMethodFromString(live);
     cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.30f);
-    cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.30f);
+    cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.281f);
+    // The UI only permits [0.281, 0.50]. Enforce the same range in the
+    // security boundary because config.json can also be edited by hand.
+    // In particular, a negative threshold would make Predict()'s -1 error
+    // sentinel pass the comparison and turn an inference failure into success.
+    if (!std::isfinite(cfg.anti_spoof_threshold) ||
+        cfg.anti_spoof_threshold < 0.281f || cfg.anti_spoof_threshold > 0.50f) {
+        FACELOGIN_WARN(L"Unsafe anti_spoof_threshold=%.3f; enforcing calibrated default 0.281",
+                       cfg.anti_spoof_threshold);
+        cfg.anti_spoof_threshold = 0.281f;
+    }
     cfg.low_light_enhance = (jsonGetString(json, "low_light_enhance") == "true");
     int rotation = jsonGetInt(json, "camera_rotation", 0);
     // Only accept 0/90/180/270; anything else silently does nothing in
@@ -228,7 +239,13 @@ std::string LivenessMethodToString(LivenessMethod m) {
 LivenessMethod LivenessMethodFromString(const std::string& s) {
     if (s == "blink")     return LivenessMethod::Blink;      // legacy v1.4 value; callers map it to anti-spoof with a warning
     if (s == "antispoof") return LivenessMethod::AntiSpoof;
-    if (s == "none")      return LivenessMethod::None;
+    if (s == "none") {
+        // Production authentication is fail-closed.  Preserve compatibility
+        // with old configs by migrating the former opt-out to anti-spoof
+        // instead of silently allowing password release without liveness.
+        FACELOGIN_WARN(L"liveness_method=none is no longer permitted; using anti-spoof");
+        return LivenessMethod::AntiSpoof;
+    }
     return LivenessMethod::AntiSpoof; // default for unknown/misspelled values (matches DefaultConfig; blink removed in v1.5)
 }
 

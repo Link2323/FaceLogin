@@ -30,6 +30,7 @@ constexpr wchar_t MSG_RELOAD_DB[] = L"RELOAD_DB";
 constexpr wchar_t MSG_RELOAD_OK[] = L"RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD[] = L"CONFIG_RELOAD";
 constexpr wchar_t MSG_CONFIG_RELOAD_OK[] = L"CONFIG_RELOAD_OK";
+constexpr wchar_t MSG_CONFIG_RELOAD_ERROR[] = L"CONFIG_RELOAD_ERROR";
 constexpr wchar_t MSG_GET_LOGS[] = L"GET_LOGS";
 constexpr wchar_t MSG_GET_LOGS_OK_PREFIX[] = L"GET_LOGS_OK:";
 constexpr wchar_t MSG_PING[] = L"PING";

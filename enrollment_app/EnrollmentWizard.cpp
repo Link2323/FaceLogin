@@ -223,31 +223,33 @@ bool EnrollmentWizard::StartPreview() {
     }
     m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
 
-    // Try loading anti-spoof model
+    // Anti-spoof is mandatory for enrollment.  Allowing capture without it
+    // would let a photograph become the trusted template for later logons.
     m_antiSpoof = std::make_unique<OnnxAntiSpoof>();
-    std::wstring antiSpoofPath = modelsDir + L"\\OULU_Protocol_2_model_0_0.onnx";
-    if (!m_antiSpoof->Initialize(antiSpoofPath)) {
-        FACELOGIN_WARN(L"Anti-spoof model not available");
+    std::wstring miniFasV2Path = modelsDir + L"\\MiniFASNetV2.onnx";
+    std::wstring miniFasV1SePath = modelsDir + L"\\MiniFASNetV1SE.onnx";
+    if (!m_antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+        FACELOGIN_ERROR(L"Dual MiniFAS PAD unavailable — enrollment refused");
         m_antiSpoof.reset();
+        m_webcam->Shutdown();
+        return false;
     }
-    if (m_antiSpoof) m_antiSpoof->SetLowLightEnhance(m_config.low_light_enhance);
-
     // dlib recognizer/detector were removed — pure ONNX. recognition_model
     // and detector config values are ignored.
 
-    // Validate liveness method — no blink fallback anymore (the dlib 68-point
-    // model is gone). Anti-spoof unavailable → liveness off.
+    // Validate liveness method — no identity-only fallback is permitted.
     if (m_livenessMethod == LivenessMethod::Blink) {
         FACELOGIN_WARN(L"liveness_method=blink no longer supported (dlib 68-point removed) — using anti-spoof");
         m_livenessMethod = LivenessMethod::AntiSpoof;
     }
-    if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-        FACELOGIN_WARN(L"Anti-spoof configured but unavailable — liveness disabled (insecure)");
-        m_livenessMethod = LivenessMethod::None;
+    if (m_livenessMethod != LivenessMethod::AntiSpoof ||
+        !m_antiSpoof || !m_antiSpoof->IsInitialized()) {
+        FACELOGIN_ERROR(L"No supported liveness method available — enrollment refused");
+        m_webcam->Shutdown();
+        return false;
     }
 
-    FACELOGIN_INFO(L"Liveness method: %hs | Preview started: 1280x720",
-                  m_livenessMethod == LivenessMethod::AntiSpoof ? "antispoof" : "none");
+    FACELOGIN_INFO(L"Liveness method: antispoof (mandatory) | Preview started: 1280x720");
 
     m_previewRunning = true;
     m_frameRunning = true;
@@ -287,6 +289,7 @@ bool EnrollmentWizard::StartPreview() {
                 m_latestFrameB64  = std::move(b64);
                 m_latestFacesJson = std::move(faceJson);
                 m_latestFrame     = frame;
+                ++m_latestFrameSequence;
             }
         }
     });
@@ -485,6 +488,17 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         return false;
     }
 
+    // COM methods can be invoked independently of the intended HTML flow.
+    // Enforce the full capture boundary here so a caller cannot start a side
+    // capture after StartPreview failed and thereby bypass anti-spoofing.
+    if (!m_previewRunning || m_livenessMethod != LivenessMethod::AntiSpoof ||
+        !m_antiSpoof || !m_antiSpoof->IsInitialized() ||
+        !m_onnxDetector || !m_onnxDetector->IsInitialized() ||
+        !m_onnxRecognizer || !m_onnxRecognizer->IsInitialized()) {
+        FACELOGIN_ERROR(L"CaptureFaceSamples refused: preview or mandatory models are unavailable");
+        return false;
+    }
+
     // Join the previous capture thread if one exists — REQUIRED before
     // reassigning m_captureThread (an un-joined joinable thread terminates
     // the process). If it is still running (m_capturing stuck true, e.g. the
@@ -522,25 +536,37 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         m_angleSampleCounts[angleIndex] = 0;
     }
     m_livenessPassed = false;
-    m_livenessChecking = (angleIndex == 0);
+    m_livenessChecking = true;
 
     m_captureThread = std::thread([this, angleIndex]() {
-        // Phase 1: Liveness check — only at the front position (angle 0).
-        // Later angles skip it: identity was already proven at the front;
-        // they only add pose coverage.
+        // Phase 1: every independently callable capture must prove liveness.
+        // In particular, side-angle append is exposed through COM and cannot
+        // inherit a stale proof from an earlier front capture or save.
         LivenessMethod method = m_livenessMethod;
         bool livenessPassed = false;
+        bool livenessInferenceError = false;
+        std::uint64_t lastFrameSequence = 0;
 
-        if (angleIndex == 0) {
-            FACELOGIN_INFO(L"Enrollment: starting liveness check (method=%hs)",
-                          method == LivenessMethod::AntiSpoof ? "antispoof" : "none");
-        }
+        // The preview and capture threads run independently. Consume each
+        // cached camera frame at most once so a stalled preview cannot turn one
+        // PAD result into a synthetic 5/5 sequence.
+        const auto copyFreshFrame = [this, &lastFrameSequence](
+            dlib::matrix<dlib::rgb_pixel>& output) -> bool {
+            std::lock_guard<std::mutex> lock(m_frameCacheMutex);
+            if (m_latestFrame.size() == 0 ||
+                m_latestFrameSequence == lastFrameSequence) {
+                return false;
+            }
+            output = m_latestFrame;
+            lastFrameSequence = m_latestFrameSequence;
+            return true;
+        };
 
-        if (angleIndex != 0) {
-            livenessPassed = true;
-        } else if (method == LivenessMethod::None) {
-            livenessPassed = true;
-        } else if (method == LivenessMethod::AntiSpoof) {
+        FACELOGIN_INFO(L"Enrollment: starting mandatory anti-spoof check for angle %d",
+                       angleIndex);
+
+        if (method == LivenessMethod::AntiSpoof &&
+            m_antiSpoof && m_antiSpoof->IsInitialized()) {
             int totalChecks = AntiSpoofCheckCount(m_antiSpoofThreshold);
             int passRequired = AntiSpoofPassRequired(totalChecks);
             FACELOGIN_INFO(L"Enrollment anti-spoof: threshold=%.3f → %d checks, %d required",
@@ -552,12 +578,11 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= 8) break;
 
                 dlib::matrix<dlib::rgb_pixel> frame;
-                {
-                    std::lock_guard<std::mutex> lock(m_frameCacheMutex);
-                    if (m_latestFrame.size() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
-                    frame = m_latestFrame;
+                if (!copyFreshFrame(frame)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                    continue;
                 }
-                // Detect with SCRFD — the bbox is enough for DeepPixBiS.
+                // MiniFASNet consumes expanded crops around the SCRFD bbox.
                 auto asDet = m_onnxDetector->DetectLargestFace(frame);
                 if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
 
@@ -566,13 +591,23 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                                     static_cast<long>(asDet->y1),
                                     static_cast<long>(asDet->x2),
                                     static_cast<long>(asDet->y2)));
+                if (!std::isfinite(score) || score < 0.0f || score > 1.0f) {
+                    FACELOGIN_ERROR(L"Enrollment anti-spoof returned invalid score: %.4f", score);
+                    livenessInferenceError = true;
+                    break;
+                }
+
                 totalChecked++;
                 if (score >= m_antiSpoofThreshold) passCount++; // config-driven threshold
                 FACELOGIN_INFO(L"Enrollment anti-spoof frame %d: score=%.3f (pass=%d)",
                               totalChecked, score, passCount);
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
             }
-            livenessPassed = (totalChecked > 0 && passCount >= passRequired);
+            livenessPassed = (!livenessInferenceError &&
+                              totalChecked == totalChecks &&
+                              passCount >= passRequired);
+        } else {
+            FACELOGIN_ERROR(L"Enrollment refused: anti-spoof is not initialized");
         }
 
         m_livenessChecking = false;
@@ -583,11 +618,10 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
             return;
         }
 
-        m_livenessPassed = true;
-
-        // Phase 2: Collect yaw-gated face samples for this angle. Frames are
-        // accepted only inside the gate (|yaw − target| ≤ 10°, face ≥ 60px,
-        // detection score ≥ 0.5) — out-of-gate frames are ignored, not failed.
+        // Phase 2: collect yaw-gated face samples for this angle. Every frame
+        // that contributes to the stored embedding is independently checked
+        // by PAD on that exact image. This closes the live-then-photo swap
+        // window that exists when liveness and enrollment use disjoint frames.
         const int targetYaw = kAngleTargets[angleIndex];
         constexpr float kYawTolerance = 10.0f;
         constexpr float kMinFaceSizePx = 60.0f;
@@ -597,13 +631,9 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         while (m_angleSampleCounts[angleIndex] < kAngleTargetFrames && m_capturing) {
             // Read the latest frame from the frame-grab thread (no camera contention)
             dlib::matrix<dlib::rgb_pixel> frame;
-            {
-                std::lock_guard<std::mutex> lock(m_frameCacheMutex);
-                if (m_latestFrame.size() == 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(33));
-                    continue;
-                }
-                frame = m_latestFrame;
+            if (!copyFreshFrame(frame)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+                continue;
             }
 
             // Detect with SCRFD — the 5 keypoints drive the alignment inside
@@ -625,6 +655,19 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 continue;
             }
 
+            const float samplePadScore = m_antiSpoof->Predict(frame,
+                dlib::rectangle(static_cast<long>(onnxDet->x1),
+                                static_cast<long>(onnxDet->y1),
+                                static_cast<long>(onnxDet->x2),
+                                static_cast<long>(onnxDet->y2)));
+            if (!std::isfinite(samplePadScore) || samplePadScore < 0.0f ||
+                samplePadScore > 1.0f || samplePadScore < m_antiSpoofThreshold) {
+                FACELOGIN_WARN(L"Enrollment sample PAD failed closed for angle %d: score=%.4f",
+                               angleIndex, samplePadScore);
+                livenessPassed = false;
+                break;
+            }
+
             // Compute the embedding with InsightFace ONNX (the only recognizer).
             // Store the FULL 512-D embedding (no truncation).
             auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, onnxDet->kps);
@@ -644,7 +687,16 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
             m_samplesCollected++;
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
         }
-        m_capturing = false;
+        const bool complete = livenessPassed &&
+            m_angleSampleCounts[angleIndex] == kAngleTargetFrames;
+        m_livenessPassed = complete;
+        if (!complete) {
+            FACELOGIN_WARN(L"Enrollment capture incomplete for angle %d: %d/%d samples",
+                           angleIndex, m_angleSampleCounts[angleIndex].load(),
+                           kAngleTargetFrames);
+        }
+        // Release-publishes the completed embedding vector to SaveEnrollment.
+        m_capturing.store(false, std::memory_order_release);
     });
 
     return true;
@@ -683,11 +735,17 @@ static std::string WstrToUtf8Escaped(const std::wstring& ws) {
 std::string EnrollmentWizard::GetCaptureStatus() {
     static constexpr const wchar_t* kAngleLabels[3] = {L"正面", L"左转", L"右转"};
     std::ostringstream js;
-    int total = m_angleSampleCounts[0] + m_angleSampleCounts[1] + m_angleSampleCounts[2];
-    js << "{\"angle\":" << m_captureAngle
-       << ",\"label\":\"" << WstrToUtf8(kAngleLabels[m_captureAngle]) << "\""
-       << ",\"targetYaw\":" << kAngleTargets[m_captureAngle]
-       << ",\"collected\":" << m_angleSampleCounts[m_captureAngle]
+    const int angle = m_captureAngle.load();
+    const int counts[3] = {
+        m_angleSampleCounts[0].load(),
+        m_angleSampleCounts[1].load(),
+        m_angleSampleCounts[2].load()
+    };
+    const int total = counts[0] + counts[1] + counts[2];
+    js << "{\"angle\":" << angle
+       << ",\"label\":\"" << WstrToUtf8(kAngleLabels[angle]) << "\""
+       << ",\"targetYaw\":" << kAngleTargets[angle]
+       << ",\"collected\":" << counts[angle]
        << ",\"target\":" << kAngleTargetFrames
        << ",\"yaw\":" << m_lastYaw
        << ",\"total\":" << total
@@ -845,6 +903,14 @@ int EnrollmentWizard::GetPasswordlessState() const {
 
 bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool passwordless,
                                           const std::wstring& label) {
+    // Saving is a separate COM entry point, so do not trust the UI to call it
+    // only after a completed capture.  A fresh, successful PAD proof is
+    // consumed by exactly one save.
+    if (m_capturing.load(std::memory_order_acquire) ||
+        m_livenessChecking.load() || !m_livenessPassed.load()) {
+        FACELOGIN_ERROR(L"Enrollment save refused: live capture has not completed successfully");
+        return false;
+    }
     if (m_embeddings.empty()) { FACELOGIN_ERROR(L"No face samples"); return false; }
 
     // Group samples by capture angle. Capture is sequential, so the flat
@@ -854,11 +920,22 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
     std::vector<AngleGroup> groups;
     size_t begin = 0;
     for (int a = 0; a < 3; a++) {
-        if (m_angleSampleCounts[a] > 0)
-            groups.push_back({begin, static_cast<size_t>(m_angleSampleCounts[a]), kAngleLabels[a]});
-        begin += m_angleSampleCounts[a];
+        const int count = m_angleSampleCounts[a].load();
+        if (count != 0 && count != kAngleTargetFrames) {
+            FACELOGIN_ERROR(L"Enrollment save refused: angle %d has %d/%d samples",
+                            a, count, kAngleTargetFrames);
+            return false;
+        }
+        if (count > 0)
+            groups.push_back({begin, static_cast<size_t>(count), kAngleLabels[a]});
+        begin += static_cast<size_t>(count);
     }
     if (groups.empty()) { FACELOGIN_ERROR(L"No face samples"); return false; }
+    if (begin != m_embeddings.size()) {
+        FACELOGIN_ERROR(L"Enrollment save refused: sample metadata/vector mismatch (%zu != %zu)",
+                        begin, m_embeddings.size());
+        return false;
+    }
     const bool multiAngle = groups.size() > 1;
 
     // All samples share one dimensionality (enrollment uses one recognizer).
@@ -1034,6 +1111,8 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
     // sample count and complete instantly with zero new frames (bug4 test).
     m_embeddings.clear();
     m_angleSampleCounts[0] = m_angleSampleCounts[1] = m_angleSampleCounts[2] = 0;
+    m_livenessPassed = false;
+    m_livenessChecking = false;
     return true;
 }
 
@@ -1318,11 +1397,18 @@ std::string EnrollmentWizard::GetConfig() const {
 
 bool EnrollmentWizard::SetConfig(const std::string& json) {
     AppConfig newConfig = ConfigFromJson(json);
-    // Validate: log a warning if anti-spoof model is unavailable,
-    // but still save the user's choice — runtime will fall back as needed.
-    if (newConfig.liveness_method == LivenessMethod::AntiSpoof &&
-        (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-        FACELOGIN_WARN(L"SetConfig: anti-spoof configured but model not available; saved anyway (will fall back at runtime)");
+    if (newConfig.liveness_method == LivenessMethod::Blink) {
+        newConfig.liveness_method = LivenessMethod::AntiSpoof;
+    }
+    if (newConfig.liveness_method != LivenessMethod::AntiSpoof) {
+        FACELOGIN_ERROR(L"SetConfig: unsupported liveness method rejected");
+        return false;
+    }
+    // A running preview must already have the mandatory model.  Refuse to
+    // mutate live settings if that invariant has somehow been broken.
+    if (m_previewRunning && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
+        FACELOGIN_ERROR(L"SetConfig: anti-spoof unavailable while preview is running");
+        return false;
     }
 
     bool cameraChanged = (newConfig.camera_device != m_config.camera_device);
@@ -1334,28 +1420,57 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
     m_config = newConfig;
     m_livenessMethod = newConfig.liveness_method;
     m_antiSpoofThreshold = newConfig.anti_spoof_threshold;
-    // Runtime fallback: if anti-spoof is chosen but model is missing, degrade to
-    // none now (consistent with StartPreview and FaceService — blink was removed
-    // in v1.5, so Blink is no longer a valid fallback target).
-    if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-        FACELOGIN_WARN(L"SetConfig: anti-spoof model unavailable — liveness disabled (insecure)");
-        m_livenessMethod = LivenessMethod::None;
-    }
 
-    // Propagate the low-light enhancement toggle to the models (hot reload).
+    // Low-light enhancement is recognition-only. PAD stays on its calibrated
+    // raw-camera preprocessing path.
     if (m_onnxRecognizer) m_onnxRecognizer->SetLowLightEnhance(newConfig.low_light_enhance);
-    if (m_antiSpoof) m_antiSpoof->SetLowLightEnhance(newConfig.low_light_enhance);
 
-    // Notify service to reload config
-    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_WRITE, 0, nullptr,
+    // Notify the service and require an explicit acknowledgement. Saving a
+    // file is not enough: if the service cannot load the mandatory PAD model,
+    // the UI must not claim that authentication settings are active.
+    bool reloadConfirmed = false;
+    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                OPEN_EXISTING, 0, nullptr);
     if (hPipe != INVALID_HANDLE_VALUE) {
-        DWORD written;
+        DWORD written = 0;
         std::wstring msg(ipc::MSG_CONFIG_RELOAD);
         msg.push_back(L'\0');
-        WriteFile(hPipe, msg.c_str(), static_cast<DWORD>(msg.size() * sizeof(wchar_t)),
-                  &written, nullptr);
+        const DWORD expectedBytes = static_cast<DWORD>(msg.size() * sizeof(wchar_t));
+        BOOL writeOk = WriteFile(hPipe, msg.c_str(), expectedBytes, &written, nullptr);
+
+        if (writeOk && written == expectedBytes) {
+            DWORD bytesAvailable = 0;
+            for (DWORD waited = 0; waited < 10000; waited += 50) {
+                if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
+                    break;
+                }
+                if (bytesAvailable > 0) break;
+                Sleep(50);
+            }
+
+            if (bytesAvailable > 0) {
+                wchar_t responseBuffer[64] = {};
+                DWORD bytesRead = 0;
+                if (ReadFile(hPipe, responseBuffer,
+                             static_cast<DWORD>(sizeof(responseBuffer) - sizeof(wchar_t)),
+                             &bytesRead, nullptr) && bytesRead > 0) {
+                    size_t responseLength = bytesRead / sizeof(wchar_t);
+                    while (responseLength > 0 && responseBuffer[responseLength - 1] == L'\0') {
+                        responseLength--;
+                    }
+                    std::wstring response(responseBuffer, responseLength);
+                    reloadConfirmed = (response == ipc::MSG_CONFIG_RELOAD_OK);
+                    if (!reloadConfirmed) {
+                        FACELOGIN_ERROR(L"Service rejected configuration reload: %s",
+                                        response.c_str());
+                    }
+                }
+            }
+        }
         CloseHandle(hPipe);
+    } else {
+        FACELOGIN_ERROR(L"Configuration saved but service is unavailable for reload: %lu",
+                        GetLastError());
     }
 
     FACELOGIN_INFO(L"Configuration updated: rec=%hs det=%hs live=%hs thr=%.2f rotation=%d",
@@ -1370,7 +1485,7 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
         RestartPreview();
     }
 
-    return true;
+    return reloadConfirmed;
 }
 
 bool EnrollmentWizard::RestartPreview() {

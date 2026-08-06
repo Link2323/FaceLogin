@@ -4,7 +4,9 @@
 #include <dlib/image_transforms.h>
 #include <fstream>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 #include <thread>
 #include <cstdlib>
 
@@ -28,14 +30,14 @@ static int OnnxThreadCount() {
 }
 
 // ============================================================================
-// Low-light enhancement (shared by recognizer + anti-spoof)
+// Low-light enhancement (recognizer)
 // ============================================================================
 
 // A chip is "dark" when its mean luma is below ~40/255 (0.157). Normal indoor
 // faces are 100-180; genuinely dark scenes fall well below 40.
 static constexpr float kLowLightMeanThreshold = 40.0f;
 // Reference mean luma we stretch dark chips toward. ~110/255 ≈ mid-brightness,
-// close to what InsightFace/DeepPixBiS were trained on.
+// close to what InsightFace was trained on.
 static constexpr float kLowLightTargetMean   = 110.0f;
 
 void ApplyLowLightEnhance(dlib::matrix<dlib::rgb_pixel>& chip) {
@@ -438,149 +440,222 @@ std::optional<OnnxDetector::Detection> OnnxDetector::DetectLargestFace(
 }
 
 // ============================================================================
-// OnnxAntiSpoof (DeepPixBiS)
+// MiniFASNet model and production 50/50 fusion
 // ============================================================================
 
-static constexpr float DPB_MEAN[] = {0.485f, 0.456f, 0.406f};
-static constexpr float DPB_STD[]  = {0.229f, 0.224f, 0.225f};
+MiniFasEvaluator::~MiniFasEvaluator() = default;
 
-OnnxAntiSpoof::~OnnxAntiSpoof() = default;
+bool MiniFasEvaluator::Initialize(const std::wstring& modelPath, float cropScale) {
+    m_initialized = false;
+    m_inputName.clear();
+    m_outputName.clear();
+    m_inputHeight = 0;
+    m_inputWidth = 0;
+    m_cropScale = 0.0f;
 
-bool OnnxAntiSpoof::Initialize(const std::wstring& modelPath) {
+    if (!std::isfinite(cropScale) || cropScale < 1.0f || cropScale > 8.0f) {
+        FACELOGIN_ERROR(L"MiniFASNet invalid crop scale: %.3f", cropScale);
+        return false;
+    }
+
     try {
-        m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLogin");
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(OnnxThreadCount());
-        opts.SetInterOpNumThreads(1);
-        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-        std::wstring wpath(modelPath.begin(), modelPath.end());
-        m_session = std::make_unique<Ort::Session>(*m_env, wpath.c_str(), opts);
-
+        m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLoginMiniFAS");
+        Ort::SessionOptions options;
+        // These small models benchmark fastest and most consistently with one
+        // thread; service-level work remains sequential and deterministic.
+        options.SetIntraOpNumThreads(1);
+        options.SetInterOpNumThreads(1);
+        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        m_session = std::make_unique<Ort::Session>(*m_env, modelPath.c_str(), options);
         m_memoryInfo = std::make_unique<Ort::MemoryInfo>(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 
-        Ort::AllocatorWithDefaultOptions alloc;
-        m_inputName = m_session->GetInputNameAllocated(0, alloc).get();
-
-        size_t numOutputs = m_session->GetOutputCount();
-        m_outputNames.resize(numOutputs);
-        for (size_t i = 0; i < numOutputs; i++) {
-            m_outputNames[i] = m_session->GetOutputNameAllocated(i, alloc).get();
+        if (m_session->GetInputCount() != 1 || m_session->GetOutputCount() != 1) {
+            FACELOGIN_ERROR(L"MiniFASNet graph must have exactly one input and one output");
+            return false;
         }
 
-        // Determine input size from session
-        auto inputInfo = m_session->GetInputTypeInfo(0);
-        auto tensorInfo = inputInfo.GetTensorTypeAndShapeInfo();
-        auto shape = tensorInfo.GetShape();
-        if (shape.size() >= 4) {
-            m_inputSize = static_cast<int>(shape[2]);
+        const auto inputInfo = m_session->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
+        const auto inputShape = inputInfo.GetShape();
+        if (inputInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            inputShape.size() != 4 || inputShape[1] != 3 ||
+            inputShape[2] <= 0 || inputShape[3] <= 0 ||
+            inputShape[2] > 1024 || inputShape[3] > 1024) {
+            FACELOGIN_ERROR(L"MiniFASNet invalid input tensor; expected float NCHW with 3 channels");
+            return false;
         }
 
-        FACELOGIN_INFO(L"OnnxAntiSpoof initialized: %s (input=%d, outputs=%zu)",
-                      modelPath.c_str(), m_inputSize, numOutputs);
+        const auto outputInfo = m_session->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo();
+        const auto outputShape = outputInfo.GetShape();
+        if (outputInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            outputShape.empty() || outputShape.back() != 3) {
+            FACELOGIN_ERROR(L"MiniFASNet invalid output tensor; expected three class logits");
+            return false;
+        }
+
+        Ort::AllocatorWithDefaultOptions allocator;
+        m_inputName = m_session->GetInputNameAllocated(0, allocator).get();
+        m_outputName = m_session->GetOutputNameAllocated(0, allocator).get();
+        if (m_inputName.empty() || m_outputName.empty()) return false;
+
+        m_inputHeight = static_cast<int>(inputShape[2]);
+        m_inputWidth = static_cast<int>(inputShape[3]);
+        m_cropScale = cropScale;
         m_initialized = true;
+        FACELOGIN_INFO(L"MiniFASNet initialized: %s (%dx%d, crop %.1f)",
+                       modelPath.c_str(), m_inputWidth, m_inputHeight, m_cropScale);
         return true;
-    } catch (const std::exception& e) {
-        FACELOGIN_ERROR(L"OnnxAntiSpoof init failed: %hs", e.what());
+    } catch (const std::exception& error) {
+        FACELOGIN_ERROR(L"MiniFASNet initialization failed: %hs", error.what());
         return false;
     }
 }
 
-float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& faceChip) {
-    if (!m_initialized) return -1.0f;
+float MiniFasEvaluator::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
+                                const dlib::rectangle& faceRect) {
+    if (!m_initialized || !m_session || !m_memoryInfo || image.size() == 0 ||
+        faceRect.is_empty() || m_inputHeight <= 0 || m_inputWidth <= 0) {
+        return -1.0f;
+    }
+
     try {
-        int isize = m_inputSize; // 224 for DeepPixBiS
-        dlib::matrix<dlib::rgb_pixel> resized(isize, isize);
-        dlib::resize_image(faceChip, resized);
+        const double sourceWidth = static_cast<double>(image.nc());
+        const double sourceHeight = static_cast<double>(image.nr());
+        const double boxWidth = static_cast<double>(faceRect.width());
+        const double boxHeight = static_cast<double>(faceRect.height());
+        if (boxWidth <= 1.0 || boxHeight <= 1.0) return -1.0f;
 
-        // Optional low-light enhancement (config-gated): normalize brightness
-        // of dark chips so anti-spoof scores don't drop in dark scenes.
-        if (m_lowLightEnhance) ApplyLowLightEnhance(resized);
+        // Faithful port of Silent-Face-Anti-Spoofing's CropImage._get_new_box.
+        const double scale = std::min({
+            (sourceHeight - 1.0) / boxHeight,
+            (sourceWidth - 1.0) / boxWidth,
+            static_cast<double>(m_cropScale)
+        });
+        const double newWidth = boxWidth * scale;
+        const double newHeight = boxHeight * scale;
+        const double centerX = static_cast<double>(faceRect.left()) + boxWidth / 2.0;
+        const double centerY = static_cast<double>(faceRect.top()) + boxHeight / 2.0;
 
-        // DeepPixBiS expects RGB NCHW, ImageNet normalization:
-        //   pixel = (pixel/255 - mean) / std
-        std::vector<float> input(1 * 3 * isize * isize);
-        for (int y = 0; y < isize; y++) {
-            for (int x = 0; x < isize; x++) {
-                const auto& p = resized(y, x);
-                int base = y * isize + x;
-                input[0 * isize * isize + base] = (p.red   / 255.0f - DPB_MEAN[0]) / DPB_STD[0];
-                input[1 * isize * isize + base] = (p.green / 255.0f - DPB_MEAN[1]) / DPB_STD[1];
-                input[2 * isize * isize + base] = (p.blue  / 255.0f - DPB_MEAN[2]) / DPB_STD[2];
+        double left = centerX - newWidth / 2.0;
+        double top = centerY - newHeight / 2.0;
+        double right = centerX + newWidth / 2.0;
+        double bottom = centerY + newHeight / 2.0;
+        if (left < 0.0) { right -= left; left = 0.0; }
+        if (top < 0.0) { bottom -= top; top = 0.0; }
+        if (right > sourceWidth - 1.0) {
+            left -= right - sourceWidth + 1.0;
+            right = sourceWidth - 1.0;
+        }
+        if (bottom > sourceHeight - 1.0) {
+            top -= bottom - sourceHeight + 1.0;
+            bottom = sourceHeight - 1.0;
+        }
+
+        const dlib::rectangle cropRect(
+            std::max(0L, static_cast<long>(left)),
+            std::max(0L, static_cast<long>(top)),
+            std::min(image.nc() - 1, static_cast<long>(right)),
+            std::min(image.nr() - 1, static_cast<long>(bottom)));
+        if (cropRect.is_empty()) return -1.0f;
+
+        dlib::matrix<dlib::rgb_pixel> crop;
+        dlib::extract_image_chip(
+            image,
+            dlib::chip_details(cropRect, dlib::chip_dims(m_inputHeight, m_inputWidth)),
+            crop);
+
+        const size_t plane = static_cast<size_t>(m_inputHeight) *
+                             static_cast<size_t>(m_inputWidth);
+        std::vector<float> input(plane * 3U);
+        for (int y = 0; y < m_inputHeight; ++y) {
+            for (int x = 0; x < m_inputWidth; ++x) {
+                const auto& pixel = crop(y, x);
+                const size_t offset = static_cast<size_t>(y) *
+                                      static_cast<size_t>(m_inputWidth) +
+                                      static_cast<size_t>(x);
+                input[offset] = static_cast<float>(pixel.blue);
+                input[plane + offset] = static_cast<float>(pixel.green);
+                input[plane * 2U + offset] = static_cast<float>(pixel.red);
             }
         }
 
-        std::array<int64_t, 4> shape = {1, 3, isize, isize};
-        Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
+        const std::array<int64_t, 4> shape = {
+            1, 3, static_cast<int64_t>(m_inputHeight), static_cast<int64_t>(m_inputWidth)
+        };
+        Ort::Value tensor = Ort::Value::CreateTensor<float>(
             *m_memoryInfo, input.data(), input.size(), shape.data(), shape.size());
-
         const char* inputNames[] = {m_inputName.c_str()};
-        std::vector<const char*> outNamePtrs;
-        for (auto& name : m_outputNames) outNamePtrs.push_back(name.c_str());
+        const char* outputNames[] = {m_outputName.c_str()};
+        auto outputs = m_session->Run(Ort::RunOptions{}, inputNames, &tensor, 1,
+                                      outputNames, 1);
+        if (outputs.size() != 1 || !outputs[0].IsTensor()) return -1.0f;
 
-        auto outputs = m_session->Run(Ort::RunOptions{},
-                                       inputNames, &inputTensor, 1,
-                                       outNamePtrs.data(), outNamePtrs.size());
-
-        if (outputs.size() >= 2) {
-            // DeepPixBiS dual-head: output_pixel (per-pixel map) + output_binary (scalar).
-            // output_pixel is a 14×14 map where each pixel is classified as real (1) or spoof (0).
-            // Its mean value discriminates: real faces ~0.5-0.7, photos ~0.2-0.4.
-            // output_binary is the global classification but saturates at ~0.999 for all inputs,
-            // making it useless for discrimination. Use pixel output only.
-
-            float* pixelData = outputs[0].GetTensorMutableData<float>();
-            auto pixelInfo = outputs[0].GetTensorTypeAndShapeInfo();
-            size_t pixelCount = pixelInfo.GetElementCount();
-            double pixelSum = 0;
-            for (size_t i = 0; i < pixelCount; i++) pixelSum += pixelData[i];
-            float pixelMean = static_cast<float>(pixelSum / pixelCount);
-
-            float* binaryData = outputs[1].GetTensorMutableData<float>();
-            auto binaryInfo = outputs[1].GetTensorTypeAndShapeInfo();
-            size_t binaryCount = binaryInfo.GetElementCount();
-            double binarySum = 0;
-            for (size_t i = 0; i < binaryCount; i++) binarySum += binaryData[i];
-            float binaryMean = static_cast<float>(binarySum / binaryCount);
-
-            // Use pixel map mean as the liveness score.
-            // binaryMean saturates near 1.0 for everything; pixelMean is the discriminator.
-            // Threshold: >= 0.5 for real face, < 0.5 for photo/spoof.
-            float score = pixelMean;
-            FACELOGIN_INFO(L"Anti-spoof: pixel=%.4f binary=%.4f score=%.4f",
-                          pixelMean, binaryMean, score);
-            return score;
+        const auto outputInfo = outputs[0].GetTensorTypeAndShapeInfo();
+        if (outputInfo.GetElementCount() != 3) return -1.0f;
+        const float* logits = outputs[0].GetTensorData<float>();
+        if (!logits || !std::isfinite(logits[0]) || !std::isfinite(logits[1]) ||
+            !std::isfinite(logits[2])) {
+            return -1.0f;
         }
 
-        // Single output fallback
-        float* data = outputs[0].GetTensorMutableData<float>();
-        auto info = outputs[0].GetTensorTypeAndShapeInfo();
-        size_t dim = info.GetElementCount();
-        double sum = 0;
-        for (size_t i = 0; i < dim; i++) sum += data[i];
-        return static_cast<float>(sum / dim);
-    } catch (const std::exception& e) {
-        FACELOGIN_WARN(L"OnnxAntiSpoof::Predict error: %hs", e.what());
+        const float maximum = std::max({logits[0], logits[1], logits[2]});
+        const double exp0 = std::exp(static_cast<double>(logits[0] - maximum));
+        const double exp1 = std::exp(static_cast<double>(logits[1] - maximum));
+        const double exp2 = std::exp(static_cast<double>(logits[2] - maximum));
+        const double total = exp0 + exp1 + exp2;
+        if (!std::isfinite(total) || total <= std::numeric_limits<double>::min()) {
+            return -1.0f;
+        }
+        const float realProbability = static_cast<float>(exp1 / total);
+        return std::isfinite(realProbability) ? realProbability : -1.0f;
+    } catch (const std::exception& error) {
+        FACELOGIN_WARN(L"MiniFASNet inference failed: %hs", error.what());
         return -1.0f;
     }
 }
 
+OnnxAntiSpoof::~OnnxAntiSpoof() = default;
+
+bool OnnxAntiSpoof::Initialize(const std::wstring& miniFasV2Path,
+                               const std::wstring& miniFasV1SePath) {
+    m_initialized = false;
+    m_miniFasV2 = std::make_unique<MiniFasEvaluator>();
+    m_miniFasV1Se = std::make_unique<MiniFasEvaluator>();
+
+    const bool v2Ready = m_miniFasV2->Initialize(miniFasV2Path, 2.7f);
+    const bool v1SeReady = m_miniFasV1Se->Initialize(miniFasV1SePath, 4.0f);
+    if (!v2Ready || !v1SeReady) {
+        FACELOGIN_ERROR(L"Dual MiniFAS PAD initialization failed (V2=%s, V1SE=%s)",
+                        v2Ready ? L"ready" : L"failed",
+                        v1SeReady ? L"ready" : L"failed");
+        m_miniFasV2.reset();
+        m_miniFasV1Se.reset();
+        return false;
+    }
+
+    m_initialized = true;
+    FACELOGIN_INFO(L"Dual MiniFAS PAD initialized (V2 + V1SE, 50/50 fusion)");
+    return true;
+}
+
 float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                              const dlib::rectangle& rect) {
-    // DeepPixBiS works with a simple bbox crop (no landmark alignment).
-    // Use a tight crop of the face bbox with a small 1.1x margin. Measured
-    // empirically: the previous 1.5x half-size (3x total) included too much
-    // background and drove real-face scores down to ~0.3-0.45, near the
-    // threshold. A tight crop raises real scores to ~0.5-0.6+.
-    long cx = rect.left() + rect.width() / 2;
-    long cy = rect.top() + rect.height() / 2;
-    long halfSize = static_cast<long>(std::max(rect.width(), rect.height()) / 2 * 1.1f);
-    dlib::rectangle cropRect(cx - halfSize, cy - halfSize, cx + halfSize, cy + halfSize);
-    dlib::chip_details chip(cropRect, dlib::chip_dims(m_inputSize, m_inputSize));
-    dlib::matrix<dlib::rgb_pixel> crop;
-    dlib::extract_image_chip(image, chip, crop);
-    return Predict(crop);
+                             const dlib::rectangle& rect) {
+    if (!m_initialized || !m_miniFasV2 || !m_miniFasV1Se) return -1.0f;
+
+    const float v2Score = m_miniFasV2->Predict(image, rect);
+    const float v1SeScore = m_miniFasV1Se->Predict(image, rect);
+    if (!std::isfinite(v2Score) || !std::isfinite(v1SeScore) ||
+        v2Score < 0.0f || v2Score > 1.0f ||
+        v1SeScore < 0.0f || v1SeScore > 1.0f) {
+        FACELOGIN_WARN(L"Dual MiniFAS PAD failed closed (V2=%.4f, V1SE=%.4f)",
+                       v2Score, v1SeScore);
+        return -1.0f;
+    }
+
+    const float fusedScore = (v2Score + v1SeScore) * 0.5f;
+    FACELOGIN_INFO(L"Dual MiniFAS PAD: V2=%.4f V1SE=%.4f fused=%.4f",
+                   v2Score, v1SeScore, fusedScore);
+    return fusedScore;
 }
 
 } // namespace facelogin

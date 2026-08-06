@@ -114,9 +114,19 @@ std::wstring BuildAuthSuccessMessage(const std::wstring& sid,
                                       const std::wstring& domain,
                                       const std::wstring& username,
                                       const std::wstring& password) {
-    std::wstring msg = MSG_AUTH_SUCCESS_PREFIX;
     // Format: SID:UPN:DOMAIN\USERNAME:PASSWORD
-    msg += sid + L":" + upn + L":" + domain + L"\\" + username + L":" + password;
+    // Append each field directly into one reserved buffer. Chained operator+
+    // expressions create extra temporary strings containing the plaintext
+    // password, which cannot be explicitly scrubbed by the caller.
+    std::wstring msg;
+    msg.reserve(wcslen(MSG_AUTH_SUCCESS_PREFIX) + sid.size() + upn.size() +
+                domain.size() + username.size() + password.size() + 4);
+    msg.append(MSG_AUTH_SUCCESS_PREFIX)
+       .append(sid).push_back(L':');
+    msg.append(upn).push_back(L':');
+    msg.append(domain).push_back(L'\\');
+    msg.append(username).push_back(L':');
+    msg.append(password);
     return msg;
 }
 

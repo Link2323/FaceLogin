@@ -8,6 +8,7 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <cmath>
 #include <wtsapi32.h>
 
 #pragma comment(lib, "wtsapi32.lib")
@@ -26,6 +27,20 @@ static std::wstring Utf8ToWstr(const std::string& s) {
     std::wstring ws(len - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
     return ws;
+}
+
+static void SecureClearMatchPassword(std::optional<CredentialStore::MatchResult>& match) {
+    if (match && !match->password.empty()) {
+        SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
+        match->password.clear();
+    }
+}
+
+static void SecureClearWideString(std::wstring& value) {
+    if (!value.empty()) {
+        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
+        value.clear();
+    }
 }
 
 FaceService::FaceService() {
@@ -256,17 +271,22 @@ bool FaceService::Initialize() {
     }
     m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
 
-    // Try loading anti-spoof model (MiniFASNetV2).
+    // Anti-spoof is a mandatory authentication component.  Never start the
+    // service without it: falling back to identity-only matching lets a photo
+    // release the stored Windows credential.
     m_antiSpoof = std::make_unique<OnnxAntiSpoof>();
-    std::wstring antiSpoofPath = m_modelsDir + L"\\OULU_Protocol_2_model_0_0.onnx";
-    if (m_antiSpoof->Initialize(antiSpoofPath)) {
-        FACELOGIN_INFO(L"Anti-spoof model loaded (MiniFASNetV2)");
+    std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
+    std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
+    if (m_antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+        FACELOGIN_INFO(L"Anti-spoof models loaded (MiniFASNetV2 + MiniFASNetV1SE)");
     } else {
-        FACELOGIN_WARN(L"Anti-spoof model not available");
+        // Keep the pipe online so LogonUI receives a precise AUTH_ERROR instead
+        // of treating a missing service as a transient connectivity problem.
+        // ProcessAuthRequest remains fail-closed until CONFIG_RELOAD restores
+        // a valid model.
+        FACELOGIN_ERROR(L"Anti-spoof model unavailable — authentication will remain disabled");
         m_antiSpoof.reset();
     }
-    if (m_antiSpoof) m_antiSpoof->SetLowLightEnhance(m_config.low_light_enhance);
-
     if (m_isServiceMode) {
         // Camera is initialized lazily per auth request to avoid
         // device contention with the console app. See Run().
@@ -286,14 +306,16 @@ bool FaceService::Initialize() {
     // recognition_model/detector config values are ignored (only onnx/scrfd
     // are supported; anything else logs a warning for backwards compat).
 
-    // Validate liveness method — no blink fallback anymore (the dlib 68-point
-    // model is gone). If the anti-spoof model is unavailable, liveness is off.
-    if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-        FACELOGIN_WARN(L"Anti-spoof configured but model not loaded — liveness disabled (insecure)");
-        m_livenessMethod = LivenessMethod::None;
+    // Defensive invariant: config parsing maps legacy "none" to anti-spoof,
+    // and legacy blink was normalized above.  Do not permit any future config
+    // path to reintroduce identity-only authentication.
+    if (m_livenessMethod != LivenessMethod::AntiSpoof) {
+        FACELOGIN_ERROR(L"No supported liveness method configured — refusing to start");
+        return false;
     }
 
-    FACELOGIN_INFO(L"Liveness method: %hs", m_livenessMethod == LivenessMethod::AntiSpoof ? "antispoof" : "none");
+    FACELOGIN_INFO(L"Liveness method: antispoof (mandatory, fail-closed; ready=%s)",
+                   (m_antiSpoof && m_antiSpoof->IsInitialized()) ? L"yes" : L"no");
     FACELOGIN_INFO(L"Match threshold: %.3f", m_matchThreshold);
     FACELOGIN_INFO(L"Initialization complete");
 
@@ -335,27 +357,35 @@ void FaceService::Run() {
                 FACELOGIN_WARN(L"liveness_method=blink no longer supported — using anti-spoof");
                 m_livenessMethod = LivenessMethod::AntiSpoof;
             }
+            if (m_livenessMethod != LivenessMethod::AntiSpoof) {
+                FACELOGIN_WARN(L"CONFIG_RELOAD: unsupported liveness method rejected — enforcing anti-spoof");
+                m_livenessMethod = LivenessMethod::AntiSpoof;
+            }
 
-            // Retry loading anti-spoof model if configured and not yet loaded
+            // Retry loading both anti-spoof models if either was unavailable.
             if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
                 m_antiSpoof = std::make_unique<OnnxAntiSpoof>();
-                std::wstring antiSpoofPath = m_modelsDir + L"\\OULU_Protocol_2_model_0_0.onnx";
-                if (m_antiSpoof->Initialize(antiSpoofPath)) {
-                    FACELOGIN_INFO(L"CONFIG_RELOAD: anti-spoof model loaded successfully");
+                std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
+                std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
+                if (m_antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+                    FACELOGIN_INFO(L"CONFIG_RELOAD: dual MiniFAS PAD loaded successfully");
                 } else {
-                    FACELOGIN_WARN(L"CONFIG_RELOAD: anti-spoof still unavailable — liveness disabled (insecure)");
-                    m_livenessMethod = LivenessMethod::None;
+                    FACELOGIN_ERROR(L"CONFIG_RELOAD: anti-spoof unavailable — authentication remains fail-closed");
                     m_antiSpoof.reset();
                 }
             }
-            // Propagate the low-light enhancement toggle to the models (hot reload).
+            // Low-light enhancement is recognition-only. PAD stays on its
+            // calibrated raw-camera preprocessing path.
             m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
-            if (m_antiSpoof) m_antiSpoof->SetLowLightEnhance(m_config.low_light_enhance);
-            m_pipeServer->WriteMessage(ipc::MSG_CONFIG_RELOAD_OK);
+            const bool antiSpoofReady =
+                m_antiSpoof && m_antiSpoof->IsInitialized();
+            m_pipeServer->WriteMessage(antiSpoofReady
+                ? ipc::MSG_CONFIG_RELOAD_OK
+                : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->Disconnect();
             FACELOGIN_INFO(L"Configuration reloaded: rec=%hs det=%hs live=%hs thr=%.2f rotation=%d",
                           m_config.recognition_model.c_str(), m_config.detector.c_str(),
-                          m_livenessMethod == LivenessMethod::AntiSpoof ? "antispoof" : "none",
+                          "antispoof",
                           m_matchThreshold, m_config.camera_rotation);
         }
         else if (request == ipc::MSG_GET_LOGS) {
@@ -460,6 +490,19 @@ void FaceService::Stop() {
 bool FaceService::ProcessAuthRequest() {
     FACELOGIN_INFO(L"Starting face authentication...");
 
+    // Authentication must never degrade to identity-only matching.  This
+    // check also covers a model that was removed/corrupted after startup and a
+    // failed hot-reload attempt.
+    if (m_livenessMethod != LivenessMethod::AntiSpoof ||
+        !m_antiSpoof || !m_antiSpoof->IsInitialized()) {
+        FACELOGIN_ERROR(L"Authentication refused: anti-spoof model is unavailable");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+            L"活体检测模块不可用，请使用密码登录并检查模型文件"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+
     // Single grab helper used by ALL auth stages (match, anti-spoof, blink,
     // final verify): it applies the configured camera rotation so every stage
     // operates on identically-oriented frames. Previously rotation was only
@@ -499,6 +542,7 @@ bool FaceService::ProcessAuthRequest() {
     auto startTime = std::chrono::steady_clock::now();
     bool authSent = false;
     int consecutiveMatches = 0;
+    std::wstring consensusSid;
     static constexpr int CONSENSUS_FRAMES = 3;
 
     while (m_running) {
@@ -560,12 +604,33 @@ bool FaceService::ProcessAuthRequest() {
         }
 
         if (match) {
-            consecutiveMatches++;
+            if (match->sid.empty()) {
+                FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
+                m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+                    L"身份数据无效，请使用密码登录并重新录入人脸"));
+                FlushFileBuffers(m_pipeServer->GetHandle());
+                m_pipeServer->DrainOutput(5000);
+                SecureClearMatchPassword(match);
+                return false;
+            }
+
+            // Consensus is meaningful only when every accepted frame belongs
+            // to the same Windows account.  A different registered user starts
+            // a fresh sequence instead of inheriting the previous count.
+            if (consensusSid.empty() || consensusSid == match->sid) {
+                consensusSid = match->sid;
+                consecutiveMatches++;
+            } else {
+                FACELOGIN_WARN(L"Matched SID changed during consensus — resetting sequence");
+                consensusSid = match->sid;
+                consecutiveMatches = 1;
+            }
             FACELOGIN_INFO(L"Face matched: %s (distance=%.4f) [%d/%d]",
                           match->username.c_str(), match->distance,
                           consecutiveMatches, CONSENSUS_FRAMES);
 
             if (consecutiveMatches < CONSENSUS_FRAMES) {
+                SecureClearMatchPassword(match);
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }
@@ -577,17 +642,26 @@ bool FaceService::ProcessAuthRequest() {
             // matched and auth completes in ~1-2s instead of timing out.
             //
             // Security is preserved: this only relaxes the frame-consensus;
-            // the blink liveness check AND the post-liveness final match verify
+            // mandatory PAD AND the post-liveness final same-SID match verify
             // still run before credentials are released.
             if (consecutiveMatches > 0) {
                 consecutiveMatches--;
                 FACELOGIN_INFO(L"Match lost — counter decayed to %d", consecutiveMatches);
+                if (consecutiveMatches == 0) consensusSid.clear();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(30));
             continue;
         }
 
         {
+            const std::wstring initialSid = consensusSid;
+
+            if (initialSid.empty() || match->sid != initialSid) {
+                FACELOGIN_ERROR(L"Authentication identity binding invariant failed");
+                SecureClearMatchPassword(match);
+                return false;
+            }
+
             // Passwordless account: face login cannot unlock it (no password to
             // submit to LSA). Degrade gracefully with a notice instead of
             // attempting liveness and submitting nothing. Do NOT mark the user
@@ -598,6 +672,7 @@ bool FaceService::ProcessAuthRequest() {
                 m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(ipc::MSG_PASSWORDLESS_NOTICE));
                 FlushFileBuffers(m_pipeServer->GetHandle());
                 m_pipeServer->DrainOutput(5000);
+                SecureClearMatchPassword(match);
                 return false;
             }
 
@@ -608,29 +683,20 @@ bool FaceService::ProcessAuthRequest() {
                 domain = computerName;
             }
 
-            std::wstring msg = ipc::BuildAuthSuccessMessage(
-                match->sid, match->upn,
-                domain, match->username, match->password);
-
             // === Liveness check ===
             {
                 LivenessMethod method = m_livenessMethod;
 
                 // Determine status text
-                if (method == LivenessMethod::AntiSpoof) {
-                    m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"\u6b63\u5728\u8fdb\u884c\u6d3b\u4f53\u68c0\u6d4b...");
-                }
-                if (method != LivenessMethod::None) {
-                    FlushFileBuffers(m_pipeServer->GetHandle());
-                }
+                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"\u6b63\u5728\u8fdb\u884c\u6d3b\u4f53\u68c0\u6d4b...");
+                FlushFileBuffers(m_pipeServer->GetHandle());
 
                 bool livenessPassed = false;
+                bool livenessInferenceError = false;
+                bool livenessIdentityMismatch = false;
 
-                if (method == LivenessMethod::None) {
-                    livenessPassed = true;
-                } else if (method == LivenessMethod::AntiSpoof) {
-                    // Anti-spoof consensus check with threshold-driven frame count:
-                    // low threshold (lenient) → fewer checks, high threshold (strict) → more.
+                if (method == LivenessMethod::AntiSpoof) {
+                    // Calibrated dual-model consensus: all five frames must pass.
                     int totalChecks = AntiSpoofCheckCount(m_antiSpoofThreshold);
                     int passRequired = AntiSpoofPassRequired(totalChecks);
                     FACELOGIN_INFO(L"Anti-spoof: threshold=%.3f → %d checks, %d required",
@@ -640,48 +706,84 @@ bool FaceService::ProcessAuthRequest() {
                     while (m_running && totalChecked < totalChecks) {
                         if (m_pipeServer->IsClientDisconnected()) {
                             FACELOGIN_INFO(L"Client disconnected during anti-spoof — aborting");
-                            SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
+                            SecureClearMatchPassword(match);
                             return false;
                         }
-                        auto elapsed = std::chrono::steady_clock::now() - asStart;
-                        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= 5) break;
+                        auto asElapsed = std::chrono::steady_clock::now() - asStart;
+                        if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 5) break;
 
                         dlib::matrix<dlib::rgb_pixel> asFrame;
                         if (!grabFrame(asFrame)) { if (!m_running) break; std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
 
-                        // Detect with SCRFD — the bbox is enough for DeepPixBiS
-                        // (it crops, it does not align landmarks).
+                        // MiniFASNet consumes expanded crops around the SCRFD bbox.
                         auto asDet = m_onnxDetector->DetectLargestFace(asFrame);
                         if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
+
+                        // Bind every PAD sample to the same Windows identity
+                        // that won the initial consensus.  Otherwise user A's
+                        // stored credential could be released after user B (or
+                        // a swapped face) supplied the liveness frames.
+                        auto continuityEmb =
+                            m_onnxRecognizer->ComputeEmbedding(asFrame, asDet->kps);
+                        if (continuityEmb.empty()) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                            continue;
+                        }
+                        auto continuityMatch = m_store->FindBestMatch(
+                            continuityEmb.data(), continuityEmb.size(), m_matchThreshold);
+                        if (!continuityMatch) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                            continue;
+                        }
+                        const bool sameIdentity = !continuityMatch->sid.empty() &&
+                                                  continuityMatch->sid == initialSid;
+                        SecureClearMatchPassword(continuityMatch);
+                        if (!sameIdentity) {
+                            FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
+                            livenessIdentityMismatch = true;
+                            break;
+                        }
 
                         float score = m_antiSpoof->Predict(asFrame,
                             dlib::rectangle(static_cast<long>(asDet->x1),
                                             static_cast<long>(asDet->y1),
                                             static_cast<long>(asDet->x2),
                                             static_cast<long>(asDet->y2)));
+                        if (!std::isfinite(score) || score < 0.0f || score > 1.0f) {
+                            FACELOGIN_ERROR(L"Anti-spoof inference returned invalid score: %.4f", score);
+                            livenessInferenceError = true;
+                            break;
+                        }
+
                         totalChecked++;
                         if (score >= m_antiSpoofThreshold) passCount++; // config-driven threshold
                         FACELOGIN_INFO(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
 
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     }
-                    livenessPassed = (totalChecked > 0 && passCount >= passRequired);
+                    // A partial sample set is not enough.  Previously one early
+                    // passing frame could satisfy passRequired even when the
+                    // remaining required frames were never captured.
+                    livenessPassed = (!livenessInferenceError &&
+                                      totalChecked == totalChecks &&
+                                      passCount >= passRequired);
                     if (!livenessPassed) {
                         FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
                                        passCount, totalChecked, passRequired);
                     }
-                } else if (method == LivenessMethod::Blink) {
-                    // Unreachable: Initialize()/CONFIG_RELOAD map Blink to AntiSpoof.
-                    livenessPassed = false;
                 }
 
                 if (!livenessPassed) {
                     FACELOGIN_WARN(L"Liveness check failed");
                     m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-                        L"\u68c0\u6d4b\u5230\u653b\u51fb\uff0c\u8bf7\u4f7f\u7528\u771f\u5b9e\u4eba\u8138"));
+                        livenessInferenceError
+                            ? L"活体检测模块异常，请使用密码登录"
+                            : livenessIdentityMismatch
+                            ? L"活体验证期间人脸不匹配，请重试"
+                            : L"\u68c0\u6d4b\u5230\u653b\u51fb\uff0c\u8bf7\u4f7f\u7528\u771f\u5b9e\u4eba\u8138"));
                     FlushFileBuffers(m_pipeServer->GetHandle());
                     m_pipeServer->DrainOutput(5000);
-                    SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
+                    SecureClearMatchPassword(match);
                     return false;
                 }
 
@@ -695,13 +797,13 @@ bool FaceService::ProcessAuthRequest() {
                 // box/embedding is noisy, so a single frame is unreliable. We
                 // keep grabbing until a frame both detects a face AND matches
                 // (or ~2s elapses).
-                if (method != LivenessMethod::None) {
+                if (method == LivenessMethod::AntiSpoof) {
                     auto verifyStart = std::chrono::steady_clock::now();
                     bool verifyOk = false;
                     while (m_running && !verifyOk) {
                         if (m_pipeServer->IsClientDisconnected()) {
                             FACELOGIN_INFO(L"Client disconnected during final verify — aborting");
-                            SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
+                            SecureClearMatchPassword(match);
                             return false;
                         }
                         auto vElapsed = std::chrono::steady_clock::now() - verifyStart;
@@ -722,16 +824,22 @@ bool FaceService::ProcessAuthRequest() {
                         }
 
                         std::optional<CredentialStore::MatchResult> verifyMatch;
-                        auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(verifyFrame, det->kps);
-                        if (!onnxEmb.empty()) {
-                            verifyMatch = m_store->FindBestMatch(onnxEmb.data(), onnxEmb.size(), m_matchThreshold);
+                        auto verifyEmb = m_onnxRecognizer->ComputeEmbedding(verifyFrame, det->kps);
+                        if (!verifyEmb.empty()) {
+                            verifyMatch = m_store->FindBestMatch(verifyEmb.data(), verifyEmb.size(), m_matchThreshold);
                         }
 
                         if (verifyMatch) {
-                            verifyOk = true;
-                            // Use the verified match for the credential (fresh, same identity).
-                            match = verifyMatch;
-                            break;
+                            if (!verifyMatch->sid.empty() && verifyMatch->sid == initialSid) {
+                                verifyOk = true;
+                            } else {
+                                FACELOGIN_WARN(L"Final verify matched a different SID — rejecting face swap");
+                            }
+                            // The final check only proves continuity.  Never
+                            // replace the original credential with an arbitrary
+                            // registered user's MatchResult.
+                            SecureClearMatchPassword(verifyMatch);
+                            if (verifyOk) break;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     }
@@ -742,17 +850,26 @@ bool FaceService::ProcessAuthRequest() {
                             L"\u6d3b\u4f53\u9a8c\u8bc1\u671f\u95f4\u4eba\u8138\u4e0d\u5339\u914d\uff0c\u8bf7\u91cd\u8bd5"));
                         FlushFileBuffers(m_pipeServer->GetHandle());
                         m_pipeServer->DrainOutput(5000);
-                        SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
+                        SecureClearMatchPassword(match);
                         return false;
                     }
                 }
             }
 
-            m_pipeServer->WriteMessage(msg);
+            // Serialize credentials only after liveness and same-SID final
+            // verification have both succeeded.
+            std::wstring msg = ipc::BuildAuthSuccessMessage(
+                match->sid, match->upn,
+                domain, match->username, match->password);
+            bool writeOk = m_pipeServer->WriteMessage(msg);
             FlushFileBuffers(m_pipeServer->GetHandle());
+            SecureClearWideString(msg);
+            SecureClearMatchPassword(match);
 
-            SecureZeroMemory(match->password.data(),
-                           match->password.size() * sizeof(wchar_t));
+            if (!writeOk) {
+                FACELOGIN_WARN(L"Failed to send authentication credentials");
+                return false;
+            }
 
             authSent = true;
             FACELOGIN_INFO(L"Credentials sent for %s\\%s",

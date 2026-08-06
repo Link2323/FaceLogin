@@ -15,8 +15,7 @@ namespace facelogin {
 // luma below kLowLightMeanThreshold) and stretches brightness so the mean
 // lands at a reference level, clamped to [0,255]. No-op for chips at normal
 // brightness. Called on the RESIZED chip before the model's own normalization
-// loop, so both InsightFace (recognizer) and DeepPixBiS (anti-spoof) see
-// brightness-normalized input in dark scenes.
+// loop, so InsightFace sees brightness-normalized input in dark scenes.
 //
 // Safe by construction: only affects genuinely dark chips; a normal-brightness
 // chip is returned unchanged, so the match threshold and photo-rejection
@@ -101,43 +100,55 @@ private:
                                    float& outScaleX, float& outScaleY);
 };
 
-// Silent anti-spoofing detection (DeepPixBiS).
-// Distinguishes real faces from printed photos, screen replays, and 3D masks.
-// Input: bbox-cropped face chip (224x224 RGB)
-// Output: scalar score (higher = more likely real face)
-class OnnxAntiSpoof {
+// One MiniFASNet ONNX model. The reference implementation expands the SCRFD
+// face box, resizes it to the model input, feeds raw BGR NCHW values, and uses
+// softmax class 1 as the real-face probability.
+class MiniFasEvaluator {
 public:
-    OnnxAntiSpoof() = default;
-    ~OnnxAntiSpoof();
+    MiniFasEvaluator() = default;
+    ~MiniFasEvaluator();
 
-    bool Initialize(const std::wstring& modelPath);
+    MiniFasEvaluator(const MiniFasEvaluator&) = delete;
+    MiniFasEvaluator& operator=(const MiniFasEvaluator&) = delete;
 
-    // Predict liveness score for an aligned face chip.
-    // Returns score in [0.0, 1.0]; higher = more likely real.
-    // Returns -1.0f on error.
-    float Predict(const dlib::matrix<dlib::rgb_pixel>& faceChip);
-
-    // Convenience: crop the face bbox (tight 1.1x margin) + full image,
-    // then predict. DeepPixBiS does not use landmark alignment.
+    bool Initialize(const std::wstring& modelPath, float cropScale);
     float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                  const dlib::rectangle& rect);
-
+                  const dlib::rectangle& faceRect);
     bool IsInitialized() const { return m_initialized; }
-
-    // Enable/disable low-light brightness normalization for dark face chips.
-    void SetLowLightEnhance(bool enable) { m_lowLightEnhance = enable; }
 
 private:
     std::unique_ptr<Ort::Env> m_env;
     std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
-    bool m_initialized = false;
-    bool m_lowLightEnhance = false;
-
     std::string m_inputName;
     std::string m_outputName;
-    std::vector<std::string> m_outputNames; // DeepPixBiS has 2 outputs
-    int m_inputSize = 224;
+    int m_inputHeight = 0;
+    int m_inputWidth = 0;
+    float m_cropScale = 0.0f;
+    bool m_initialized = false;
+};
+
+// Production PAD: MiniFASNetV2 (2.7x crop) and MiniFASNetV1SE (4.0x crop)
+// evaluated sequentially, then fused with an equal-weight arithmetic mean.
+// If either model fails, the fused prediction fails closed.
+class OnnxAntiSpoof {
+public:
+    OnnxAntiSpoof() = default;
+    ~OnnxAntiSpoof();
+
+    bool Initialize(const std::wstring& miniFasV2Path,
+                    const std::wstring& miniFasV1SePath);
+
+    // Returns the 50/50 fused real-face probability, or -1 on any model error.
+    float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
+                  const dlib::rectangle& rect);
+
+    bool IsInitialized() const { return m_initialized; }
+
+private:
+    std::unique_ptr<MiniFasEvaluator> m_miniFasV2;
+    std::unique_ptr<MiniFasEvaluator> m_miniFasV1Se;
+    bool m_initialized = false;
 };
 
 } // namespace facelogin

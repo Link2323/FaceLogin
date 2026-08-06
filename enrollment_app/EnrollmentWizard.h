@@ -7,6 +7,8 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <cstdint>
 #include <dlib/matrix.h>
 #include <dlib/pixel.h>
 
@@ -31,7 +33,7 @@ public:
 
     bool StartPreview();
     void StopPreview();
-    int  GetSampleCount() const { return m_samplesCollected; }
+    int  GetSampleCount() const { return m_samplesCollected.load(); }
     std::string GetUsername() const;
     std::string GetUserSid() const;
     std::string GetAccountType() const { return m_accountType; }
@@ -156,11 +158,11 @@ private:
     // Configuration
     AppConfig m_config;
     LivenessMethod m_livenessMethod = LivenessMethod::AntiSpoof;
-    float m_antiSpoofThreshold = 0.30f;
+    float m_antiSpoofThreshold = 0.281f;
 
     // Frame-grab thread (runs off UI thread — GrabFrame + JPEG encode + detection)
     std::thread m_frameThread;
-    bool m_frameRunning = false;
+    std::atomic<bool> m_frameRunning{false};
 
     // WIC factory (created once)
     IWICImagingFactory* m_wicFactory = nullptr;
@@ -170,24 +172,25 @@ private:
     std::string m_latestFrameB64;
     std::string m_latestFacesJson;
     dlib::matrix<dlib::rgb_pixel> m_latestFrame;   // for capture to read
+    std::uint64_t m_latestFrameSequence = 0;       // guarded by m_frameCacheMutex
 
     // Preview state
     bool m_previewRunning = false;
 
     // Enrollment state
     std::vector<dlib::matrix<float, 0, 1>> m_embeddings;
-    int m_samplesCollected = 0;
-    bool m_capturing = false;
-    bool m_livenessPassed = false;
-    bool m_livenessChecking = false;
+    std::atomic<int> m_samplesCollected{0};
+    std::atomic<bool> m_capturing{false};
+    std::atomic<bool> m_livenessPassed{false};
+    std::atomic<bool> m_livenessChecking{false};
     std::thread m_captureThread;
 
     // Multi-angle enrollment state (v1.5): per-angle sample counts (the flat
     // m_embeddings vector is grouped in angle order), current angle, and the
     // latest yaw estimate for the live UI readout.
-    int m_angleSampleCounts[3] = {0, 0, 0};
-    int m_captureAngle = 0;
-    float m_lastYaw = 0.0f;
+    std::atomic<int> m_angleSampleCounts[3] = {0, 0, 0};
+    std::atomic<int> m_captureAngle{0};
+    std::atomic<float> m_lastYaw{0.0f};
     static constexpr int kAngleTargetFrames = 5;
     static constexpr int kAngleTargets[3] = {0, 30, -30};  // 正面 / 左转 / 右转
 

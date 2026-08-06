@@ -26,7 +26,7 @@ namespace facelogin {
 //
 // The face recognition pipeline:
 //   Webcam -> SCRFD detection (+5 keypoints) -> 5-point similarity alignment
-//   -> 512-D embedding -> Match against stored DB -> DeepPixBiS silent
+//   -> 512-D embedding -> Match against stored DB -> dual MiniFAS silent
 //   anti-spoof check -> Send credentials
 
 class FaceService {
@@ -65,7 +65,7 @@ private:
     std::unique_ptr<PipeServer> m_pipeServer;
     std::unique_ptr<OnnxDetector> m_onnxDetector;       // SCRFD (face detection)
     std::unique_ptr<OnnxRecognizer> m_onnxRecognizer;   // InsightFace (recognition)
-    std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;        // MiniFASNetV2 (optional)
+    std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;        // V2 + V1SE (mandatory)
     std::unique_ptr<WebcamCapture>   m_webcamMF;   // Media Foundation (standalone)
     std::unique_ptr<WebcamCaptureDS> m_webcamDS;   // DirectShow (service mode)
     std::unique_ptr<CredentialStore> m_store;
@@ -73,7 +73,7 @@ private:
     // Configuration
     AppConfig m_config;
     LivenessMethod m_livenessMethod = LivenessMethod::AntiSpoof;
-    float m_antiSpoofThreshold = 0.30f;
+    float m_antiSpoofThreshold = 0.281f;
 
     bool m_isServiceMode = false;  // set by ServiceMain
 
