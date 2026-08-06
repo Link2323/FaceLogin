@@ -3,6 +3,7 @@ package internal
 import (
 	"fmt"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -115,7 +116,10 @@ func InstallService(exePath string) error {
 		if err != nil {
 			return fmt.Errorf("get service config: %w", err)
 		}
-		cfg.BinaryPathName = exePath
+		// EscapeArg matches the quoting that mgr.CreateService applies on the
+		// create path, so a re-install over an existing service keeps the
+		// binary path correctly quoted for paths containing spaces.
+		cfg.BinaryPathName = syscall.EscapeArg(exePath)
 		cfg.StartType = mgr.StartAutomatic
 		if err := s.UpdateConfig(cfg); err != nil {
 			return fmt.Errorf("update service config: %w", err)
