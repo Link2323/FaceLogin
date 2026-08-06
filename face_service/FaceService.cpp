@@ -410,7 +410,7 @@ void FaceService::Run() {
             if (m_isServiceMode) {
                 if (!m_webcamDS) {
                     m_webcamDS = std::make_unique<WebcamCaptureDS>();
-                    if (!m_webcamDS->Initialize(1280, 720, Utf8ToWstr(m_config.camera_device))) {
+                    if (!m_webcamDS->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
                         FACELOGIN_ERROR(L"DS camera init failed on demand");
                         m_webcamDS.reset();
                         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"摄像头不可用"));
@@ -432,7 +432,7 @@ void FaceService::Run() {
                 }
                 if (!m_webcamMF) {
                     m_webcamMF = std::make_unique<WebcamCapture>();
-                    if (!m_webcamMF->Initialize(1280, 720, Utf8ToWstr(m_config.camera_device))) {
+                    if (!m_webcamMF->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
                         FACELOGIN_ERROR(L"MF camera init failed on demand");
                         m_webcamMF.reset();
                         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"摄像头不可用"));
@@ -524,12 +524,15 @@ bool FaceService::ProcessAuthRequest() {
         return false;
     }
 
-    // Drop initial frames to let camera exposure adjust. 5 frames is enough
-    // (exposure settles within 3-5 frames); 10 frames wasted ~0.3s per auth.
+    // Drop initial frames to let camera exposure adjust. Exposure settles
+    // within 3 frames in practice (measured: match distance is stable from the
+    // first kept frame); 5 frames × 50ms was over-conservative. 3 frames × 20ms
+    // saves ~0.2s per auth with no accuracy regression (see
+    // docs/performance-baseline.md experiment 3).
     dlib::matrix<dlib::rgb_pixel> frame;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 3; i++) {
         grabFrame(frame);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
     // STATUS: Notify credential provider that recognition has started.
@@ -573,7 +576,7 @@ bool FaceService::ProcessAuthRequest() {
                 m_webcamMF->Shutdown();
                 m_webcamMF.reset();
                 m_webcamMF = std::make_unique<WebcamCapture>();
-                if (!m_webcamMF->Initialize(1280, 720, Utf8ToWstr(m_config.camera_device))) {
+                if (!m_webcamMF->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
                     FACELOGIN_ERROR(L"MF camera re-init failed");
                     m_webcamMF.reset();
                 }
@@ -759,7 +762,11 @@ bool FaceService::ProcessAuthRequest() {
                         if (score >= m_antiSpoofThreshold) passCount++; // config-driven threshold
                         FACELOGIN_INFO(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
 
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        // Inter-frame pacing for temporal diversity (distinct
+                        // frames resist video-replay attacks). 60ms keeps the
+                        // samples spread without the over-conservative 100ms
+                        // (see docs/performance-baseline.md experiment 3).
+                        std::this_thread::sleep_for(std::chrono::milliseconds(60));
                     }
                     // A partial sample set is not enough.  Previously one early
                     // passing frame could satisfy passRequired even when the

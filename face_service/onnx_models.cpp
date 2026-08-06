@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <future>
 #include <cstdlib>
 
 namespace facelogin {
@@ -642,8 +643,16 @@ float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
                              const dlib::rectangle& rect) {
     if (!m_initialized || !m_miniFasV2 || !m_miniFasV1Se) return -1.0f;
 
-    const float v2Score = m_miniFasV2->Predict(image, rect);
+    // V2 and V1SE are independent (each owns its own env/session, both pinned to
+    // a single intra-op thread, share no mutable state), so they can run
+    // concurrently.  This roughly halves the PAD inference portion of each
+    // anti-spoof frame.  Both operate on the same input image/rect, which is
+    // only read (dlib::matrix is not mutated by Predict), so the aliasing is
+    // safe.  std::async with std::launch::async guarantees a real thread.
+    auto v2Future = std::async(std::launch::async,
+        [&] { return m_miniFasV2->Predict(image, rect); });
     const float v1SeScore = m_miniFasV1Se->Predict(image, rect);
+    const float v2Score = v2Future.get();
     if (!std::isfinite(v2Score) || !std::isfinite(v1SeScore) ||
         v2Score < 0.0f || v2Score > 1.0f ||
         v1SeScore < 0.0f || v1SeScore > 1.0f) {

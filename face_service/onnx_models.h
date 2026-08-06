@@ -129,8 +129,9 @@ private:
 };
 
 // Production PAD: MiniFASNetV2 (2.7x crop) and MiniFASNetV1SE (4.0x crop)
-// evaluated sequentially, then fused with an equal-weight arithmetic mean.
-// If either model fails, the fused prediction fails closed.
+// evaluated concurrently (each owns its own session/env), then fused with an
+// equal-weight arithmetic mean.  If either model fails, the fused prediction
+// fails closed.
 class OnnxAntiSpoof {
 public:
     OnnxAntiSpoof() = default;
