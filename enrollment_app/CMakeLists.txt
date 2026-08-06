@@ -55,3 +55,24 @@ set_source_files_properties(FaceLoginEnrollment.manifest PROPERTIES
 set_target_properties(FaceLoginConsole PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources"
 )
+
+# assets/models is the sole source for every runtime ONNX model. Generate the
+# installer's ignored packaging copies whenever the enrollment console builds;
+# exact go:embed patterns make an incomplete model set a hard build failure.
+add_custom_command(TARGET FaceLoginConsole POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/assets/models/det_10g_gnkps.onnx"
+            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/det_10g_gnkps.onnx"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/assets/models/w600k_r50.onnx"
+            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/w600k_r50.onnx"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/assets/models/MiniFASNetV2.onnx"
+            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/MiniFASNetV2.onnx"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/assets/models/MiniFASNetV1SE.onnx"
+            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/MiniFASNetV1SE.onnx"
+    COMMENT "Preparing canonical runtime models for installer"
+)

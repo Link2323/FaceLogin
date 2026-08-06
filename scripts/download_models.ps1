@@ -1,93 +1,123 @@
-# FaceLogin Model Download Script
-# Downloads the model files required by the v1.5 pipeline:
-#   - det_10g_gnkps.onnx   (SCRFD 10g group-norm keypoints detector, ~15.5 MB)
-#   - w600k_r50.onnx       (InsightFace ResNet50 recognizer, ~174 MB)
+# FaceLogin canonical-model downloader.
 #
-# NOTE on det_10g_gnkps.onnx: the source repo (kunkunlin1221/face-detection_scrfd-10g-gnkps)
-# exports with two convention differences vs the C++ decoder: outputs interleaved
-# per stride (box_8/score_8/lmk5pt_8, ...) AND box/lmk pre-scaled by stride
-# (Mul(8/16/32) inside the graph — decoding would place keypoints stride-times
-# too far out). scripts/normalize_scrfd_export.py strips the Muls and reorders
-# the outputs; run it after downloading. (The 34g detector it replaced was
-# already in the decoder's convention — see git history.)
-#
-# The OULU anti-spoof model (OULU_Protocol_2_model_0_0.onnx) is small and
-# bundled with the installer, so it is not fetched here.
-#
-# Sources are HuggingFace mirrors reachable from mainland China
-# (huggingface.co direct is blocked there; hf-mirror.com works).
-# The dlib 68-point shape predictor is no longer used (v1.5 replaced it with
-# SCRFD's own 5 keypoints — see docs/side-face-plan-v2.md).
+# Fetches the four production ONNX files into assets\models by default.  The
+# SCRFD 10g upstream export is normalized before it is accepted: the C++
+# decoder requires raw stride units and grouped outputs, while the upstream
+# graph uses pre-scaled/interleaved outputs.  Every final artifact is pinned by
+# exact byte size and SHA-256 so a partial, stale, or raw detector export never
+# becomes a release input.
 
 param(
-    [string]$ModelsDir = "$env:ProgramData\FaceLogin\models"
+    [string]$ModelsDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\models'),
+    [string]$PythonExe = 'python'
 )
 
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  FaceLogin - Model Download Script" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Models will be downloaded to: $ModelsDir"
-Write-Host ""
+$ErrorActionPreference = 'Stop'
 
-# Create directory
-New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+$detector = @{
+    Name = 'det_10g_gnkps.onnx'
+    Url = 'https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/main/scrfd_10g_gnkps_fp32.onnx'
+    RawSize = 16273449
+    Size = 16272909
+    Sha256 = 'C940F97765FDC4B872B4A1EA041248D3E3D550202B7639F9488BE558A6C0ACB0'
+}
+$recognizer = @{
+    Name = 'w600k_r50.onnx'
+    Url = 'https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/main/w600k_r50.onnx'
+    Size = 174383860
+    Sha256 = '4C06341C33C2CA1F86781DAB0E829F88AD5B64BE9FBA56E56BC9EBDEFC619E43'
+}
 
-# Model URLs (verified 2026-08-05; byte sizes are exact)
-$models = @(
-    @{
-        Name = "det_10g_gnkps.onnx"
-        Url  = "https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/main/scrfd_10g_gnkps_fp32.onnx"
-        Size = 16273449
-    },
-    @{
-        Name = "w600k_r50.onnx"
-        Url  = "https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/main/w600k_r50.onnx"
-        Size = 174383860
-    }
-)
+function Test-PinnedFile {
+    param(
+        [string]$Path,
+        [Int64]$ExpectedSize,
+        [string]$ExpectedSha256
+    )
 
-foreach ($model in $models) {
-    $file = Join-Path $ModelsDir $model.Name
-
-    if (Test-Path $file) {
-        $fileInfo = Get-Item $file
-        if ($fileInfo.Length -eq $model.Size) {
-            Write-Host "[SKIP] $($model.Name) already exists (size OK)." -ForegroundColor Green
-            continue
-        }
-        Write-Host "[RESUME] $($model.Name) exists but size mismatch ($($fileInfo.Length) vs $($model.Size)). Redownloading." -ForegroundColor Yellow
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
     }
 
-    Write-Host "[DOWNLOAD] $($model.Name)" -ForegroundColor Yellow
-    Write-Host "  URL: $($model.Url)"
-    Write-Host "  Expected: $([math]::Round($model.Size / 1MB, 1)) MB"
+    if ((Get-Item -LiteralPath $Path).Length -ne $ExpectedSize) {
+        return $false
+    }
 
+    $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    return $actualSha256 -ieq $ExpectedSha256
+}
+
+function Download-File {
+    param(
+        [string]$Url,
+        [string]$Destination
+    )
+
+    $temporary = "$Destination.download"
+    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     try {
-        Invoke-WebRequest -Uri $model.Url -OutFile $file -ErrorAction Stop
-        $fileInfo = Get-Item $file
-        if ($fileInfo.Length -ne $model.Size) {
-            Write-Host "  WARNING: size $($fileInfo.Length) != expected $($model.Size) — file may be corrupt." -ForegroundColor Red
-        } else {
-            Write-Host "  Download complete. Size verified." -ForegroundColor Green
-        }
+        Invoke-WebRequest -Uri $Url -OutFile $temporary
+        Move-Item -LiteralPath $temporary -Destination $Destination -Force
     }
-    catch {
-        Write-Host "  ERROR: Download failed: $_" -ForegroundColor Red
-        Write-Host "  Please download manually from: $($model.Url)"
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
 }
 
-Write-Host ""
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "Model download complete." -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Models location: $ModelsDir"
-Write-Host ""
-Write-Host "Required files:"
-Write-Host "  1. det_10g_gnkps.onnx (~15.5 MB; normalize with scripts/normalize_scrfd_export.py)"
-Write-Host "  2. w600k_r50.onnx (~174 MB)"
-Write-Host "  3. OULU_Protocol_2_model_0_0.onnx (bundled with the installer)"
-Write-Host ""
-Write-Host "Next step: Run the FaceLoginSetup.exe installer, or place the models in the install dir."
-Write-Host "============================================" -ForegroundColor Cyan
+Write-Host '============================================' -ForegroundColor Cyan
+Write-Host '  FaceLogin - Canonical Model Downloader' -ForegroundColor Cyan
+Write-Host '============================================' -ForegroundColor Cyan
+Write-Host "Models directory: $ModelsDir"
+
+New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+
+$detectorPath = Join-Path $ModelsDir $detector.Name
+if (Test-PinnedFile -Path $detectorPath -ExpectedSize $detector.Size -ExpectedSha256 $detector.Sha256) {
+    Write-Host "[SKIP] $($detector.Name) is already normalized and verified." -ForegroundColor Green
+}
+else {
+    $rawDetectorPath = "$detectorPath.raw-download"
+    Write-Host "[DOWNLOAD] raw $($detector.Name)" -ForegroundColor Yellow
+    try {
+        Download-File -Url $detector.Url -Destination $rawDetectorPath
+        if ((Get-Item -LiteralPath $rawDetectorPath).Length -ne $detector.RawSize) {
+            throw "Raw detector size is unexpected: $rawDetectorPath"
+        }
+
+        $normalizer = Join-Path $PSScriptRoot 'normalize_scrfd_export.py'
+        Write-Host '[NORMALIZE] converting SCRFD export to the decoder convention' -ForegroundColor Yellow
+        & $PythonExe $normalizer $rawDetectorPath $detectorPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "SCRFD normalization failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $rawDetectorPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not (Test-PinnedFile -Path $detectorPath -ExpectedSize $detector.Size -ExpectedSha256 $detector.Sha256)) {
+        throw "Normalized detector did not match the pinned artifact: $detectorPath"
+    }
+    Write-Host "[OK] $($detector.Name) normalized and verified." -ForegroundColor Green
+}
+
+$recognizerPath = Join-Path $ModelsDir $recognizer.Name
+if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256) {
+    Write-Host "[SKIP] $($recognizer.Name) is already verified." -ForegroundColor Green
+}
+else {
+    Write-Host "[DOWNLOAD] $($recognizer.Name)" -ForegroundColor Yellow
+    Download-File -Url $recognizer.Url -Destination $recognizerPath
+    if (-not (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256)) {
+        throw "Recognizer did not match the pinned artifact: $recognizerPath"
+    }
+    Write-Host "[OK] $($recognizer.Name) verified." -ForegroundColor Green
+}
+
+# The shared downloader pins and verifies both calibrated MiniFAS models.
+$miniFasDownloader = Join-Path $PSScriptRoot 'download_minifas_models.ps1'
+& $miniFasDownloader -Destination $ModelsDir
+
+Write-Host ''
+Write-Host 'All four canonical runtime models are verified.' -ForegroundColor Green
+Write-Host 'For standalone/service debugging, copy assets\models\*.onnx to the configured DataPath\models directory.'
