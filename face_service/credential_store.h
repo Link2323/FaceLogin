@@ -67,9 +67,15 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 // The file is protected by ACLs (SYSTEM + Administrators only).
 // Passwords are encrypted with DPAPI CRYPTPROTECT_LOCAL_MACHINE.
 
-// Maximum faces one account may enroll. Prevents abuse; AddFace rejects when
-// the account already has this many faces.
-inline constexpr size_t kMaxFacesPerUser = 5;
+// Maximum number of user accounts in the database. One Windows machine
+// typically has ≤5 local accounts; this cap keeps the lock-screen tile list
+// short and prevents abuse.
+inline constexpr size_t kMaxUsers = 5;
+
+// Maximum faces one account may enroll. Multi-angle enrollment uses up to 3
+// (正面/左转/右转), so this is also the natural per-account limit. AddFace
+// rejects when the account already has this many faces.
+inline constexpr size_t kMaxFacesPerUser = 3;
 
 // Passwordless account: the encryptedPassword field holds a single sentinel
 // byte instead of a DPAPI blob. (An empty vector is also treated as
@@ -81,9 +87,10 @@ inline bool IsPasswordlessRecord(const std::vector<uint8_t>& encryptedPassword) 
             encryptedPassword[0] == kPasswordlessSentinelByte);
 }
 
-// One enrolled face for a user account (V4). Each face carries a stable,
-// per-account id (never reused after deletion) and a user-given label
-// (defaults to L"脸N" where N = id).
+// One enrolled face for a user account (V4). Each face carries a per-account
+// id and a user-given label (defaults to L"脸N" where N = id). New ids reuse
+// the smallest free slot (deleting #2 then re-adding gives #2 again), keeping
+// the user-visible list compact.
 struct FaceRecord {
     uint32_t           id = 0;
     std::wstring       label;              // display name; "脸N" if user left blank
@@ -124,8 +131,9 @@ public:
 
     // Add a face to a user account (create-or-append):
     //   - Account not found: creates it with the given encrypted password and
-    //     the first face (id = 1).
-    //   - Account found: appends a new face (id = max(existing)+1) WITHOUT
+    //     the first face (id = 1). Rejects when the database already has
+    //     kMaxUsers accounts.
+    //   - Account found: appends a new face (id = smallest free slot) WITHOUT
     //     touching existing faces or the stored password. The passed
     //     encryptedPassword is ignored in this case.
     // Rejects (returns false) when the account already holds
@@ -170,6 +178,13 @@ public:
     // Remove an account entirely (equivalent to deleting all of its faces).
     // Call SaveDatabase() to persist.
     bool ClearAllFaces(const std::wstring& sid);
+
+    // Remove all faces from an account but keep the account identity
+    // (username/UPN/SID/password). Used when re-enrolling multi-angle: the old
+    // angle records are replaced, not accumulated.
+    // Returns false if the account is not found.
+    // Call SaveDatabase() to persist.
+    bool ClearFacesForAccount(const std::wstring& sid);
 
     // Remove an account by SID. Call SaveDatabase() to persist.
     bool DeleteUserBySid(const std::wstring& sid);

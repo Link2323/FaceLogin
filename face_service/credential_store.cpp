@@ -385,9 +385,17 @@ bool CredentialStore::AddFace(const std::wstring& username,
                            username.c_str(), rec.faces.size(), kMaxFacesPerUser);
             return false;
         }
+        // Reuse the smallest free id so ids stay compact (1..N) after
+        // deletions — otherwise deleting #2 and re-adding leaves gaps like
+        // #1,#3,#4. (Multi-angle replace already restarts ids at 1 after
+        // ClearFacesForAccount, so "never reuse" was never a real invariant.)
         uint32_t newId = 1;
-        for (const auto& f : rec.faces) {
-            if (f.id >= newId) newId = f.id + 1;
+        bool taken = true;
+        while (taken) {
+            taken = false;
+            for (const auto& f : rec.faces) {
+                if (f.id == newId) { taken = true; newId++; break; }
+            }
         }
         FaceRecord face;
         face.id = newId;
@@ -406,6 +414,11 @@ bool CredentialStore::AddFace(const std::wstring& username,
     }
 
     // Account not found → create it with the given password and first face.
+    if (m_users.size() >= kMaxUsers) {
+        FACELOGIN_WARN(L"AddFace rejected: database has %zu users (max %zu)",
+                       m_users.size(), kMaxUsers);
+        return false;
+    }
     UserRecord rec;
     rec.username = username;
     rec.upn = upn;
@@ -501,6 +514,19 @@ bool CredentialStore::DeleteFace(const std::wstring& sid, uint32_t faceId) {
 
 bool CredentialStore::ClearAllFaces(const std::wstring& sid) {
     return DeleteUserBySid(sid);
+}
+
+bool CredentialStore::ClearFacesForAccount(const std::wstring& sid) {
+    size_t idx = FindUserIndex(sid, L"", L"");
+    if (idx >= m_users.size()) {
+        FACELOGIN_WARN(L"ClearFacesForAccount: account not found (SID=%s)", sid.c_str());
+        return false;
+    }
+    size_t removed = m_users[idx].faces.size();
+    m_users[idx].faces.clear();
+    FACELOGIN_INFO(L"Cleared %zu face(s) from %s (SID=%s), account identity preserved",
+                   removed, m_users[idx].username.c_str(), sid.c_str());
+    return true;
 }
 
 bool CredentialStore::DeleteUserBySid(const std::wstring& sid) {

@@ -264,7 +264,7 @@ body{
     <div class="banner" id="faces-banner"></div>
     <div class="faces-head">
       <h2>人脸管理</h2>
-      <span class="samples-tag" id="faces-count">0 / 5 张</span>
+      <span class="samples-tag" id="faces-count">0 / 3 张</span>
     </div>
     <p class="dim">当前账号：<span id="faces-user">-</span></p>
     <div class="face-list" id="face-list"></div>
@@ -287,7 +287,7 @@ body{
   <div class="tabs"><span class="tab active">录入</span></div>
   <div class="pwd-body">
     <div class="banner" id="append-banner"></div>
-    <h2>添加新人脸</h2>
+    <h2 id="append-title">添加新人脸</h2>
     <div class="field">
       <label>用户名 (UPN)</label>
       <input type="text" id="append-user" readonly>
@@ -296,7 +296,7 @@ body{
       <label>SID</label>
       <input type="text" id="append-sid" readonly>
     </div>
-    <div class="field">
+    <div class="field" id="append-label-field">
       <label>给这张脸命名</label>
       <input type="text" id="append-face-label" placeholder="可留空，默认如“脸N”" maxlength="32">
     </div>
@@ -304,9 +304,10 @@ body{
     <div style="display:flex;gap:8px;margin-top:8px">
       <button class="btn btn-primary" id="btn-append" onclick="onAppendConfirm()" style="flex:1">
         <span class="spinner" id="append-spinner"></span>
-        确认追加
+        <span id="btn-append-text">确认追加</span>
       </button>
       <button class="btn btn-secondary" id="btn-append-cancel" onclick="onAppendCancel()" style="flex:1">取消</button>
+    </div>
     </div>
   </div>
   <div class="footer"><p>FaceLogin Console</p></div>
@@ -472,6 +473,8 @@ body{
 <script>
 var H = window.chrome.webview.hostObjects.sync.host;
 var viewing = true, lastB64 = '', lastFacesJson = '', timer = 0, faceImg = new Image();
+var captureMultiAngle = false;  // set by onCapture, read by finishCapture / showAppendScreen
+var captureAngleIndex = 0;  // angle being captured; used to name/describe a single-angle append
 var camReady = false, currentTab = 'cam';
 var refreshState = 0;  // account-type-change state shown in the refresh modal (0/1/2)
 
@@ -706,22 +709,58 @@ function onCapture() {
   var btn = document.getElementById('btn-capture');
   var spinner = document.getElementById('cap-spinner');
   var prog = document.getElementById('cap-progress');
+
+  // Pre-check face slot limit for single-angle mode.
+  // Multi-angle always allowed (server replaces old faces via ClearFacesForAccount).
+  var faceCount = 0;
+  try { faceCount = H.GetFaceCount(); } catch(e) {}
+  var multi = false;
+  try { multi = document.getElementById('chk-multi-angle').checked; } catch(e) {}
+  if (!multi && faceCount >= 3) {
+    showBanner('cam', '已达每账号上限（3 张脸）。请用多角度录入替换全部，或先删除旧脸。', 'error', 6000);
+    return;
+  }
+
+  captureMultiAngle = multi;  // remember for finishCapture / showAppendScreen
+
   btn.disabled = true;
   spinner.style.display = 'inline-block';
   prog.style.display = 'block';
   document.getElementById('cap-pct').textContent = '';
   document.getElementById('cap-fill').style.width = '0%';
 
-  // How many angles to capture: multi-angle mode uses 3 positions, capped by
-  // the remaining face slots (5 max per account, 3 angles per enrollment).
-  var faceCount = 0;
-  try { faceCount = H.GetFaceCount(); } catch(e) {}
-  var multi = false;
-  try { multi = document.getElementById('chk-multi-angle').checked; } catch(e) {}
   var angles = 1;
-  if (multi) angles = Math.max(1, Math.min(3, 5 - faceCount));
+  if (multi) angles = 3;
 
-  captureAngleSequence(0, angles);
+  // Single-angle append: capture the FIRST MISSING angle, not always the
+  // front. First enrollment (no faces) -> front angle.
+  try {
+    captureAngleIndex = multi ? 0 : pickMissingAngle(faceCount);
+    captureAngleSequence(captureAngleIndex, angles);
+  } catch(e) {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+    prog.style.display = 'none';
+    showBanner('cam', '开始采集失败: ' + e.message, 'error');
+  }
+}
+
+var ANGLE_LABELS = ['正面', '左转', '右转'];
+
+// For a single-angle append, pick the FIRST missing angle (正面/左转/右转)
+// based on the labels of faces already enrolled. Old records labeled 脸N
+// carry no angle info -> fall back to the front angle.
+function pickMissingAngle(faceCount) {
+  if (faceCount <= 0) return 0;
+  var have = {};
+  try {
+    var arr = JSON.parse(H.GetFacesJson());
+    for (var i = 0; i < arr.length; i++) if (arr[i].label) have[arr[i].label] = true;
+  } catch(e) {}
+  for (var a = 0; a < ANGLE_LABELS.length; a++) {
+    if (!have[ANGLE_LABELS[a]]) return a;
+  }
+  return 0;
 }
 
 var ANGLE_INSTR = {
@@ -733,15 +772,44 @@ var ANGLE_INSTR = {
 // Drive one capture angle at a time: call CaptureFaceSamples(angle), poll
 // GetCaptureStatus, show the instruction + live progress, then move on.
 function captureAngleSequence(idx, total) {
-  H.CaptureFaceSamples(idx);
-
   var btn = document.getElementById('btn-capture');
   var prog = document.getElementById('cap-progress');
   var spinner = document.getElementById('cap-spinner');
 
+  // Start the capture. A false return means a previous capture is still
+  // winding down server-side — surface that instead of freezing silently.
+  var started = true;
+  try { started = H.CaptureFaceSamples(idx); } catch(e) { started = false; }
+  if (started === false) {
+    clearTimeout(timer);
+    prog.style.display = 'none';
+    btn.disabled = false;
+    spinner.style.display = 'none';
+    document.getElementById('cap-step').textContent = '等待中...';
+    showBanner('cam', '采集未能启动：上一次采集可能仍在进行，请稍候几秒再试。', 'error');
+    return;
+  }
+
+  // Watchdog: if the server reports no activity for 25s, the capture thread
+  // is stuck (e.g. camera stall) — fail visibly instead of hanging forever.
+  var pollStart = Date.now();
+  var gotProgress = false;
+
   var poll = setInterval(function() {
     var st;
     try { st = JSON.parse(H.GetCaptureStatus()); } catch(e) { return; }
+
+    if (st.collected > 0) gotProgress = true;
+    if (!gotProgress && !st.done && st.collected === 0 && Date.now() - pollStart > 25000) {
+      clearInterval(poll);
+      prog.style.display = 'none';
+      btn.disabled = false;
+      spinner.style.display = 'none';
+      document.getElementById('cap-step').textContent = '采集未完成...';
+      document.getElementById('cap-pct').textContent = '0%';
+      showBanner('cam', '采集超时未开始：摄像头无响应，请检查摄像头后重试。', 'error');
+      return;
+    }
 
     // Liveness phase (runs once, at the front position).
     if (st.livenessChecking) {
@@ -765,7 +833,9 @@ function captureAngleSequence(idx, total) {
     if (st.collected < st.target) {
       document.getElementById('cap-step').textContent = ANGLE_INSTR[st.angle] || '采集人脸样本...';
       document.getElementById('samples-tag').textContent =
-        '角度 ' + (idx + 1) + '/' + total + ' · ' + st.collected + ' / ' + st.target + ' 帧';
+        (total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · '
+                   : '采集「' + ANGLE_LABELS[idx] + '」 · ') +
+        st.collected + ' / ' + st.target + ' 帧';
       var pct = Math.round(st.collected / st.target * 100);
       document.getElementById('cap-fill').style.width = pct + '%';
       document.getElementById('cap-pct').textContent = pct + '%';
@@ -774,7 +844,9 @@ function captureAngleSequence(idx, total) {
 
     // This angle is complete — move on to the next one.
     clearInterval(poll);
-    document.getElementById('samples-tag').textContent = '角度 ' + (idx + 1) + '/' + total + ' · 完成';
+    document.getElementById('samples-tag').textContent =
+      total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · 完成'
+               : '「' + ANGLE_LABELS[idx] + '」采集完成';
     if (idx + 1 < total) {
       setTimeout(function() { captureAngleSequence(idx + 1, total); }, 400);
       return;
@@ -815,7 +887,7 @@ function finishCapture() {
         return;
       }
     } catch(e) {}
-    showAppendScreen(faceCount);
+    showAppendScreen(faceCount, captureMultiAngle);
     return;
   }
 
@@ -878,7 +950,7 @@ function loadFaces() {
     var faces = JSON.parse(H.GetFacesJson());
     var count = H.GetFaceCount();
     var list = document.getElementById('face-list');
-    document.getElementById('faces-count').textContent = count + ' / 5 张';
+    document.getElementById('faces-count').textContent = count + ' / 3 张';
     try { document.getElementById('faces-user').textContent = H.GetUsername(); } catch(e) {}
 
     if (faces.length === 0) {
@@ -900,8 +972,38 @@ function loadFaces() {
 }
 
 function goAddFace() {
+  var faceCount = 0;
+  try { faceCount = H.GetFaceCount(); } catch(e) {}
+  var multi = false;
+  try { multi = document.getElementById('chk-multi-angle').checked; } catch(e) {}
+
+  // Multi-angle re-enrollment REPLACES all old faces — destructive, so confirm
+  // whenever the account already has faces (not only at the per-account cap).
+  // Declining switches to single-angle append (auto-picks the missing angle).
+  if (multi && faceCount > 0) {
+    if (confirm('当前账号已有 ' + faceCount + ' 张人脸。多角度录入将覆盖全部旧脸（正面/左转/右转各一张）。' + '\n\n' + '「确定」覆盖重录，「取消」改为单角度追加。')) {
+      switchTab('cam');
+      showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
+      return;
+    }
+    try { document.getElementById('chk-multi-angle').checked = false; } catch(e) {}
+    switchTab('cam');
+    showBanner('cam', '点击「开始采集」即可补录缺失角度（正面/左转/右转）。', 'ok', 6000);
+    return;
+  }
+
+  // Single-angle append at the per-account cap is impossible — force
+  // multi-angle replacement instead.
+  if (faceCount >= 3) {
+    try { document.getElementById('chk-multi-angle').checked = true; } catch(e) {}
+    if (!confirm('当前账号已有 3 张人脸，已达上限。继续将使用多角度录入（正面/左转/右转）覆盖全部旧脸。' + '\n\n' + '是否覆盖？')) return;
+    switchTab('cam');
+    showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
+    return;
+  }
+
   switchTab('cam');
-  showBanner('cam', '点击“开始采集”即可为当前账号追加一张新人脸。', 'ok', 6000);
+  showBanner('cam', '点击「开始采集」即可为当前账号追加一张新人脸。', 'ok', 6000);
 }
 
 function onDeleteFace(id) {
@@ -1056,14 +1158,29 @@ function onRefreshDismiss() {
 }
 
 // Show the append-face confirmation screen (current account already has faces).
-function showAppendScreen(faceCount) {
+// When isReplace is true (multi-angle re-enrollment), old faces are cleared and
+// the three new angle faces replace them. Otherwise it is a single-angle append.
+function showAppendScreen(faceCount, isReplace) {
   document.getElementById('screen-cam').classList.remove('active');
   document.getElementById('screen-append').classList.add('active');
   try { document.getElementById('append-user').value = H.GetUsername(); } catch(e) {}
   try { document.getElementById('append-sid').value = H.GetUserSid(); } catch(e) {}
   try { document.getElementById('append-face-label').value = ''; } catch(e) {}
-  document.getElementById('append-info').textContent =
-    '当前账号已有 ' + faceCount + ' 张脸，将追加第 ' + (faceCount + 1) + ' 张。追加无需再次输入密码。';
+
+  if (isReplace) {
+    document.getElementById('append-title').textContent = '替换全部人脸';
+    document.getElementById('append-label-field').style.display = 'none';
+    document.getElementById('append-info').textContent =
+      '多角度录入将替换当前账号的 ' + faceCount + ' 张旧脸（正面 / 左转 / 右转各一张）。旧脸数据将被清除。';
+    document.getElementById('btn-append-text').textContent = '确认替换';
+    showBanner('append', '多角度重录入：旧脸将被替换，账号密码不变。', 'ok');
+  } else {
+    document.getElementById('append-title').textContent = '添加新人脸';
+    document.getElementById('append-label-field').style.display = '';
+    document.getElementById('append-info').textContent =
+      '当前账号已有 ' + faceCount + ' 张脸，将补录「' + ANGLE_LABELS[captureAngleIndex] + '」角度。追加无需再次输入密码。';
+    document.getElementById('btn-append-text').textContent = '确认追加';
+  }
 }
 
 function onAppendConfirm() {

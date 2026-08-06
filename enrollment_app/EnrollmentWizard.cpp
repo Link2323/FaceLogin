@@ -480,15 +480,24 @@ std::string EnrollmentWizard::GetUsername() const {
 }
 
 bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
-    if (m_capturing) return false;
     if (angleIndex < 0 || angleIndex > 2) {
         FACELOGIN_ERROR(L"CaptureFaceSamples: invalid angle %d", angleIndex);
         return false;
     }
 
-    // Join previous capture thread if it exists (prevents std::terminate on reassignment)
-    if (m_captureThread.joinable())
+    // Join the previous capture thread if one exists — REQUIRED before
+    // reassigning m_captureThread (an un-joined joinable thread terminates
+    // the process). If it is still running (m_capturing stuck true, e.g. the
+    // user clicked Start again mid-capture or a prior capture was interrupted
+    // by a page switch), wait for it instead of silently returning false —
+    // the capture loop has its own fail counters, so this join is bounded
+    // (~20s worst case).
+    if (m_captureThread.joinable()) {
+        if (m_capturing)
+            FACELOGIN_WARN(L"CaptureFaceSamples: previous capture still running — waiting for it to finish");
         m_captureThread.join();
+        m_capturing = false;
+    }
 
     m_capturing = true;
     m_captureAngle = angleIndex;
@@ -498,6 +507,19 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         m_samplesCollected = 0;
         m_embeddings.clear();
         m_angleSampleCounts[0] = m_angleSampleCounts[1] = m_angleSampleCounts[2] = 0;
+    } else {
+        // Non-front angle: keep the embeddings captured for EARLIER angles
+        // (multi-angle continuation) but drop stale samples left in this
+        // angle's slot by a previous round. Without this trim, a single-angle
+        // re-capture of the same angle after a save/cancel would see the
+        // leftover count == target and the loop below would finish instantly
+        // with zero new frames, jumping straight to the confirm screen.
+        size_t prior = 0;
+        for (int a = 0; a < angleIndex; a++)
+            prior += static_cast<size_t>(m_angleSampleCounts[a]);
+        if (m_embeddings.size() > prior)
+            m_embeddings.resize(prior);
+        m_angleSampleCounts[angleIndex] = 0;
     }
     m_livenessPassed = false;
     m_livenessChecking = (angleIndex == 0);
@@ -851,6 +873,47 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
 
     m_store.LoadDatabase();
 
+    // --- Slot pre-check (bug4 fix) ---
+    // Two-level cap: kMaxUsers accounts total, kMaxFacesPerUser faces per account.
+    // Multi-angle re-enrollment REPLACES old faces (not appends) so it never
+    // overflows per-account; single-angle append and new-account creation are
+    // checked below.
+    size_t existingIdx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+    const bool accountExists = existingIdx < m_store.GetUsers().size();
+    if (accountExists) {
+        if (multiAngle) {
+            // Multi-angle re-enrollment: clear old faces, keep account identity.
+            if (!m_store.ClearFacesForAccount(m_sid)) {
+                FACELOGIN_ERROR(L"Failed to clear existing faces for multi-angle re-enrollment");
+                return false;
+            }
+            // After clearing, the account still exists in m_users (identity +
+            // password intact, faces empty). The loop below will find it via
+            // FindUserIndex → all angles use the append branch, which preserves
+            // the stored password. End result: old faces replaced, account
+            // identity untouched.
+        } else {
+            // Single-angle append: check per-account face slots.
+            size_t currentFaces = m_store.GetUsers()[existingIdx].faces.size();
+            if (currentFaces + groups.size() > facelogin::kMaxFacesPerUser) {
+                FACELOGIN_ERROR(L"Not enough face slots: %s has %zu face(s), "
+                               L"need %zu more (max %zu per account). "
+                               L"Delete unused faces or re-enroll with multi-angle to replace all.",
+                               m_username.c_str(), currentFaces, groups.size(),
+                               facelogin::kMaxFacesPerUser);
+                return false;
+            }
+        }
+    } else {
+        // New account: check global user cap.
+        if (m_store.GetUsers().size() >= facelogin::kMaxUsers) {
+            FACELOGIN_ERROR(L"Cannot create new account: database has %zu users (max %zu). "
+                           L"Delete an unused account first.",
+                           m_store.GetUsers().size(), facelogin::kMaxUsers);
+            return false;
+        }
+    }
+
     // Consistency + averaging are done PER ANGLE GROUP — cross-angle samples
     // are NEVER averaged (the embedding space is pose-sensitive; a cross-angle
     // average drifts toward the match boundary, see docs/side-face-plan-v2).
@@ -863,8 +926,9 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
         // Same-person distances are typically well below 0.80 (the ONNX
         // boundary); different people exceed it.
         //
-        // The cap is calibrated via EmbeddingThresholdForDim: 512-D InsightFace
-        // ONNX uses 0.80 (measured same-person boundary, see credential_store.h).
+        // Same-person cap for 512-D ONNX: 0.80 (measured boundary, credential_store.h).
+        // EmbeddingThresholdForDim returns 0.80 for ≥256-D regardless of base;
+        // passing 0.80 explicitly avoids the misleading dlib-era 0.45 legacy value.
         {
             double totalDist = 0.0;
             int pairs = 0;
@@ -881,7 +945,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
                 }
             }
             double avgPairDist = (pairs > 0) ? totalDist / pairs : 0.0;
-            float maxAllowed = EmbeddingThresholdForDim(0.45f, dim);
+            float maxAllowed = EmbeddingThresholdForDim(0.80f, dim);
             FACELOGIN_INFO(L"Enrollment consistency [%ls]: avg pairwise dist=%.4f (max=%.3f, %d pairs, %zu-D)",
                           g.label, avgPairDist, maxAllowed, pairs, dim);
             if (avgPairDist > maxAllowed) {
@@ -915,7 +979,11 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
         // untouched (the user is the logged-on session owner, already trusted).
         // In multi-angle mode each angle is one AddFace: the create branch
         // runs for angle 0, the append branch for angles 1-2.
-        std::wstring groupLabel = multiAngle ? g.label : label;
+        // Label: multi-angle always uses the angle name. Single-angle keeps a
+        // user-provided name, falling back to the angle name (正面/左转/右转)
+        // so an appended face is not labeled with the generic 脸N.
+        std::wstring groupLabel = label;
+        if (multiAngle || groupLabel.empty()) groupLabel = g.label;
         size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
         uint32_t newFaceId = 0;
         if (idx >= m_store.GetUsers().size()) {
@@ -967,6 +1035,12 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
                   &written, nullptr);
         CloseHandle(hPipe);
     }
+
+    // Capture buffer consumed — reset it so the next capture starts clean.
+    // Without this, a re-capture of the same angle would see the leftover
+    // sample count and complete instantly with zero new frames (bug4 test).
+    m_embeddings.clear();
+    m_angleSampleCounts[0] = m_angleSampleCounts[1] = m_angleSampleCounts[2] = 0;
     return true;
 }
 

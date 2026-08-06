@@ -502,9 +502,9 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除，仅保留 DeepPixBiS 静默�
   sid:            wchar_t[sidLen]         (V2+, e.g. "S-1-5-21-...")
   passwordLen:    uint32_t
   encryptedPass:  uint8_t[passwordLen]    (DPAPI 加密，或 0/1 字节 passwordless 哨兵)
-  faceCount:      uint32_t                (V4, ≥1, ≤ kMaxFacesPerUser=5)
+  faceCount:      uint32_t                (V4, ≥1, ≤ kMaxFacesPerUser=3)
   [faces] × faceCount:
-    faceId:       uint32_t                (V4, 账号内唯一，≥1，删除后不复用)
+    faceId:       uint32_t                (V4, 账号内唯一，≥1，新脸复用最小空位，保持紧凑)
     labelLen:     uint32_t                (V4, 0 = 空)
     label:        wchar_t[labelLen]       (V4, 用户命名，默认 "脸N")
     embLen:       uint32_t
@@ -513,7 +513,7 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除，仅保留 DeepPixBiS 静默�
 
 **V1/V2/V3 向后兼容**: V1 加载时用 `LookupAccountNameW` + IdentityStore 注册表自动补 SID/UPN；V1/V2 固定 128-D embedding，V3 长度前缀 embedding。**加载时在内存中把单条 embedding 包装成单元素 `faces`（id=1，label="脸1"）升级为 V4 结构，但不写回磁盘**——文件保持旧版本直到下一次 `SaveDatabase()`（录入/删除时）才写为 V4。这保证旧版安装的磁贴仍可读取 header。
 
-**每账号多人脸**: `UserRecord.faces` 为 `vector<FaceRecord>`（`FaceRecord = {id, label, embedding}`）。`AddFace` 是 create-or-append：账号不存在则创建（首脸 id=1），存在则追加新脸（id=max+1）且**不动已存密码**；超 `kMaxFacesPerUser`（5）拒绝。`DeleteFace` 删某张脸，删后无脸则连带移除整个账号（0 脸账号永不落盘）。匹配为账号级聚合：账号内取各脸最小距离作为账号距离，账号间比较 best/second-best，避免同账号多脸互相竞争抬高 ratio。
+**每账号多人脸**: `UserRecord.faces` 为 `vector<FaceRecord>`（`FaceRecord = {id, label, embedding}`）。`AddFace` 是 create-or-append：账号不存在则创建（首脸 id=1），存在则追加新脸（id=最小空位，删除后补录保持紧凑）且**不动已存密码**；全局 `kMaxUsers`（5）账号上限、每账号 `kMaxFacesPerUser`（3）脸数上限，超限拒绝。`DeleteFace` 删某张脸，删后无脸则连带移除整个账号（0 脸账号永不落盘）。`ClearFacesForAccount` 清空某账号全部脸但保留身份/密码（多角度重录入替换用）。匹配为账号级聚合：账号内取各脸最小距离作为账号距离，账号间比较 best/second-best，避免同账号多脸互相竞争抬高 ratio。
 
 **线程安全**: 所有操作在调用者持有锁的前提下执行。服务端在主循环中串行处理请求，无并发写入场景；唯一写者是录入控制台（单写者）。
 
