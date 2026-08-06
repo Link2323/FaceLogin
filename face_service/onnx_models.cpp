@@ -14,8 +14,10 @@
 namespace facelogin {
 
 // ONNX intra-op thread count. Defaults to half the machine's logical cores
-// (capped at 4 — beyond that sync overhead and system-lag risk outweigh the
-// gains on these models). Overridable via FACELOGIN_ONNX_THREADS env var.
+// (capped at 8 — measured on a 16c/32t Ryzen 9 7945HX, raising from 4→8 cut
+// w600k_r50 per-call latency with no system-lag regression; see
+// docs/performance-baseline.md perf2). Lower-core machines naturally use fewer
+// via the cores/2 floor. Overridable via FACELOGIN_ONNX_THREADS env var.
 // Inter-op parallelism is pinned to 1 (our callers are single-graph, so a
 // second inter-op pool only adds contention without throughput benefit).
 static int OnnxThreadCount() {
@@ -26,7 +28,7 @@ static int OnnxThreadCount() {
     int n = static_cast<int>(std::thread::hardware_concurrency());
     if (n <= 0) return 2;
     n = std::max(2, n / 2);   // half of logical cores
-    if (n > 4) return 4;
+    if (n > 8) return 8;
     return n;
 }
 
