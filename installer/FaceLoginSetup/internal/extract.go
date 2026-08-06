@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
 // EmbeddedFS is set by the caller (main.go's //go:embed resources/*).
@@ -233,6 +235,55 @@ func ExtractAll(destDir string, progressFn func(step, total int, name string)) e
 // removeUserData: when true, additionally deletes the data/ (config.json,
 // enrolled face database) and log/ (logs) subdirectories — i.e. a full purge.
 // When false, only program files are removed and user data is preserved.
+// removeAllOrScheduleReboot tries os.RemoveAll first. If it fails (typically
+// because a file is held open by a running process — e.g. LogonUI.exe still
+// has the credential provider DLL loaded and is writing credential_provider.log),
+// it walks the tree deleting what it can and marks the rest for deletion at the
+// next reboot via MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT). The caller can then
+// proceed: the directory is effectively "gone" from the user's perspective once
+// they reboot, and RemoveInstalledDir will tolerate the pending-delete state.
+func removeAllOrScheduleReboot(path string) error {
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+	// Walk and best-effort delete each entry; for entries that won't delete,
+	// schedule them for reboot deletion. Directories whose children are all
+	// deleted-or-scheduled become deletable too.
+	type pendingDir struct{ path string }
+	var dirs []pendingDir
+	err := filepath.Walk(path, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if info.IsDir() {
+			dirs = append(dirs, pendingDir{p})
+			return nil
+		}
+		if err := os.Remove(p); err != nil {
+			// Schedule for deletion at next reboot. Empty `to` means delete.
+			ptr, e := windows.UTF16PtrFromString(p)
+			if e == nil {
+				_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+			}
+		}
+		return nil
+	})
+	// Remove directories deepest-first (children before parents). For any that
+	// won't delete immediately (children still pending-delete), schedule them for
+	// reboot deletion too — Windows clears PendingFileRename top-down, and once
+	// the files are gone the directories become removable.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		dp := dirs[i].path
+		if err := os.Remove(dp); err != nil {
+			ptr, e := windows.UTF16PtrFromString(dp)
+			if e == nil {
+				_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+			}
+		}
+	}
+	return err
+}
+
 func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 	removed := 0
 	var firstErr error
@@ -322,11 +373,16 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 	// Full purge: also remove user data and logs (config.json, the enrolled
 	// face database in data/, and log/). Only invoked when the caller opted in
 	// (removeUserData); the default uninstall preserves these.
+	//
+	// log/ often holds credential_provider.log which LogonUI.exe keeps open
+	// (the credential provider DLL stays loaded in the lock-screen process).
+	// os.RemoveAll fails on that file; we fall back to scheduling it for reboot
+	// deletion so the directory still counts as removed for RemoveInstalledDir.
 	if removeUserData {
 		for _, sub := range []string{"data", "log"} {
 			dir := filepath.Join(destDir, sub)
 			if DirExists(dir) {
-				if err := os.RemoveAll(dir); err != nil {
+				if err := removeAllOrScheduleReboot(dir); err != nil {
 					recordErr(err)
 				} else {
 					removed++
@@ -371,6 +427,24 @@ func RemoveInstalledDir(destDir string) (bool, error) {
 			if err := os.Remove(destDir); err != nil {
 				return false, err
 			}
+			return true, nil
+		}
+	}
+	// Tolerate our own subdirectories (log/, models/) remaining — they may hold
+	// files scheduled for reboot deletion (e.g. credential_provider.log held by
+	// LogonUI). Best-effort purge them; if that empties the install dir, remove it.
+	ourSubdirsOnly := true
+	for _, e := range entries {
+		if !e.IsDir() || (!strings.EqualFold(e.Name(), "models") && !strings.EqualFold(e.Name(), "log") && !strings.EqualFold(e.Name(), "data")) {
+			ourSubdirsOnly = false
+			break
+		}
+	}
+	if ourSubdirsOnly {
+		for _, e := range entries {
+			_ = os.RemoveAll(filepath.Join(destDir, e.Name()))
+		}
+		if err := os.Remove(destDir); err == nil {
 			return true, nil
 		}
 	}

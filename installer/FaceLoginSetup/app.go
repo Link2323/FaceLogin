@@ -254,10 +254,12 @@ func (a *App) Uninstall() map[string]interface{} {
 		a.emit(70, "删除程序文件", "done", "")
 	}
 
-	// Step 4: Clean registry
+	// Step 4: Clean registry — remove the whole HKLM\SOFTWARE\FaceLogin key.
+	// The service and credential provider write runtime values
+	// (ServiceStartUptime, UserLoggedIn) that the installer never created, so
+	// deleting only InstallPath/DataPath would leave the key behind.
 	a.emit(70, "清理注册表", "running", "")
-	_ = internal.DeleteRegValue(REGVAL_INSTALL_PATH)
-	_ = internal.DeleteRegValue(REGVAL_DATA_PATH)
+	_ = internal.DeleteRegKey()
 	a.emit(85, "清理注册表", "done", "")
 
 	// Step 5: Notify complete

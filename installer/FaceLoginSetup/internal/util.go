@@ -46,13 +46,20 @@ func DeleteRegValue(valueName string) error {
 	return k.DeleteValue(valueName)
 }
 
+// DeleteRegKey removes the entire HKLM\SOFTWARE\FaceLogin key (the key itself,
+// not just one value). Use on uninstall: the service and credential provider
+// write runtime values (ServiceStartUptime, UserLoggedIn, ...) that the installer
+// never created, so deleting only InstallPath/DataPath would leave the key behind.
+func DeleteRegKey() error {
+	return registry.DeleteKey(registry.LOCAL_MACHINE, `SOFTWARE\FaceLogin`)
+}
+
 // Path helpers
 
 // GetDefaultInstallDir returns the default install path.
 func GetDefaultInstallDir() string {
 	return filepath.Join(os.Getenv("ProgramFiles"), "FaceLogin")
 }
-
 
 // FileExists checks if a file exists and is not a directory.
 func FileExists(path string) bool {
