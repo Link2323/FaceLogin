@@ -34,7 +34,6 @@ public:
     int  GetSampleCount() const { return m_samplesCollected; }
     std::string GetUsername() const;
     std::string GetUserSid() const;
-    std::string GetUserUpn() const;
     std::string GetAccountType() const { return m_accountType; }
     // Blocking multi-angle capture for one head-yaw position:
     //   0 = front (0°), 1 = left (+30°), 2 = right (−30°).
@@ -138,7 +137,6 @@ public:
     std::string GetLatestFrameAndFaces();
 
     bool IsPreviewRunning() const { return m_previewRunning; }
-    std::wstring GetDataDir() const { return m_dataDir; }
 
 private:
     std::string EncodeJPEGBase64(const dlib::matrix<dlib::rgb_pixel>& frame);

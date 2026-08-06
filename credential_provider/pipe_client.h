@@ -59,9 +59,6 @@ private:
     static DWORD WINAPI ReadThreadProc(LPVOID param);
     void CleanupReadThread();
 
-    // Returns true if msg is a terminal (non-status) message
-    static bool IsTerminalMessage(const std::wstring& msg);
-
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
     bool m_connected = false;
 

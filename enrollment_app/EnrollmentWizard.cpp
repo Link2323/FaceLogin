@@ -573,9 +573,6 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
             }
             livenessPassed = (totalChecked > 0 && passCount >= passRequired);
-        } else {
-            // Unreachable: StartPreview maps Blink → AntiSpoof.
-            livenessPassed = false;
         }
 
         m_livenessChecking = false;
@@ -716,10 +713,6 @@ static void NotifyServiceReload() {
 
 std::string EnrollmentWizard::GetUserSid() const {
     return WstrToUtf8(m_sid);
-}
-
-std::string EnrollmentWizard::GetUserUpn() const {
-    return WstrToUtf8(m_upn);
 }
 
 bool EnrollmentWizard::ValidatePassword(const std::wstring& password) {

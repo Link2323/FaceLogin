@@ -47,7 +47,6 @@ FaceLogin/
 │   ├── logger.cpp/h                # 文件日志系统（线程安全）
 │   ├── ipc_protocol.cpp/h          # 命名管道 IPC 协议定义与解析
 │   ├── dpapi_util.cpp/h            # DPAPI 加密/解密工具
-│   ├── secure_buffer.cpp/h         # 安全内存缓冲区 (RAII 自动清零)
 │   ├── config_util.cpp/h           # 应用配置 JSON 序列化
 │   └── registry_util.h             # 注册表读写工具
 ├── face_service/                   # 人脸识别 Windows 服务
@@ -74,7 +73,6 @@ FaceLogin/
 │   ├── CMakeLists.txt
 │   ├── main.cpp                    # WinMain 入口 + 管理员权限检查
 │   ├── EnrollmentWizard.cpp/h      # 注册向导后端 (摄像头/检测/活体/存储)
-│   ├── CameraPreview.cpp/h         # 摄像头预览辅助
 │   ├── WebviewHost.cpp/h           # WebView2 宿主 + IDispatch 桥接 (19个JS接口)
 │   ├── index.html                  # 嵌入式前端 UI (录入/设置/日志)
 │   ├── FaceLoginEnrollment.manifest # 高DPI感知清单
@@ -328,19 +326,7 @@ struct AuthResult {
 - **Unprotect()**: 解密已保护的数据
 - 加密后数据以二进制格式存入 `users.dat`
 
-### 4.4 安全缓冲区 (`secure_buffer.h/cpp`)
-
-RAII 自动清零内存管理。
-
-```cpp
-template<typename T>
-class SecureBuffer {
-    // 析构时自动调用 SecureZeroMemory
-    // 禁用拷贝 (non-copyable)
-};
-```
-
-### 4.5 配置系统 (`config_util.h/cpp`)
+### 4.4 配置系统 (`config_util.h/cpp`)
 
 ```cpp
 struct AppConfig {
@@ -574,8 +560,6 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
 **场景支持**: 支持 `CPUS_LOGON` 和 `CPUS_UNLOCK_WORKSTATION`。
 
 **用户检测**: `ReadUserCountFromDatabase()` 读取 `users.dat` (支持 V1..V4)，无注册用户时返回 `E_NOTIMPL` 隐藏磁贴。
-
-**MSA 支持**: `GetMSAUpnFromIdentityStore()` 从注册表 `HKLM\SOFTWARE\Microsoft\IdentityStore\LogonCache\...\Name2Sid` 读取 MSA UPN。
 
 ### 6.3 凭据磁贴 (`FaceLoginCredential.h/cpp`)
 
@@ -886,7 +870,6 @@ wails build -clean -platform windows/amd64
 |---|---|
 | 进程通信 | 命名管道 DACL 限制 SYSTEM + Administrators |
 | 凭据存储 | DPAPI 机器范围加密 (`CRYPTPROTECT_LOCAL_MACHINE`) |
-| 内存保护 | SecureBuffer RAII 自动 `SecureZeroMemory` |
 | 管道安全 | `PIPE_REJECT_REMOTE_CLIENTS` 拒绝远程连接 |
 | 单实例 | 全局互斥体防止多个服务实例 |
 | DLL 安全 | `/DYNAMICBASE` (ASLR), `/NXCOMPAT` (DEP), `/GUARD:CF` (CFG), `/HIGHENTROPYVA` (64位) |

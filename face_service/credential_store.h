@@ -147,15 +147,6 @@ public:
                  const std::wstring& label = L"",
                  uint32_t* outFaceId = nullptr);
 
-    // Add a user to the in-memory database (first-time full enrollment entry
-    // point). Same semantics as AddFace for the "account not found" case;
-    // kept for compatibility with existing call sites.
-    bool AddUser(const std::wstring& username,
-                 const std::wstring& upn,
-                 const std::wstring& sid,
-                 const std::vector<uint8_t>& encryptedPassword,
-                 const std::vector<float>& embedding);
-
     // Update the identity + stored password of an existing account IN PLACE,
     // preserving all enrolled faces (their ids/labels/embeddings are untouched).
     // Used when the account switches from a Microsoft (MSA) to a local account:
@@ -189,10 +180,6 @@ public:
     // Remove an account by SID. Call SaveDatabase() to persist.
     bool DeleteUserBySid(const std::wstring& sid);
 
-    // Delete a user from the in-memory database (by username).
-    // Call SaveDatabase() to persist.
-    bool DeleteUser(const std::wstring& username);
-
     // Rename one face of an account (e.g. via the face management UI).
     // Returns false if the account or face id is unknown.
     // Call SaveDatabase() to persist.
@@ -218,8 +205,6 @@ public:
         std::wstring password;  // Decrypted — zero after use!
         bool         passwordless = false;  // true: no password stored, must NOT submit LSA creds
         float distance;
-        uint32_t     matchedFaceId = 0;     // V4: id of the closest face in the matched account
-        size_t       accountFaceCount = 0;  // V4: total faces of the matched account
     };
     // probeDim is the number of floats in probeEmbedding (128 for dlib,
     // 512 for InsightFace ONNX). Only stored embeddings of the same
@@ -235,8 +220,6 @@ public:
     std::wstring GetDataDir() const;
 
 private:
-    bool EnsureDataDir();
-
     std::wstring m_dataDir;  // If empty, uses default
     std::vector<UserRecord> m_users;
 };

@@ -6,7 +6,6 @@
 #include <memory>
 #include <vector>
 
-#include "../common/secure_buffer.h"
 #include "pipe_client.h"
 
 // Forward declarations
@@ -86,9 +85,6 @@ private:
         Blocked  // Passwordless account: show notice, never submit creds
     };
 
-    // Authentication package lookup
-    HRESULT GetAuthenticationPackage(ULONG* pulAuthPackage);
-
     // Switch to the password credential provider (fallback)
     HRESULT SwitchToPasswordProvider();
 
@@ -120,8 +116,6 @@ private:
     std::unique_ptr<facelogin::PipeClient> m_pipeClient;
 
     // Received credentials (zeroed after serialization)
-    facelogin::SecureBuffer m_authData;
-    std::wstring m_sid;
     std::wstring m_upn;
     std::wstring m_domain;
     std::wstring m_username;

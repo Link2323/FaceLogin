@@ -42,10 +42,6 @@ public:
     std::vector<float> ComputeEmbedding(const dlib::matrix<dlib::rgb_pixel>& image,
                                         const float kps[10]);
 
-    // Euclidean distance between two embeddings.
-    static float Distance(const std::vector<float>& a, const std::vector<float>& b);
-    static float Distance(const std::vector<float>& a, const float* b);
-
     bool IsInitialized() const { return m_initialized; }
 
     // Enable/disable low-light brightness normalization for dark face chips.
@@ -125,9 +121,6 @@ public:
     // then predict. DeepPixBiS does not use landmark alignment.
     float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
                   const dlib::rectangle& rect);
-
-    // Thresholded convenience: returns true if face is judged real.
-    bool IsReal(const dlib::matrix<dlib::rgb_pixel>& faceChip, float threshold = 0.3f);
 
     bool IsInitialized() const { return m_initialized; }
 

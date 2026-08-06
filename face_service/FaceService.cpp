@@ -1,7 +1,6 @@
 #include "FaceService.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
-#include "../common/secure_buffer.h"
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
 #include "../common/image_utils.h"
@@ -803,21 +802,6 @@ std::wstring FaceService::GetModelsDir() {
         return std::wstring(programData) + L"\\FaceLogin\\models";
     }
     return L"C:\\ProgramData\\FaceLogin\\models";
-}
-
-float FaceService::GetMatchThreshold() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\FaceLogin", 0,
-                      KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD val = 0, size = sizeof(val);
-        if (RegQueryValueExW(hKey, L"MatchThreshold", nullptr, nullptr,
-                             reinterpret_cast<LPBYTE>(&val), &size) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-            return val / 100.0f;
-        }
-        RegCloseKey(hKey);
-    }
-    return 0.30f;
 }
 
 bool FaceService::Install(const std::wstring& exePath) {

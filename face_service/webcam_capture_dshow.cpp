@@ -167,57 +167,6 @@ static bool GetPin(IBaseFilter* pFilter, PIN_DIRECTION dir, IPin** ppPin) {
     return false;
 }
 
-// Enumerate all video capture devices via DirectShow. Reads the stable
-// symbolic link (DevicePath) and friendly name from each moniker.
-std::vector<CameraDeviceInfo> WebcamCaptureDS::ListCameras() {
-    std::vector<CameraDeviceInfo> devices;
-
-    ICreateDevEnum* pDevEnum = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&pDevEnum));
-    if (FAILED(hr)) {
-        FACELOGIN_ERROR(L"DS CoCreateInstance(SystemDeviceEnum) failed: 0x%08X", hr);
-        return devices;
-    }
-
-    IEnumMoniker* pEnum = nullptr;
-    hr = pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0);
-    pDevEnum->Release();
-
-    if (FAILED(hr) || pEnum == nullptr) {
-        FACELOGIN_WARN(L"DS: no video capture devices found (pEnum=%p, hr=0x%08X)",
-                       (void*)pEnum, hr);
-        return devices;
-    }
-
-    IMoniker* pMoniker = nullptr;
-    ULONG fetched = 0;
-    while (pEnum->Next(1, &pMoniker, &fetched) == S_OK && fetched == 1) {
-        CameraDeviceInfo info;
-        IPropertyBag* pBag = nullptr;
-        if (SUCCEEDED(pMoniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&pBag)))) {
-            VARIANT var; VariantInit(&var);
-            if (SUCCEEDED(pBag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
-                info.devicePath = var.bstrVal;
-            }
-            VariantClear(&var);
-            VariantInit(&var);
-            if (SUCCEEDED(pBag->Read(L"FriendlyName", &var, nullptr)) && var.vt == VT_BSTR) {
-                info.friendlyName = var.bstrVal;
-            }
-            VariantClear(&var);
-            pBag->Release();
-        }
-        devices.push_back(std::move(info));
-        pMoniker->Release();
-        fetched = 0;
-    }
-    pEnum->Release();
-
-    return devices;
-}
-
 bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
                                  IBaseFilter** ppFilter) {
     *ppFilter = nullptr;
@@ -514,11 +463,6 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
     return true;
 }
 
-bool WebcamCaptureDS::IsFrameReady() {
-    // Stub for API parity.  GrabFrame handles readiness internally.
-    return m_initialized;
-}
-
 void WebcamCaptureDS::Pause() {
     if (m_pControl && m_initialized) {
         m_pControl->Stop();
@@ -527,13 +471,6 @@ void WebcamCaptureDS::Pause() {
         m_frameReady = false;
         LeaveCriticalSection(&m_frameCs);
         FACELOGIN_INFO(L"DS: graph stopped (camera LED off)");
-    }
-}
-
-void WebcamCaptureDS::Resume() {
-    if (m_pControl && m_initialized) {
-        m_pControl->Run();
-        FACELOGIN_INFO(L"DS: graph resumed (camera LED on)");
     }
 }
 

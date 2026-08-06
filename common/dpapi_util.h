@@ -22,7 +22,6 @@ public:
     // Decrypt data previously encrypted with Protect().
     // Returns empty vector on failure.
     static std::vector<uint8_t> Unprotect(const std::vector<uint8_t>& ciphertext);
-    static std::wstring UnprotectToString(const std::vector<uint8_t>& ciphertext);
     static std::vector<uint8_t> Unprotect(const uint8_t* data, size_t size);
 
 private:

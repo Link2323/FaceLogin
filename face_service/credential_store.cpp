@@ -82,15 +82,6 @@ std::wstring CredentialStore::GetDataDir() const {
     return L"C:\\ProgramData\\FaceLogin";
 }
 
-bool CredentialStore::EnsureDataDir() {
-    std::wstring dir = GetDataDir();
-    if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
-        return true;
-    }
-    FACELOGIN_ERROR(L"Failed to create data directory: %s", dir.c_str());
-    return false;
-}
-
 bool CredentialStore::LoadDatabase() {
     std::wstring path = GetDataDir() + L"\\data\\users.dat";
     m_users.clear();
@@ -436,14 +427,6 @@ bool CredentialStore::AddFace(const std::wstring& username,
     return true;
 }
 
-bool CredentialStore::AddUser(const std::wstring& username,
-                               const std::wstring& upn,
-                               const std::wstring& sid,
-                               const std::vector<uint8_t>& encryptedPassword,
-                               const std::vector<float>& embedding) {
-    return AddFace(username, upn, sid, encryptedPassword, embedding);
-}
-
 bool CredentialStore::UpdateAccountIdentity(size_t idx,
                                             const std::wstring& username,
                                             const std::wstring& upn,
@@ -541,20 +524,6 @@ bool CredentialStore::DeleteUserBySid(const std::wstring& sid) {
     return true;
 }
 
-bool CredentialStore::DeleteUser(const std::wstring& username) {
-    auto it = std::remove_if(m_users.begin(), m_users.end(),
-        [&username](const UserRecord& r) { return r.username == username; });
-
-    if (it != m_users.end()) {
-        m_users.erase(it, m_users.end());
-        FACELOGIN_INFO(L"Deleted user: %s", username.c_str());
-        return true;
-    }
-
-    FACELOGIN_WARN(L"User not found for deletion: %s", username.c_str());
-    return false;
-}
-
 bool CredentialStore::RenameFace(const std::wstring& sid, uint32_t faceId,
                                  const std::wstring& label) {
     size_t idx = FindUserIndex(sid, L"", L"");
@@ -590,13 +559,11 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     // the best/second-best ratio.
     float bestDist = 1e10f, secondBestDist = 1e10f;
     size_t bestIdx = m_users.size();
-    uint32_t bestFaceId = 0;
     size_t comparableAccounts = 0;
 
     for (size_t i = 0; i < m_users.size(); i++) {
         const auto& faces = m_users[i].faces;
         float accountBest = 1e10f;
-        uint32_t faceBestId = 0;
 
         for (const auto& face : faces) {
             // Skip stored embeddings that don't match the probe's dimensionality.
@@ -613,7 +580,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
 
             if (dist < accountBest) {
                 accountBest = dist;
-                faceBestId = face.id;
             }
         }
 
@@ -624,7 +590,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
             secondBestDist = bestDist;
             bestDist = accountBest;
             bestIdx = i;
-            bestFaceId = faceBestId;
         } else if (accountBest < secondBestDist) {
             secondBestDist = accountBest;
         }
@@ -667,8 +632,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     if (bestDist < effThreshold) {
         MatchResult best;
         best.distance = bestDist;
-        best.matchedFaceId = bestFaceId;
-        best.accountFaceCount = m_users[bestIdx].faces.size();
         best.upn = m_users[bestIdx].upn;
         best.sid = m_users[bestIdx].sid;
         best.username = m_users[bestIdx].username;

@@ -90,17 +90,11 @@ public:
                     const std::wstring& devicePath = L"");
     bool IsInitialized() const { return m_initialized; }
     bool GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame);
-    bool IsFrameReady();
     void Pause();    // stop graph → camera LED off
-    void Resume();   // restart graph for next auth session
     void Shutdown();
 
     static bool InitializeCOM();
     static void ShutdownCOM();
-
-    // Enumerate all video capture devices via DirectShow. Requires
-    // CoInitializeEx (InitializeCOM) to have been called first.
-    static std::vector<CameraDeviceInfo> ListCameras();
 
 private:
     static bool   s_comInitialized;

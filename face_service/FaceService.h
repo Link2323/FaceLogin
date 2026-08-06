@@ -54,7 +54,6 @@ private:
 
     // Configuration
     std::wstring GetModelsDir();
-    float GetMatchThreshold();
 
     // Service state
     SERVICE_STATUS_HANDLE m_hStatus = nullptr;

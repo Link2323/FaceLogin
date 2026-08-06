@@ -1,6 +1,5 @@
 add_library(facelogin_common STATIC
     ipc_protocol.cpp
-    secure_buffer.cpp
     dpapi_util.cpp
     logger.cpp
     config_util.cpp

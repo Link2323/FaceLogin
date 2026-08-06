@@ -6,9 +6,7 @@
 #include <wincred.h>
 #include <ntstatus.h>
 #include <ntsecapi.h>
-#include <sddl.h>
 #include <shlwapi.h>
-#include <vector>
 #include <process.h>
 
 #pragma comment(lib, "credui.lib")
@@ -579,7 +577,6 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
                 FACELOGIN_INFO(L"Auth success: %s\\%s (SID=%s, UPN=%s)",
                               result.domain.c_str(), result.username.c_str(),
                               result.sid.c_str(), result.upn.c_str());
-                m_sid = result.sid;
                 m_upn = result.upn;
                 m_domain = result.domain;
                 m_username = result.username;
@@ -872,16 +869,6 @@ HRESULT FaceLoginCredential::PackCredentials(
 }
 
 // ============================================================================
-// Private: Authentication Package Lookup
-// ============================================================================
-
-HRESULT FaceLoginCredential::GetAuthenticationPackage(ULONG* pulAuthPackage) {
-    // Fall back to Negotiate (0 is treated as Negotiate by LSA)
-    *pulAuthPackage = 0;
-    return S_OK;
-}
-
-// ============================================================================
 // Private: Switch to Password Provider
 // ============================================================================
 
@@ -921,7 +908,6 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
                           result.domain.c_str(), result.username.c_str(),
                           result.sid.c_str(), result.upn.c_str());
             // NOTE: the password itself is never logged — only metadata.
-            m_sid = result.sid;
             m_upn = result.upn;
             m_domain = result.domain;
             m_username = result.username;

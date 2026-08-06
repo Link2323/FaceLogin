@@ -8,7 +8,6 @@ const wchar_t FACELOGIN_REG_KEY[] = L"SOFTWARE\\FaceLogin";
 
 // Value names
 const wchar_t REGVAL_DATA_PATH[]   = L"DataPath";
-const wchar_t REGVAL_INSTALL_PATH[] = L"InstallPath";
 const wchar_t REGVAL_USER_LOGGED_IN[] = L"UserLoggedIn";
 const wchar_t REGVAL_SERVICE_START_UPTIME[] = L"ServiceStartUptime";
 

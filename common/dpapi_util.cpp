@@ -39,15 +39,6 @@ std::vector<uint8_t> DpapiUtil::Unprotect(const std::vector<uint8_t>& ciphertext
     return Unprotect(ciphertext.data(), ciphertext.size());
 }
 
-std::wstring DpapiUtil::UnprotectToString(const std::vector<uint8_t>& ciphertext) {
-    auto plain = Unprotect(ciphertext);
-    if (plain.empty()) return {};
-    if (plain.size() % sizeof(wchar_t) != 0) return {};
-
-    return std::wstring(reinterpret_cast<const wchar_t*>(plain.data()),
-                         plain.size() / sizeof(wchar_t));
-}
-
 std::vector<uint8_t> DpapiUtil::Unprotect(const uint8_t* data, size_t size) {
     if (!data || size == 0) {
         return {};

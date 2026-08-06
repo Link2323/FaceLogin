@@ -172,26 +172,6 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
     return ComputeEmbedding(faceChip);
 }
 
-float OnnxRecognizer::Distance(const std::vector<float>& a, const std::vector<float>& b) {
-    if (a.size() != b.size() || a.empty()) return 1e10f;
-    float sum = 0.0f;
-    for (size_t i = 0; i < a.size(); i++) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-    return std::sqrt(sum);
-}
-
-float OnnxRecognizer::Distance(const std::vector<float>& a, const float* b) {
-    if (a.empty() || !b) return 1e10f;
-    float sum = 0.0f;
-    for (size_t i = 0; i < a.size(); i++) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-    return std::sqrt(sum);
-}
-
 // ============================================================================
 // OnnxDetector
 // ============================================================================
@@ -601,11 +581,6 @@ float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
     dlib::matrix<dlib::rgb_pixel> crop;
     dlib::extract_image_chip(image, chip, crop);
     return Predict(crop);
-}
-
-bool OnnxAntiSpoof::IsReal(const dlib::matrix<dlib::rgb_pixel>& faceChip, float threshold) {
-    float score = Predict(faceChip);
-    return score >= threshold;
 }
 
 } // namespace facelogin

@@ -127,13 +127,6 @@ bool PipeClient::SendMessage(const std::wstring& message) {
 // can update the LogonUI status text in real time.
 // ============================================================================
 
-bool PipeClient::IsTerminalMessage(const std::wstring& msg) {
-    return msg.starts_with(ipc::MSG_AUTH_SUCCESS_PREFIX) ||
-           msg.starts_with(ipc::MSG_AUTH_ERROR_PREFIX) ||
-           msg == ipc::MSG_AUTH_TIMEOUT ||
-           msg == ipc::MSG_AUTH_CANCELLED;
-}
-
 DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
     PipeClient* self = static_cast<PipeClient*>(param);
 

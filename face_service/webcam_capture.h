@@ -38,7 +38,6 @@ public:
                     const std::wstring& devicePath = L"");
     bool IsInitialized() const { return m_initialized; }
     bool GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame);
-    bool IsFrameReady();
     void Shutdown();
 
     static bool InitializeMF();
