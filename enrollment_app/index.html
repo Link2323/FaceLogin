@@ -1189,7 +1189,7 @@ function onAppendConfirm() {
       document.getElementById('screen-append').classList.remove('active');
       document.getElementById('screen-cam').classList.add('active');
       currentTab = 'cam';
-      document.getElementById('samples-tag').textContent = 'Samples: 0 / 10';
+      document.getElementById('samples-tag').textContent = '准备就绪';
       showBanner('cam', '新脸已添加成功！可按 Win+L 锁定屏幕测试人脸登录。', 'ok');
       viewing = true;
       renderFrame();
@@ -1254,7 +1254,7 @@ function onSave() {
       document.getElementById('screen-cam').classList.add('active');
       currentTab = 'cam';
       document.getElementById('fld-pass').value = '';
-      document.getElementById('samples-tag').textContent = 'Samples: 0 / 10';
+      document.getElementById('samples-tag').textContent = '准备就绪';
       showBanner('cam', '录入成功！可按 Win+L 锁定屏幕测试人脸登录。', 'ok');
       viewing = true;
       renderFrame();
