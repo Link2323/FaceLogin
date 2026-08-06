@@ -117,6 +117,23 @@ public:
     // non-empty password. Returns false unless the record is in state 1.
     bool ClearStaleAccountUpn();
 
+    // One-shot startup repair: if the current session is an MSA (per
+    // ResolveSessionUpn) but the stored record for THIS session's SID still
+    // has an empty UPN, write the resolved MSA email in place — preserving
+    // username, SID, faces and the stored (already DPAPI-encrypted) password.
+    //
+    // Scope is deliberately narrow: only the current session user's own
+    // record, and only when its UPN is empty. A non-empty but DIFFERENT UPN
+    // may be a genuine re-binding (a user who switched Microsoft accounts) and
+    // is left to RefreshAccountIdentity, which requires a password check.
+    //
+    // Without this, accounts enrolled while GetUserNameExW returned 1332
+    // (no UPN) carry an empty UPN forever: the lock-screen credential then
+    // packs with domain\username instead of routing through CloudAP, and
+    // GetAccountTypeChanged keeps flagging a phantom local→MSA conversion.
+    // Returns true iff a record was actually modified.
+    bool AutoRepairEmptyUpnOnStartup();
+
     // Configuration
     std::string GetConfig() const;
     bool SetConfig(const std::string& json);

@@ -36,18 +36,33 @@ static std::wstring Utf8ToWstr(const std::string& s) {
 }
 
 // ---------------------------------------------------------------------------
-// Session identity helper
+// Session identity helpers
 //
-// GetUserNameExW(NameUserPrincipal) is the ONE authoritative source of the
-// current session's UPN: it returns the email for Microsoft accounts and
-// fails with ERROR_NONE_MAPPED (1332) for local accounts. Machine-wide
-// registry caches (IdentityStore\LogonCache\Name2Sid etc.) can hold MSA
-// identities that do NOT belong to the current user — a previous user
-// profile, or an MSA that was later converted to local. Adopting one of
-// those emails mislabels the account as MSA and poisons the stored record,
-// which produced bug1's perpetual false "账号身份已变更" prompt. All
-// MSA/local decisions must route through GetSessionUpn().
+// The authoritative UPN source is GetUserNameExW(NameUserPrincipal): it
+// returns the email for Microsoft accounts and fails with ERROR_NONE_MAPPED
+// (1332) for local accounts. On a subset of machines, however, the whole UPN
+// family of name formats fails with 1332 even for a live MSA session
+// (observed on Windows 11 with a local SAM account linked to a Microsoft
+// account: only NameFullyQualifiedDN / NameSamCompatible succeed;
+// UserPrincipal/Display/Canonical/CanonicalEx/SPN/DnsDomain all return 1332).
+// In that case the UPN is empty and every MSA/local decision collapses to
+// "local" — the UI then says "Windows 密码" while the password that actually
+// authenticates is the Microsoft account password (the user-visible symptom
+// we are fixing).
+//
+// Fallback: scan the process token's ENABLED groups for the MSA identity.
+// LSA injects a group SID under the MicrosoftAccount\S-1-11-96-... authority
+// into the token of any session that logged on via a linked Microsoft
+// account, and LookupAccountSidW resolves its name to the email (e.g.
+// "MicrosoftAccount\shi2jun2cheng2@outlook.com"). This is bound to the
+// CURRENT session token, so unlike the machine-wide IdentityStore\LogonCache
+// registry caches it can never carry another user's leftover MSA email — the
+// exact misattribution that produced bug1's perpetual false "账号身份已变更"
+// prompt (docs/todo.md bug1). IdentityStore\LogonCache\Name2Sid and
+// IdentityCRL\StoredIdentities must NOT be re-added as fallbacks.
 // ---------------------------------------------------------------------------
+
+// Primary UPN query. Returns empty on failure (1332 or no secur32).
 static std::wstring GetSessionUpn() {
     std::wstring upn;
     HMODULE hSecur32 = LoadLibraryW(L"secur32.dll");
@@ -64,6 +79,86 @@ static std::wstring GetSessionUpn() {
     }
     FreeLibrary(hSecur32);
     return upn;
+}
+
+// Fallback used only when GetSessionUpn() returned empty: scans the current
+// process token's ENABLED groups for the MSA identity LSA injects and returns
+// the email portion. Empty when the session is genuinely local (no MSA group)
+// or the SID cannot be resolved.
+//
+// The S-1-11-96-... prefix (identifier authority 11, first sub-authority 96)
+// is the MicrosoftAccount namespace — used as a cheap filter before the
+// authoritative LookupAccountSidW call. We only consider enabled groups
+// (SE_GROUP_ENABLED) and skip deny-only / disabled groups, since a disabled
+// MSA group does not represent the active logon identity.
+static std::wstring ResolveSessionMsaUpnFromToken() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return L"";
+    }
+    std::wstring result;
+    DWORD sz = 0;
+    GetTokenInformation(hToken, TokenGroups, nullptr, 0, &sz);
+    if (sz > 0) {
+        std::vector<BYTE> buf(sz);
+        if (GetTokenInformation(hToken, TokenGroups, buf.data(), sz, &sz)) {
+            auto* tg = reinterpret_cast<TOKEN_GROUPS*>(buf.data());
+            for (DWORD i = 0; i < tg->GroupCount; ++i) {
+                // Only enabled groups represent the active identity; skip
+                // SE_GROUP_USE_FOR_DENY_ONLY and disabled groups.
+                if (!(tg->Groups[i].Attributes & SE_GROUP_ENABLED)) {
+                    continue;
+                }
+                PSID sid = tg->Groups[i].Sid;
+                if (!sid) continue;
+
+                // Cheap filter on the string form: S-1-11-96-... is the
+                // MicrosoftAccount namespace.
+                LPWSTR sidStr = nullptr;
+                if (!ConvertSidToStringSidW(sid, &sidStr)) continue;
+                std::wstring sidStrW = sidStr;
+                LocalFree(sidStr);
+                if (sidStrW.rfind(L"S-1-11-96-", 0) != 0) continue;
+
+                // Authoritative check: domain must be "MicrosoftAccount" and
+                // the name must contain '@' (the email form).
+                wchar_t name[256] = {};
+                wchar_t domain[256] = {};
+                DWORD nameLen = ARRAYSIZE(name);
+                DWORD domainLen = ARRAYSIZE(domain);
+                SID_NAME_USE sidType;
+                if (LookupAccountSidW(nullptr, sid, name, &nameLen,
+                                      domain, &domainLen, &sidType)) {
+                    std::wstring nameW = name;
+                    std::wstring domainW = domain;
+                    if (domainW == L"MicrosoftAccount" &&
+                        nameW.find(L'@') != std::wstring::npos) {
+                        FACELOGIN_INFO(L"ResolveSessionMsaUpnFromToken: MSA group SID hit %s -> %s\\%s",
+                                       sidStrW.c_str(), domainW.c_str(), nameW.c_str());
+                        result = nameW;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    CloseHandle(hToken);
+    return result;
+}
+
+// Unified entry point for ALL MSA/local decisions. Try the authoritative
+// GetUserNameExW query first; on 1332/empty fall back to the token MSA group.
+static std::wstring ResolveSessionUpn() {
+    std::wstring upn = GetSessionUpn();
+    if (!upn.empty() && upn.find(L'@') != std::wstring::npos) {
+        return upn;
+    }
+    return ResolveSessionMsaUpnFromToken();
+}
+
+// MSA test used everywhere: UPN non-empty and contains '@'.
+static bool IsMsaUpn(const std::wstring& upn) {
+    return !upn.empty() && upn.find(L'@') != std::wstring::npos;
 }
 
 EnrollmentWizard::EnrollmentWizard() {
@@ -115,11 +210,15 @@ EnrollmentWizard::EnrollmentWizard() {
     // poisoned the stored record — producing a perpetual false
     // "账号身份已变更" prompt (docs/todo.md bug1). Never re-add an
     // unattributed cache lookup.
-    m_upn = GetSessionUpn();
+    //
+    // ResolveSessionUpn() additionally falls back to the process-token MSA
+    // group when GetUserNameExW fails (see comment at its definition) — this
+    // machine exhibits exactly that 1332 failure for the whole UPN family.
+    m_upn = ResolveSessionUpn();
 
     // Determine account type: MSA accounts have a UPN containing '@'
     m_accountType = "local";
-    if (!m_upn.empty() && m_upn.find(L'@') != std::wstring::npos) {
+    if (IsMsaUpn(m_upn)) {
         m_accountType = "msa";
     }
 
@@ -171,6 +270,13 @@ EnrollmentWizard::EnrollmentWizard() {
             }
         }
     }
+
+    // Identity summary — referenced by the MSA-detection verification steps.
+    FACELOGIN_INFO(L"Session identity: username=%s upn=%s sid=%s accountType=%hs",
+                   m_username.c_str(),
+                   m_upn.empty() ? L"<empty>" : m_upn.c_str(),
+                   m_sid.empty() ? L"<empty>" : m_sid.c_str(),
+                   m_accountType.c_str());
 
     m_webcam     = std::make_unique<WebcamCapture>();
     m_store.SetDataDir(m_dataDir);
@@ -775,12 +881,12 @@ std::string EnrollmentWizard::GetUserSid() const {
 
 bool EnrollmentWizard::ValidatePassword(const std::wstring& password) {
     // The MSA/local decision MUST come from the live session identity
-    // (GetSessionUpn), never from m_upn: m_upn used to be polluted with
-    // another account's email by a registry fallback (docs/todo.md bug1),
-    // which routed local users into the MSA path below and made the account
-    // refresh loop impossible to complete.
-    std::wstring sessionUpn = GetSessionUpn();
-    bool isMsa = !sessionUpn.empty() && sessionUpn.find(L'@') != std::wstring::npos;
+    // (ResolveSessionUpn), never from the stored record: a registry fallback
+    // used to pollute the stored UPN with another account's email
+    // (docs/todo.md bug1), which routed local users into the MSA path below
+    // and made the account refresh loop impossible to complete.
+    std::wstring sessionUpn = ResolveSessionUpn();
+    bool isMsa = IsMsaUpn(sessionUpn);
 
     if (isMsa) {
         // MSA: domain=NULL routes through CloudAP for an online validation of
@@ -878,7 +984,7 @@ int EnrollmentWizard::GetPasswordlessState() const {
     BOOL okEmpty = LogonUserW(m_username.c_str(), L".", L"",
                               LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &hToken);
     if (okEmpty && hToken) { CloseHandle(hToken); return 1; }
-    if (!m_upn.empty() && m_upn.find(L'@') != std::wstring::npos) {
+    if (IsMsaUpn(m_upn)) {
         okEmpty = LogonUserW(m_upn.c_str(), L".", L"",
                              LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &hToken);
         if (okEmpty && hToken) { CloseHandle(hToken); return 1; }
@@ -1186,9 +1292,9 @@ bool EnrollmentWizard::RenameFace(int faceId, const std::wstring& label) {
 // Detect a stale account-type record (symmetric MSA ↔ local). We never trust
 // m_upn/m_accountType here — they are derived from the session at construction
 // and could be empty for local accounts; instead we re-query the CURRENT
-// session identity with the authoritative GetSessionUpn() (docs/todo.md bug1):
+// session identity with ResolveSessionUpn() (docs/todo.md bug1):
 //   UPN contains '@'  → current account is MSA
-//   empty (err 1332)  → current account is local
+//   empty (after fallback)  → current account is local
 // Then compare against the stored record (matched by SID, which Windows keeps
 // across MSA↔local conversions):
 //   local + record UPN is an MSA email  → state 1 (MSA→local, clear UPN)
@@ -1196,10 +1302,10 @@ bool EnrollmentWizard::RenameFace(int faceId, const std::wstring& label) {
 //   everything else                     → state 0 (no refresh needed)
 int EnrollmentWizard::GetAccountTypeChanged() {
     // Determine the CURRENT session's account type via the authoritative
-    // query used everywhere else (docs/todo.md bug1). Empty (err 1332) means
-    // no UPN → local account.
-    std::wstring curUpn = GetSessionUpn();
-    bool sessionIsMsa = !curUpn.empty() && curUpn.find(L'@') != std::wstring::npos;
+    // query used everywhere else (docs/todo.md bug1). Empty (after fallback)
+    // means no MSA identity → local account.
+    std::wstring curUpn = ResolveSessionUpn();
+    bool sessionIsMsa = IsMsaUpn(curUpn);
 
     // Match the current identity against stored records (same priority as
     // FindUserIndex: SID > UPN > username).
@@ -1243,7 +1349,7 @@ std::string EnrollmentWizard::CheckAccountTypeChanged() {
 
     if (state == 2) {
         // Re-derive the current MSA email (same authoritative query).
-        std::wstring curUpn = GetSessionUpn();
+        std::wstring curUpn = ResolveSessionUpn();
         return "{\"state\":2,\"faces\":" + std::to_string(faces) +
                ",\"upn\":\"" + WstrToUtf8Escaped(curUpn) + "\"}";
     }
@@ -1289,7 +1395,7 @@ bool EnrollmentWizard::RefreshAccountIdentity(const std::wstring& password) {
     //   state 2 (local→MSA): write the current MSA email (session UPN).
     std::wstring newUpn;
     if (state == 2) {
-        newUpn = GetSessionUpn();
+        newUpn = ResolveSessionUpn();
     }
     // state 1 → newUpn stays empty (local account).
 
@@ -1356,6 +1462,53 @@ bool EnrollmentWizard::ClearStaleAccountUpn() {
     NotifyServiceReload();
     FACELOGIN_INFO(L"ClearStaleAccountUpn: cleared stale MSA UPN for %s (faces=%zu, password untouched)",
                    rec.username.c_str(), rec.faces.size());
+    return true;
+}
+
+bool EnrollmentWizard::AutoRepairEmptyUpnOnStartup() {
+    // Re-derive the current session's MSA identity (GetUserNameExW + token
+    // fallback). Only proceed when we actually have an MSA email to write.
+    std::wstring curUpn = ResolveSessionUpn();
+    if (!IsMsaUpn(curUpn)) {
+        // Local session (or detection inconclusive) — nothing to repair.
+        return false;
+    }
+
+    std::wstring tokenSid = GetCurrentProcessUserSid();
+    if (tokenSid.empty()) {
+        FACELOGIN_WARN(L"AutoRepairEmptyUpnOnStartup: could not resolve current session SID, skipping");
+        return false;
+    }
+
+    m_store.LoadDatabase();
+    bool modified = false;
+    for (size_t idx = 0; idx < m_store.GetUsers().size(); ++idx) {
+        const auto& rec = m_store.GetUsers()[idx];
+        // Only THIS session user's own record, and only when its UPN is empty.
+        // A non-empty but different UPN may be a genuine re-binding and is left
+        // to RefreshAccountIdentity (which requires a password check).
+        if (rec.sid != tokenSid) continue;
+        if (!rec.upn.empty()) continue;
+
+        // Pass rec.sid (not tokenSid) and the existing encryptedPassword back
+        // unchanged so the record stays self-consistent and the stored
+        // credential is not re-encrypted; faces are preserved by UpdateAccountIdentity.
+        if (!m_store.UpdateAccountIdentity(idx, rec.username, curUpn, rec.sid, rec.encryptedPassword)) {
+            FACELOGIN_ERROR(L"AutoRepairEmptyUpnOnStartup: identity update failed for %s", rec.username.c_str());
+            continue;
+        }
+        FACELOGIN_INFO(L"AutoRepairEmptyUpnOnStartup: repaired empty UPN for %s (sid=%s, new upn=%s, faces=%zu, password untouched)",
+                       rec.username.c_str(), rec.sid.c_str(), curUpn.c_str(), rec.faces.size());
+        modified = true;
+    }
+
+    if (!modified) return false;
+
+    if (!m_store.SaveDatabase()) {
+        FACELOGIN_ERROR(L"AutoRepairEmptyUpnOnStartup: save failed");
+        return false;
+    }
+    NotifyServiceReload();
     return true;
 }
 

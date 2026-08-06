@@ -78,6 +78,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     facelogin::EnrollmentWizard wizard;
+
+    // Repair records enrolled while GetUserNameExW(NameUserPrincipal) failed
+    // (err 1332 on some machines): backfill the MSA UPN into the current
+    // session user's record if it is still empty. Best-effort, never fatal —
+    // must run after the wizard constructor (which resolves m_sid) and before
+    // the UI loop so the first GetAccountType() the page reads is correct.
+    wizard.AutoRepairEmptyUpnOnStartup();
+
     WebviewHost host(hInstance, &wizard);
 
     int result = host.Run();
