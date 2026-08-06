@@ -25,6 +25,9 @@ CMakeFiles/
 # Log files
 *.log
 
+# Local PAD calibration output (biometric-derived scores; never commit)
+pad-calibration/
+
 # Binary artifacts
 *.exe
 *.dll
