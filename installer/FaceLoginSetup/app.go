@@ -89,6 +89,15 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	a.emit(0, "开始安装", "running", "")
 	installDir = filepath.Clean(installDir)
 
+	// Validate the complete, exact model set before stopping a working prior
+	// installation. This also detects a corrupted installer payload early.
+	a.emit(0, "校验安装资源", "running", "")
+	if err = internal.ValidateEmbeddedResources(); err != nil {
+		a.emit(0, "校验安装资源", "fail", err.Error())
+		return result(false, fmt.Sprintf("安装资源校验失败: %v", err))
+	}
+	a.emit(0, "校验安装资源", "done", "")
+
 	// Step 1: Stop and delete existing service
 	a.emit(0, "停止并删除已有服务", "running", "")
 	if err = internal.StopAndDeleteService(); err != nil {
@@ -103,22 +112,36 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	}
 	a.emit(25, "创建目标目录", "done", "")
 
+	// Protect the root before writing executable/model bytes into it. Files
+	// extracted below inherit only SYSTEM/Administrators write access, closing
+	// the replacement window that would exist if ACLs were applied afterwards.
+	a.emit(25, "设置数据目录权限", "running", "")
+	if err = internal.SetDirectoryACL(installDir); err != nil {
+		a.emit(25, "设置数据目录权限", "fail", err.Error())
+		return result(false, fmt.Sprintf("设置安装目录安全权限失败: %v", err))
+	}
+	a.emit(30, "设置数据目录权限", "done", "")
+
 	// Step 3: Write registry paths — DataPath is the install dir itself, C++ appends \models
-	a.emit(25, "配置注册表路径", "running", "")
+	a.emit(30, "配置注册表路径", "running", "")
 	if err = internal.WriteRegString(REGVAL_INSTALL_PATH, installDir); err != nil {
 		return result(false, fmt.Sprintf("写入安装路径失败: %v", err))
 	}
 	if err = internal.WriteRegString(REGVAL_DATA_PATH, installDir); err != nil {
 		return result(false, fmt.Sprintf("写入数据路径失败: %v", err))
 	}
-	a.emit(30, "配置注册表路径", "done", "")
+	a.emit(35, "配置注册表路径", "done", "")
 
 	// Step 4: Extract all embedded resources
-	a.emit(30, "复制文件", "running", "")
+	a.emit(35, "复制文件", "running", "")
 	if err = internal.ExtractAll(installDir, func(step, total int, name string) {
-		a.emit(30+step*30/total, "复制文件", "running", name)
+		a.emit(35+step*25/total, "复制文件", "running", name)
 	}); err != nil {
 		return result(false, fmt.Sprintf("复制文件失败: %v", err))
+	}
+	if err = internal.ValidateInstalledModels(installDir); err != nil {
+		a.emit(30, "校验已复制模型", "fail", err.Error())
+		return result(false, fmt.Sprintf("模型文件校验失败: %v", err))
 	}
 	// Step 4.5: Create data/ and log/ directories, ensure config.json defaults
 	dataDir := filepath.Join(installDir, "data")
@@ -137,13 +160,14 @@ func (a *App) Install(installDir string) map[string]interface{} {
 
 	a.emit(60, "复制文件", "done", "")
 
-	// Step 5: Set data directory ACL
-	a.emit(60, "设置数据目录权限", "running", "")
+	// Re-apply recursively as a postcondition in case an extracted resource
+	// carried or acquired an unexpected explicit ACL.
+	a.emit(60, "验证目录权限", "running", "")
 	if err = internal.SetDirectoryACL(installDir); err != nil {
-		a.emit(60, "设置数据目录权限", "warn", err.Error())
-	} else {
-		a.emit(67, "设置数据目录权限", "done", "")
+		a.emit(60, "验证目录权限", "fail", err.Error())
+		return result(false, fmt.Sprintf("设置安装目录安全权限失败: %v", err))
 	}
+	a.emit(67, "验证目录权限", "done", "")
 
 	// Step 6: Register COM DLL
 	a.emit(67, "注册登录组件", "running", "")

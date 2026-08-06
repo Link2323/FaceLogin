@@ -42,19 +42,32 @@ func UnregisterCOMDLL(dllPath string) error {
 	return nil
 }
 
-// SetDirectoryACL sets the ACL on a directory to SYSTEM + Administrators only.
+// SetDirectoryACL replaces (rather than merely augments) the directory ACL
+// with inheritable Full Control entries for SYSTEM and Administrators only.
+// Numeric SIDs avoid failures on non-English Windows installations.
 func SetDirectoryACL(dirPath string) error {
 	if !DirExists(dirPath) {
-		return os.MkdirAll(dirPath, 0755)
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			return err
+		}
 	}
-	cmd := exec.Command("icacls", dirPath,
-		"/inheritance:r",
-		"/grant", "SYSTEM:(OI)(CI)F",
-		"/grant", "BUILTIN\\Administrators:(OI)(CI)F",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("icacls failed: %w\n%s", err, string(out))
+
+	// /reset first removes any pre-existing explicit ACEs. We then add the
+	// two trusted principals while inherited access is still available, set a
+	// trusted owner, and finally remove every inherited ACE. New files inherit
+	// only these two entries from the protected root directory.
+	commands := [][]string{
+		{dirPath, "/reset", "/T", "/Q"},
+		{dirPath, "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"},
+		{dirPath, "/setowner", "*S-1-5-32-544", "/T", "/Q"},
+		{dirPath, "/inheritance:r", "/T", "/Q"},
+	}
+	for _, args := range commands {
+		cmd := exec.Command("icacls", args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("icacls %v failed: %w\n%s", args[1:], err, string(out))
+		}
 	}
 	return nil
 }

@@ -26,8 +26,8 @@ var ConfigUpgradeEnabled = false
 // verbatim on upgrade. Declared per-release; this release enforces the
 // threshold defaults that changed in v1.0.1.
 var ConfigUpgradeForcedDefaults = map[string]any{
-	"match_threshold":      0.30,
-	"anti_spoof_threshold": 0.30,
+	"anti_spoof_threshold": 0.281,
+	"liveness_method":      "antispoof",
 }
 
 // EnsureConfigDefaults ensures config.json exists and — when the per-release
@@ -49,13 +49,13 @@ func EnsureConfigDefaults(configPath string) error {
 		// No config yet — start from a full default so the app loads sane
 		// values on first run (the app's own defaults mirror these).
 		cfg = map[string]any{
-			"recognition_model":   "onnx",
-			"detector":            "scrfd",
-			"liveness_method":     "antispoof",
-			"match_threshold":     0.30,
-			"anti_spoof_threshold": 0.30,
-			"low_light_enhance":   false,
-			"camera_rotation":     0,
+			"recognition_model":    "onnx",
+			"detector":             "scrfd",
+			"liveness_method":      "antispoof",
+			"match_threshold":      0.30,
+			"anti_spoof_threshold": 0.281,
+			"low_light_enhance":    false,
+			"camera_rotation":      0,
 		}
 	}
 
@@ -76,4 +76,3 @@ func EnsureConfigDefaults(configPath string) error {
 	}
 	return nil
 }
-
