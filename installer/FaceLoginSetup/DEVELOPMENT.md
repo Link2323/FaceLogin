@@ -195,16 +195,19 @@ if (result.success && alreadyInstalled.value) {
 
 ## 安装流程
 
-后端 `App.Install(installDir)`（`app.go`）按序执行，前端通过 `setup:progress` 事件显示进度：
+后端 `App.Install(installDir)`（`app.go`）按序执行，前端通过 `setup:progress` 事件显示进度。模型校验与 ACL 保护分布在关键节点两侧（见提交 `92b0ecc`）：
 
 | 步骤 | 动作 | 备注 |
 |---|---|---|
+| 0 | 校验安装资源（内嵌模型大小 + SHA-256） | `internal.ValidateEmbeddedResources`；在停止旧服务前执行，尽早发现损坏载荷 |
 | 1 | 停止并删除已有服务 | `internal.StopAndDeleteService()` |
 | 2 | 创建安装目录 | `os.MkdirAll` |
-| 3 | 写注册表 InstallPath / DataPath | 见[注册表键](#注册表键) |
+| 2.5 | 设置安装目录 ACL（预保护） | `internal.SetDirectoryACL`；在写入可执行文件/模型前锁定，使解压文件继承仅 SYSTEM/管理员写权限 |
+| 3 | 写注册表 InstallPath / DataPath | 见[注册表键](#注册表键)；DataPath = 安装目录本身 |
 | 4 | 解压内嵌资源到安装目录 | `internal.ExtractAll` |
+| 4.1 | 校验已复制模型（大小 + SHA-256） | `internal.ValidateInstalledModels`；与步骤 0 相同的固定哈希 |
 | **4.5** | **确保 config.json 默认值** | **机制一挂载点：`EnsureConfigDefaults`** |
-| 5 | 设置数据目录 ACL | `internal.SetDirectoryACL` |
+| 5 | 验证目录权限（递归后置 ACL） | `internal.SetDirectoryACL` 递归再校一次，防止解压文件携带意外显式 ACL |
 | 6 | 注册 COM DLL | `internal.RegisterCOMDLL` |
 | 7 | 安装并启动服务 | `internal.InstallService` |
 | 8 | 额外解压 FaceLoginConsole.exe | 结尾补充 |

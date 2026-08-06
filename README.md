@@ -49,7 +49,7 @@ flowchart TB
 
     subgraph Storage["数据存储"]
         direction LR
-        UsersDB[("data/<br/>users.dat")] ~~~ Config[("data/<br/>config.json")] ~~~ Models[("models/<br/>ONNX + landmarks")] ~~~ Logs[("log/<br/>日志文件")]
+        UsersDB[("data/<br/>users.dat")] ~~~ Config[("data/<br/>config.json")] ~~~ Models[("models/<br/>ONNX 检测+识别+活体")] ~~~ Logs[("log/<br/>日志文件")]
     end
 
     LogonUI -->|"COM 接口"| CP
@@ -109,7 +109,7 @@ flowchart TB
 | 摄像头 | USB 或内置，支持 1280×720 |
 | 运行时 | WebView2（Windows 11 内置，Win10 自动安装） |
 | 权限 | 管理员权限（安装和注册需要） |
-| 磁盘空间 | ~200 MB（含模型文件 ~28 MB） |
+| 磁盘空间 | ~220 MB（含四个 ONNX 模型约 185 MB：SCRFD ~15.5 MB + IResNet50 ~166 MB + 双 MiniFAS ~3.4 MB） |
 
 ---
 
@@ -150,21 +150,23 @@ FaceLogin/
 ### 前置条件
 
 - **Visual Studio 2022**（含 C++ 工作负载）
-- **vcpkg** — dlib（仅用于 68 点地标）、onnxruntime
+- **vcpkg** — dlib（图像容器/缩放基础库）、onnxruntime
 - **Go 1.21+** + **Wails v2**（仅安装程序）
 - **CMake 3.20+**
 
 ### C++ 组件
 
 ```powershell
-# vcpkg 依赖（dlib 仅用于 shape predictor 地标，识别/检测用 ONNX）
+# vcpkg 依赖（dlib 仅作图像容器/缩放基础库；人脸检测/识别/活体全部用 ONNX）
 vcpkg install dlib[core] onnxruntime --triplet x64-windows
 
-# 构建
+# 构建（VS 2022）
 cmake -B build -S . -G "Visual Studio 17 2022" `
     -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build --config Release
 ```
+
+> 在 VS 2026（MSVC 19.5x）上构建时，必须加 `--parallel 1`（不要加 `/MP`）：根 `CMakeLists.txt` 为该工具集关闭了 MSBuild 文件跟踪与排队错误遥测，否则会出现零 CPU 的孤立 `cl.exe` 进程。VS 2022 保持其常规 `/MP` 增量构建行为，命令不变。
 
 ### Go 安装程序
 
@@ -183,7 +185,7 @@ wails build -clean -platform windows/amd64
 | `MiniFASNetV2.onnx` | 静默反欺诈（2.7× 裁剪） | `assets/models/`；构建时复制到安装包 |
 | `MiniFASNetV1SE.onnx` | 静默反欺诈（4.0× 裁剪） | `assets/models/`；构建时复制到安装包 |
 
-> v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）。
+> v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）；dlib 仅保留为图像容器/缩放基础库。
 > `installer/FaceLoginSetup/resources/models/` 为构建生成目录，不作为模型源维护。
 
 ---

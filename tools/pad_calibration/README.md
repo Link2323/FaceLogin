@@ -81,7 +81,12 @@ python scripts\analyze_pad_calibration.py $csv `
 ```
 
 By default the tool reads `DataPath` from `HKLM\SOFTWARE\FaceLogin`, loads the
-active `config.json`, and reuses its camera, rotation, and low-light settings.
+active `config.json`, and reuses its camera and rotation settings. The
+`low_light_enhance` value is read only to record it as CSV metadata — it is
+**not** applied to PAD preprocessing, because the production PAD path
+(`OnnxAntiSpoof`) has no low-light preprocessing; low-light enhancement only
+affects the recognition embedding (`OnnxRecognizer`). So flipping
+`low_light_enhance` does not change the recorded PAD scores.
 Use `--data-dir`, `--models`, `--camera-device`, `--rotation`, or
 `--low-light-enhance` only for an intentional controlled comparison.
 
