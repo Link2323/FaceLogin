@@ -224,13 +224,14 @@ std::string LivenessMethodToString(LivenessMethod m) {
         case LivenessMethod::AntiSpoof: return "antispoof";
         case LivenessMethod::None:      return "none";
     }
-    return "blink";
+    return "antispoof"; // unreachable — all enum values covered; kept consistent with the default
 }
 
 LivenessMethod LivenessMethodFromString(const std::string& s) {
+    if (s == "blink")     return LivenessMethod::Blink;      // legacy v1.4 value; callers map it to anti-spoof with a warning
     if (s == "antispoof") return LivenessMethod::AntiSpoof;
     if (s == "none")      return LivenessMethod::None;
-    return LivenessMethod::Blink; // default
+    return LivenessMethod::AntiSpoof; // default for unknown/misspelled values (matches DefaultConfig; blink removed in v1.5)
 }
 
 } // namespace facelogin

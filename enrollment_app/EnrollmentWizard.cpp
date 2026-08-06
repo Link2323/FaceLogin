@@ -1341,10 +1341,12 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
     m_config = newConfig;
     m_livenessMethod = newConfig.liveness_method;
     m_antiSpoofThreshold = newConfig.anti_spoof_threshold;
-    // Runtime fallback: if anti-spoof is chosen but model is missing, degrade now
+    // Runtime fallback: if anti-spoof is chosen but model is missing, degrade to
+    // none now (consistent with StartPreview and FaceService — blink was removed
+    // in v1.5, so Blink is no longer a valid fallback target).
     if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-        FACELOGIN_WARN(L"SetConfig: runtime fallback to blink (anti-spoof model unavailable)");
-        m_livenessMethod = LivenessMethod::Blink;
+        FACELOGIN_WARN(L"SetConfig: anti-spoof model unavailable — liveness disabled (insecure)");
+        m_livenessMethod = LivenessMethod::None;
     }
 
     // Propagate the low-light enhancement toggle to the models (hot reload).
