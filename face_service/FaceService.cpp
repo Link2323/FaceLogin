@@ -123,9 +123,15 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
         pService->Stop();
         return NO_ERROR;
     case SERVICE_CONTROL_POWEREVENT: {
-        // PBT_APMRESUMESUSPEND = resumed from sleep/hibernate. The camera may
-        // still be in low-power recovery, so force a fresh camera init on the
-        // next auth instead of reusing a stale SourceReader.
+        // PBT_APMRESUMESUSPEND = resumed from sleep/hibernation. The USB camera
+        // may still be in low-power recovery, so force a fresh camera init on
+        // the next auth instead of reusing a stale SourceReader.
+        //
+        // Consumed only on the MF (standalone) path: see the m_resumedFlag check
+        // in ProcessAuthRequest's MF branch. The DS (service) path doesn't read
+        // it — service mode rebuilds the DS camera on every auth anyway
+        // (Shutdown+reset after each request), so a stale SourceReader can't
+        // accumulate there. The flag is harmless when set but unconsumed.
         if (eventType == PBT_APMRESUMESUSPEND) {
             FACELOGIN_INFO(L"Power resume event — forcing camera re-init on next auth");
             pService->m_resumedFlag.store(true);
