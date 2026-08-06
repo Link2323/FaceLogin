@@ -22,7 +22,7 @@
 
 | 锁屏人脸解锁 | 双重活体检测 | ONNX 识别 |
 |:---:|:---:|:---:|
-| Windows 原生锁屏集成<br>无需额外操作 | EAR 眨眼 + MiniFASNetV2<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 人脸识别 |
+| Windows 原生锁屏集成<br>无需额外操作 | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 人脸识别 |
 | **多账户支持** | **安全存储** | **热配置** |
 | 本地 SAM + 微软在线<br>账户全兼容，每账号可录多张人脸 | DPAPI 机器范围加密<br>管道 DACL 访问控制 | 运行时修改识别参数<br>无需重启服务 |
 
@@ -120,7 +120,7 @@ flowchart TB
 | 进程通信 | 命名管道 DACL：仅 SYSTEM + Administrators，拒绝远程 |
 | 凭据存储 | DPAPI `CRYPTPROTECT_LOCAL_MACHINE` 机器范围加密 |
 | 内存保护 | 密码使用后 `SecureZeroMemory` 即时擦除 |
-| 活体检测 | EAR 眨眼 + MiniFASNetV2 双重验证 |
+| 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 50/50 融合，固定 5/5 帧验证 |
 | 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重校验 |
 | 编译加固 | ASLR、DEP、CFG、64位高熵地址随机化 |
 
@@ -178,11 +178,13 @@ wails build -clean -platform windows/amd64
 
 | 文件 | 用途 | 下载 |
 |---|---|---|
-| `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g） | `scripts/download_models.ps1` |
-| `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入 | `scripts/download_models.ps1` |
-| `OULU_Protocol_2_model_0_0.onnx` | 静默反欺诈 | 随安装包分发 |
+| `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g） | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
+| `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入 | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
+| `MiniFASNetV2.onnx` | 静默反欺诈（2.7× 裁剪） | `assets/models/`；构建时复制到安装包 |
+| `MiniFASNetV1SE.onnx` | 静默反欺诈（4.0× 裁剪） | `assets/models/`；构建时复制到安装包 |
 
 > v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）。
+> `installer/FaceLoginSetup/resources/models/` 为构建生成目录，不作为模型源维护。
 
 ---
 

@@ -16,7 +16,7 @@ FaceLogin 是一个 Windows 人脸识别登录系统，允许用户通过摄像�
 | 人脸检测 | dlib HOG + SCRFD ONNX |
 | 地标提取 | dlib 68点 Shape Predictor |
 | 人脸识别 | dlib ResNet-34 (128维) + InsightFace buffalo_s ONNX (128维) |
-| 活体检测 | EAR眨眼检测 + MiniFASNetV2 静默反欺诈 |
+| 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 50/50 融合静默反欺诈 |
 | 相机采集 | Media Foundation / DirectShow |
 | 凭据提供 | Windows Credential Provider COM (ICredentialProvider) |
 | 进程通信 | 命名管道 (Named Pipe), UTF-16LE 编码 |
@@ -55,7 +55,7 @@ FaceLogin/
 │   ├── FaceService.cpp/h           # 服务核心逻辑 + 认证主循环
 │   ├── face_align.h                # 5点相似变换对齐 + 偏航角估计 (header-only)
 │   ├── liveness_types.h            # 活体检测方法枚举
-│   ├── onnx_models.cpp/h           # ONNX 模型封装 (SCRFD gnkps / w600k_r50 / DeepPixBiS)
+│   ├── onnx_models.cpp/h           # ONNX 模型封装 (SCRFD gnkps / w600k_r50 / 双 MiniFAS)
 │   ├── webcam_capture.cpp/h        # Media Foundation 摄像头
 │   ├── webcam_capture_dshow.cpp/h  # DirectShow 摄像头 (Session 0 服务模式)
 │   ├── pipe_server.cpp/h           # 命名管道服务端 (DACL安全)
@@ -93,9 +93,10 @@ FaceLogin/
 │   │   └── resources/              # 部署文件 (编译时嵌入)
 │   └── wails.json                  # Wails 项目配置
 ├── scripts/                        # 辅助脚本
-│   ├── download_models.ps1         # 模型文件下载 (shape predictor)
+│   ├── download_models.ps1         # 下载、规范化并校验四个正式模型
 │   └── start_standalone.bat        # 开发模式快速启动
-└── assets/                         # 静态资源 (图标等)
+└── assets/                         # 静态资源
+    └── models/                     # 四个正式 ONNX 模型的唯一来源
 ```
 
 ---
@@ -334,12 +335,12 @@ struct AppConfig {
     std::string    detector               = "scrfd";  // "dlib_hog" / "scrfd"
     LivenessMethod liveness_method        = LivenessMethod::Blink;
     float          match_threshold        = 0.30f;
-    float          anti_spoof_threshold   = 0.30f;
+    float          anti_spoof_threshold   = 0.281f;
 };
 
 enum class LivenessMethod {
     Blink,       // EAR 眨眼检测
-    AntiSpoof,   // ONNX 静默反欺诈 (MiniFASNetV2)
+    AntiSpoof,   // ONNX 静默反欺诈 (MiniFASNetV2 + MiniFASNetV1SE)
     None         // 无活体检查 (不安全)
 };
 ```
@@ -425,7 +426,7 @@ ServiceMain()
 | `detector` | `"scrfd"` | 保留兼容 (仅 scrfd 支持) |
 | `liveness_method` | `"antispoof"` | 活体方法: antispoof / none (blink 已随 dlib 68点移除, 配置兼容映射到 antispoof) |
 | `match_threshold` | 0.30 | 欧氏距离阈值 (512-D 经 EmbeddingThresholdForDim 用 0.80) |
-| `anti_spoof_threshold` | 0.30 | 反欺诈阈值 (越高越严格) |
+| `anti_spoof_threshold` | 0.281 | 双 MiniFAS 融合阈值 (越高越严格) |
 
 ### 5.3 人脸对齐 (`face_align.h`)
 
@@ -455,7 +456,7 @@ class OnnxRecognizer {
 
 ### 5.5 活体检测
 
-v1.5 起 blink (EAR) 活体随 dlib 68 点移除，仅保留 DeepPixBiS 静默反欺诈（无需眨眼，侧脸时眼睛信息不全也不受影响）。配置 `liveness_method: "blink"` 会自动映射到 antispoof 并记录警告。
+v1.5 起 blink (EAR) 活体随 dlib 68 点移除。当前使用 MiniFASNetV2 与 MiniFASNetV1SE 的 50/50 融合分数，阈值 0.281，并要求 5/5 帧全部通过。配置 `liveness_method: "blink"` 会自动映射到 antispoof 并记录警告。
 
 ### 5.6 ONNX 模型 (`onnx_models.h/cpp`)
 
@@ -465,7 +466,7 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除，仅保留 DeepPixBiS 静默�
 |---|---|---|---|---|
 | `OnnxDetector` | SCRFD gnkps (`det_10g_gnkps.onnx`) | 640×640 直接拉伸 | 检测框+5点关键点 | 人脸检测 |
 | `OnnxRecognizer` | InsightFace buffalo_l (`w600k_r50.onnx`) | 112×112 对齐人脸 | 512维嵌入 | 人脸识别 |
-| `OnnxAntiSpoof` | DeepPixBiS (`OULU_Protocol_2_model_0_0.onnx`) | 224×224 bbox 裁剪 | 活体分数 [0,1] | 静默反欺诈 |
+| `OnnxAntiSpoof` | `MiniFASNetV2.onnx` + `MiniFASNetV1SE.onnx` | bbox 扩展裁剪（2.7× / 4.0×） | 50/50 融合活体分数 [0,1] | 静默反欺诈 |
 
 所有 ONNX 模型放置在 `%PROGRAMDATA%\FaceLogin\models\` 下。
 
@@ -772,7 +773,8 @@ C:\Program Files\FaceLogin\               # 安装目录 (用户可选)
 └── models/
     ├── det_10g_gnkps.onnx                           (~15.5 MB)
     ├── w600k_r50.onnx                               (~174 MB)
-    └── OULU_Protocol_2_model_0_0.onnx                (~13 MB)
+    ├── MiniFASNetV2.onnx                             (~1.74 MB)
+    └── MiniFASNetV1SE.onnx                           (~1.74 MB)
 
 C:\ProgramData\FaceLogin\                   # 数据目录
 ├── data/
@@ -792,9 +794,10 @@ C:\ProgramData\FaceLogin\                   # 数据目录
 |---|---|---|---|
 | `det_10g_gnkps.onnx` | ~15.5 MB | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档 ~3.4× 快于 34g） | hf-mirror |
 | `w600k_r50.onnx` | ~174 MB | buffalo_l IResNet-50 512维嵌入 | InsightFace / hf-mirror |
-| `OULU_Protocol_2_model_0_0.onnx` | ~13 MB | DeepPixBiS 静默反欺诈 | MiniFASNet |
+| `MiniFASNetV2.onnx` | ~1.74 MB | 双模型静默反欺诈（2.7× 裁剪） | Silent-Face-Anti-Spoofing |
+| `MiniFASNetV1SE.onnx` | ~1.74 MB | 双模型静默反欺诈（4.0× 裁剪） | Silent-Face-Anti-Spoofing |
 
-下载脚本: `scripts/download_models.ps1` 可下载前两个模型（国内可直连 hf-mirror.com）。OULU 随安装包分发。
+下载脚本: `scripts/download_models.ps1` 将全部四个模型准备并校验到 `assets/models/`；安装包构建时会复制相同 SHA-256 的模型文件。
 v1.5 起不再使用 dlib 68 点形状预测器：SCRFD 直接输出 5 关键点，由相似变换对齐（`face_align.h`）完成摆正。
 
 ---
@@ -874,7 +877,7 @@ wails build -clean -platform windows/amd64
 | 单实例 | 全局互斥体防止多个服务实例 |
 | DLL 安全 | `/DYNAMICBASE` (ASLR), `/NXCOMPAT` (DEP), `/GUARD:CF` (CFG), `/HIGHENTROPYVA` (64位) |
 | 密码验证 | `LogonUserW(LOGON32_LOGON_NETWORK)` 轻量验证，不缓存凭据 |
-| 活体检测 | EAR 眨眼检测 + MiniFASNetV2 反欺诈，防止照片/视频攻击 |
+| 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 融合反欺诈，防止照片/视频攻击 |
 | 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重验证 |
 
 ---
@@ -934,6 +937,10 @@ wails build -clean -platform windows/amd64
 ```cmd
 REM 1. 下载模型
 powershell -File scripts\download_models.ps1
+
+REM 1.1 为本机服务运行时准备模型
+mkdir C:\ProgramData\FaceLogin\models
+copy assets\models\*.onnx C:\ProgramData\FaceLogin\models\
 
 REM 2. 停止已有服务
 sc stop FaceLoginService

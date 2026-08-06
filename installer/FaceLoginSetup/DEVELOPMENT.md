@@ -83,8 +83,12 @@ wails build -clean -platform windows/amd64
 | `FaceLoginCredentialProvider.dll` | `build/credential_provider/Release/FaceLoginCredentialProvider.dll` |
 | `FaceLoginConsole.exe` | `installer/FaceLoginSetup/resources/`（由 MSBuild 自动输出） |
 | `onnxruntime.dll` 及 libgcc/lapack 等 | 运行时依赖，通常不变 |
+| `models/det_10g_gnkps.onnx` | `assets/models/`（构建 Console 时自动复制并由安装器校验 SHA-256） |
+| `models/w600k_r50.onnx` | `assets/models/`（构建 Console 时自动复制并由安装器校验 SHA-256） |
+| `models/MiniFASNetV2.onnx` | `assets/models/`（构建 Console 时自动复制并由安装器校验 SHA-256） |
+| `models/MiniFASNetV1SE.onnx` | `assets/models/`（构建 Console 时自动复制并由安装器校验 SHA-256） |
 
-> **`FaceLoginConsole.exe` 的构建目标直接输出到 `resources/`**，其余两个需手动复制。改 C++ 代码后务必核对时间戳，避免把旧二进制打进安装包。
+> **`FaceLoginConsole.exe` 的构建目标直接输出到 `resources/`**，并从 `assets/models/` 自动准备全部四个运行时模型；服务 EXE 和凭据 DLL 仍需手动复制。`resources/models/` 是生成物，不应直接维护。改 C++ 代码后务必核对时间戳，避免把旧二进制打进安装包。
 
 ---
 
@@ -114,7 +118,7 @@ wails build -clean -platform windows/amd64
 internal.ConfigUpgradeEnabled = true
 internal.ConfigUpgradeForcedDefaults = map[string]any{
     "match_threshold":      0.30,   // 本版本调整过的键
-    "anti_spoof_threshold": 0.30,
+    "anti_spoof_threshold": 0.281,
 }
 ```
 
