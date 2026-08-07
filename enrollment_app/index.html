@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -238,10 +238,13 @@ body{
       <p class="dim">无密码账号无法用于人脸解锁，人脸识别只能完成录入。</p>
     </div>
     <p class="dim">你的密码将使用 DPAPI 加密，仅存储在本机。</p>
-    <button class="btn btn-primary" id="btn-save" onclick="onSave()" style="margin-top:8px">
-      <span class="spinner" id="save-spinner"></span>
-      保存并录入
-    </button>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-primary" id="btn-save" onclick="onSave()" style="flex:1">
+        <span class="spinner" id="save-spinner"></span>
+        保存并录入
+      </button>
+      <button class="btn btn-secondary" id="btn-save-cancel" onclick="onPwdCancel()" style="flex:1">取消</button>
+    </div>
   </div>
   <div class="footer"><p>FaceLogin Console</p></div>
 </div>
@@ -675,13 +678,6 @@ function onSaveSettings() {
     var ok = H.SetConfig(JSON.stringify(cfg));
     if (ok) {
       showBanner('settings', '设置已保存并通知后台服务。', 'ok');
-      // Update hint text based on liveness method
-      var method = cfg.liveness_method;
-      if (method === 'antispoof') {
-        document.getElementById('cam-hint').textContent = '请保持面部正对摄像头，将进行活体检测。';
-      } else {
-        document.getElementById('cam-hint').textContent = '请将面部置于取景框内，确保光线充足。';
-      }
     } else {
       showBanner('settings', '设置已写入，但后台服务未确认安全重载；人脸认证将保持关闭，请检查服务和模型文件。', 'error', 10000);
     }
@@ -1219,6 +1215,21 @@ function showBanner(screen, text, type, durationMs) {
   // lock-screen password-refresh hint) need longer to be readable.
   var ms = (typeof durationMs === 'number') ? durationMs : 4000;
   setTimeout(function() { el.className = 'banner'; }, ms);
+}
+
+// Cancel from the password screen: discard the just-captured samples and
+// return to the camera screen, restarting the live preview. Mirrors the
+// cleanup done in onSave's success path.
+function onPwdCancel() {
+  document.getElementById('screen-pwd').classList.remove('active');
+  document.getElementById('screen-cam').classList.add('active');
+  currentTab = 'cam';
+  document.getElementById('fld-pass').value = '';
+  document.getElementById('samples-tag').textContent = '已采 0 帧';
+  try {
+    if (H.StartPreview()) { viewing = true; renderFrame(); }
+    else showBanner('cam', '预览启动失败：活体检测模型不可用，请检查模型文件。', 'error', 10000);
+  } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
 }
 
 function onSave() {

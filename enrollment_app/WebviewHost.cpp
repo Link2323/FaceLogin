@@ -127,7 +127,8 @@ int WebviewHost::Run() {
     int scrW = GetSystemMetrics(SM_CXSCREEN), scrH = GetSystemMetrics(SM_CYSCREEN);
 
     // Get the monitor DPI so we can convert CSS pixels to physical pixels.
-    // CSS layout needs ~600 CSS px vertically (viewport 360 + chrome ~240).
+    // CSS layout needs ~660 CSS px vertically (viewport 360 + chrome ~240
+    // + progress bar/multi-angle checkbox + breathing room).
     HDC hdc = GetDC(nullptr);
     int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
     ReleaseDC(nullptr, hdc);
@@ -135,7 +136,8 @@ int WebviewHost::Run() {
 
     // Desired client area in CSS pixels:
     //   Width: just above content max-width (640px) for comfortable margin
-    //   Height: ~620 CSS px covers viewport(360) + chrome(234) + breathing room
+    //   Height: 660 CSS px covers viewport(360) + chrome(234) + progress
+    //          bar/multi-angle controls + breathing room without scrollbars
     int clientWCss = 680;
 
     int clientHCss = 660;  // covers viewport + chrome + progress bar without scrollbars
