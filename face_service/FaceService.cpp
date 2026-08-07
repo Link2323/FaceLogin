@@ -741,154 +741,41 @@ bool FaceService::ProcessAuthRequest() {
 
     auto startTime = std::chrono::steady_clock::now();
     bool authSent = false;
-    int consecutiveMatches = 0;
-    std::wstring consensusSid;
-    static constexpr int CONSENSUS_FRAMES = 3;
+    // The first anti-spoof anchor frame (below) locks the identity for this
+    // auth; every later embedding (mid-window consensus frame, final anchor,
+    // post-PAD verify) must return this same SID or authentication fails
+    // closed.  lockedMatch carries the credential released on success.
+    std::wstring initialSid;
+    std::optional<CredentialStore::MatchResult> lockedMatch;
 
-    while (m_running) {
-        // Abort early if the client (LogonUI) has gone away — e.g. the user
-        // switched to password/fingerprint unlock. Otherwise we'd keep the
-        // camera on until the timeout.
-        if (m_pipeServer->IsClientDisconnected()) {
-            FACELOGIN_INFO(L"Client disconnected during auth — aborting, releasing camera");
-            return false;
-        }
+    std::wstring domain = L".";
+    wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD size = ARRAYSIZE(computerName);
+    if (GetComputerNameW(computerName, &size)) {
+        domain = computerName;
+    }
 
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= m_authTimeoutSeconds) {
-            FACELOGIN_INFO(L"Authentication timed out");
-            m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
-            FlushFileBuffers(m_pipeServer->GetHandle());
-            m_pipeServer->DrainOutput(5000);
-            return false;
-        }
-
-        if (!grabFrame(frame)) {
-            if (!m_running) return false;
-            // A stalled camera (e.g. after resume) self-shut-down in
-            // GrabFrame. Rebuild it here so auth can continue instead of
-            // spinning on a dead SourceReader until timeout.
-            if (m_webcamMF && !m_webcamMF->IsInitialized()) {
-                FACELOGIN_INFO(L"MF camera stalled — re-initializing");
-                m_webcamMF->Shutdown();
-                m_webcamMF.reset();
-                m_webcamMF = std::make_unique<WebcamCapture>();
-                if (!m_webcamMF->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
-                    FACELOGIN_ERROR(L"MF camera re-init failed");
-                    m_webcamMF.reset();
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            continue;
-        }
-
-        // (grabFrame above already applied camera rotation)
-
-        // Face detection: SCRFD detects and yields the 5 keypoints directly
-        // (gnkps variant) — no separate landmark model. Alignment to 112×112
-        // happens inside ComputeEmbedding via a similarity transform.
-        std::optional<CredentialStore::MatchResult> match;
-
-        auto onnxDet = m_onnxDetector->DetectLargestFace(frame);
-        if (!onnxDet) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            continue;
-        }
-
-        // Embedding + match: ONNX (the only recognizer).
-        auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, onnxDet->kps);
-        if (!onnxEmb.empty()) {
-            // Pass the true dimensionality (512-D) so FindBestMatch compares
-            // against same-dimension stored embeddings only.
-            match = m_store->FindBestMatch(onnxEmb.data(), onnxEmb.size(), m_matchThreshold);
-        }
-
-        if (match) {
-            if (match->sid.empty()) {
-                FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
-                m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-                    L"身份数据无效，请使用密码登录并重新录入人脸"));
-                FlushFileBuffers(m_pipeServer->GetHandle());
-                m_pipeServer->DrainOutput(5000);
-                SecureClearMatchPassword(match);
-                return false;
-            }
-
-            // Consensus is meaningful only when every accepted frame belongs
-            // to the same Windows account.  A different registered user starts
-            // a fresh sequence instead of inheriting the previous count.
-            if (consensusSid.empty() || consensusSid == match->sid) {
-                consensusSid = match->sid;
-                consecutiveMatches++;
-            } else {
-                FACELOGIN_WARN(L"Matched SID changed during consensus — resetting sequence");
-                consensusSid = match->sid;
-                consecutiveMatches = 1;
-            }
-            FACELOGIN_INFO(L"Face matched: %s (distance=%.4f) [%d/%d]",
-                          match->username.c_str(), match->distance,
-                          consecutiveMatches, CONSENSUS_FRAMES);
-
-            if (consecutiveMatches < CONSENSUS_FRAMES) {
-                SecureClearMatchPassword(match);
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                continue;
-            }
-        } else {
-            // Soft consensus: a miss DECAYS the counter by 1 instead of fully
-            // resetting to 0. A single intermittent bad frame (motion, blink,
-            // momentary profile turn, partial occlusion) then no longer forces
-            // a full 3-frame restart — the user's slightly moving face stays
-            // matched and auth completes in ~1-2s instead of timing out.
-            //
-            // Security is preserved: this only relaxes the frame-consensus;
-            // mandatory PAD AND the post-liveness final same-SID match verify
-            // still run before credentials are released.
-            if (consecutiveMatches > 0) {
-                consecutiveMatches--;
-                FACELOGIN_INFO(L"Match lost — counter decayed to %d", consecutiveMatches);
-                if (consecutiveMatches == 0) consensusSid.clear();
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            continue;
-        }
-
+    // === Consensus + liveness, fused into a single window ===
+    // Historically auth ran a separate 3-frame match consensus (3 embeddings)
+    // ahead of a 5-frame PAD stage that re-anchored identity on frames 1/5
+    // (2 more embeddings): 6 embeddings per auth, and the consensus frames
+    // had NO PAD coverage.  This fused loop runs PAD on every frame (5/5 must
+    // pass — unchanged) and binds identity on frames 1/3/5 of the PAD window:
+    // the first anchor locks the SID, the mid-window embedding and the final
+    // anchor must return the same SID.  The "3-frame consensus" strength is
+    // preserved with three spaced samples (harder for a transient lighting
+    // glitch to hit than three consecutive frames) at 4 embeddings per auth.
+    // An embedding that fails to produce a match slides the frame out of the
+    // count — it is neither counted for PAD nor allowed to satisfy the anchor
+    // schedule, so consensus can never silently shrink below three bindings.
+    // An embedding that matches a DIFFERENT SID is a hard fail (face swap).
         {
-            const std::wstring initialSid = consensusSid;
-
-            if (initialSid.empty() || match->sid != initialSid) {
-                FACELOGIN_ERROR(L"Authentication identity binding invariant failed");
-                SecureClearMatchPassword(match);
-                return false;
-            }
-
-            // Passwordless account: face login cannot unlock it (no password to
-            // submit to LSA). Degrade gracefully with a notice instead of
-            // attempting liveness and submitting nothing. Do NOT mark the user
-            // as logged in.
-            if (match->passwordless) {
-                FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock; notifying CP",
-                               match->username.c_str());
-                m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(ipc::MSG_PASSWORDLESS_NOTICE));
-                FlushFileBuffers(m_pipeServer->GetHandle());
-                m_pipeServer->DrainOutput(5000);
-                SecureClearMatchPassword(match);
-                return false;
-            }
-
-            std::wstring domain = L".";
-            wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
-            DWORD size = ARRAYSIZE(computerName);
-            if (GetComputerNameW(computerName, &size)) {
-                domain = computerName;
-            }
-
             // === Liveness check ===
             {
                 LivenessMethod method = m_livenessMethod;
 
                 // Determine status text
-                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"\u6b63\u5728\u8fdb\u884c\u6d3b\u4f53\u68c0\u6d4b...");
+                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"正在进行活体检测...");
                 FlushFileBuffers(m_pipeServer->GetHandle());
 
                 bool livenessPassed = false;
@@ -903,27 +790,35 @@ bool FaceService::ProcessAuthRequest() {
                                    m_antiSpoofThreshold, totalChecks, passRequired);
                     auto asStart = std::chrono::steady_clock::now();
                     int passCount = 0, totalChecked = 0;
-                    // Identity binding: the FIRST and LAST PAD frames are bound
-                    // to the consensus winner with a full 512-D embedding; the
-                    // middle frames use a cheap bbox-overlap continuity check.
-                    // A full embedding on every frame costs ~1-2s on low-end
-                    // hardware (w600k_r50 is 44MB INT8) and blew the old 5s window
-                    // there (5 × 2.1s vs 5s, observed as "3/3 passed (need 5)"
-                    // failures on a slow laptop). Start/end anchors plus the
-                    // post-PAD final verify still close the swap window: a
-                    // mid-PAD face change fails frame 5's embedding bind.
-                    bool anchored = false;    // frame 1 of this PAD run bound?
+                    // Anchor schedule inside the PAD window (see the fused
+                    // design note above): frames 1/3/5 of the counted PAD
+                    // samples embed and must agree on one SID; frames 2/4 use
+                    // a cheap bbox-overlap continuity check.  A full embedding
+                    // on every frame costs ~1-2s on low-end hardware and blew
+                    // the old 5s window there; the 1/3/5 schedule keeps three
+                    // bindings while staying inside the 8s window.
+                    bool anchored = false;    // first anchor landed (identity locked)?
                     bool havePrevRect = false;
                     dlib::rectangle prevRect; // last counted frame's face box
+                    int consensusCount = 0;   // anchor + mid + final = 3 bindings
                     while (m_running && totalChecked < totalChecks) {
                         if (m_pipeServer->IsClientDisconnected()) {
                             FACELOGIN_INFO(L"Client disconnected during anti-spoof — aborting");
-                            SecureClearMatchPassword(match);
+                            SecureClearMatchPassword(lockedMatch);
+                            return false;
+                        }
+                        // Global 15s auth timeout.  The separate consensus loop
+                        // that used to enforce it is gone; this loop owns it.
+                        auto allElapsed = std::chrono::steady_clock::now() - startTime;
+                        if (std::chrono::duration_cast<std::chrono::seconds>(allElapsed).count() >= m_authTimeoutSeconds) {
+                            FACELOGIN_INFO(L"Authentication timed out");
+                            m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
+                            FlushFileBuffers(m_pipeServer->GetHandle());
+                            m_pipeServer->DrainOutput(5000);
+                            SecureClearMatchPassword(lockedMatch);
                             return false;
                         }
                         // Window matches enrollment's 8s (EnrollmentWizard).
-                        // The old 5s assumed ~100ms PAD frames; a full
-                        // continuity embedding takes ~2s on low-end hardware.
                         auto asElapsed = std::chrono::steady_clock::now() - asStart;
                         if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 8) break;
 
@@ -939,21 +834,24 @@ bool FaceService::ProcessAuthRequest() {
                             static_cast<long>(asDet->x2), static_cast<long>(asDet->y2));
 
                         // Frame 1 (until the first anchor lands) and frame 5
-                        // (totalChecks-1) are identity anchors.
+                        // (totalChecks-1) are identity anchors; frame 3
+                        // (totalChecked==2) is the mid-window consensus embed.
+                        // The 1/3/5 schedule assumes totalChecks == 5 (the
+                        // calibrated anti_spoof_threshold=0.281 default).  If a
+                        // future config ever changes the check count, the
+                        // binding plan must be re-derived so that exactly three
+                        // spaced embeddings still bracket the window.
                         const bool isAnchor = !anchored || totalChecked == totalChecks - 1;
+                        const bool isConsensusFrame = (totalChecked == 2);
 
-                        // On anchor frames the PAD inference runs concurrently
+                        // On binding frames the PAD inference runs concurrently
                         // with the embedding (independent ONNX sessions, read-only
                         // input — same rationale as the dual-MiniFAS overlap in
                         // OnnxAntiSpoof::Predict). Middle frames run it alone.
                         auto scoreFuture = std::async(std::launch::async,
                             [&] { return m_antiSpoof->Predict(asFrame, faceRect); });
 
-                        if (isAnchor) {
-                            // Bind the PAD sample to the same Windows identity
-                            // that won the initial consensus.  Otherwise user A's
-                            // stored credential could be released after user B
-                            // (or a swapped face) supplied the liveness frames.
+                        if (isAnchor || isConsensusFrame) {
                             auto continuityEmb =
                                 m_onnxRecognizer->ComputeEmbedding(asFrame, asDet->kps);
                             if (continuityEmb.empty()) {
@@ -968,16 +866,59 @@ bool FaceService::ProcessAuthRequest() {
                                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                                 continue;
                             }
-                            const bool sameIdentity = !continuityMatch->sid.empty() &&
-                                                      continuityMatch->sid == initialSid;
-                            SecureClearMatchPassword(continuityMatch);
-                            if (!sameIdentity) {
-                                scoreFuture.get();
-                                FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
-                                livenessIdentityMismatch = true;
-                                break;
+
+                            if (!anchored) {
+                                // First anchor: lock the identity.  This is the
+                                // credential released on success — never clear
+                                // its password here.
+                                if (continuityMatch->sid.empty()) {
+                                    scoreFuture.get();
+                                    FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
+                                    SecureClearMatchPassword(continuityMatch);
+                                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+                                        L"身份数据无效，请使用密码登录并重新录入人脸"));
+                                    FlushFileBuffers(m_pipeServer->GetHandle());
+                                    m_pipeServer->DrainOutput(5000);
+                                    SecureClearMatchPassword(lockedMatch);
+                                    return false;
+                                }
+                                if (continuityMatch->passwordless) {
+                                    scoreFuture.get();
+                                    FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock; notifying CP",
+                                                   continuityMatch->username.c_str());
+                                    SecureClearMatchPassword(continuityMatch);
+                                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(ipc::MSG_PASSWORDLESS_NOTICE));
+                                    FlushFileBuffers(m_pipeServer->GetHandle());
+                                    m_pipeServer->DrainOutput(5000);
+                                    SecureClearMatchPassword(lockedMatch);
+                                    return false;
+                                }
+                                initialSid = continuityMatch->sid;
+                                lockedMatch = std::move(continuityMatch);
+                                anchored = true;
+                                consensusCount++;
+                                FACELOGIN_INFO(L"Identity locked: %s (distance=%.4f) [%d/3]",
+                                              lockedMatch->username.c_str(),
+                                              lockedMatch->distance, consensusCount);
+                            } else {
+                                // Mid-window consensus / final anchor: must be
+                                // the same identity that locked the sequence.
+                                // Otherwise user A's stored credential could be
+                                // released after user B (or a swapped face)
+                                // supplied the liveness frames.
+                                const bool sameIdentity = !continuityMatch->sid.empty() &&
+                                                          continuityMatch->sid == initialSid;
+                                SecureClearMatchPassword(continuityMatch);
+                                if (!sameIdentity) {
+                                    scoreFuture.get();
+                                    FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
+                                    livenessIdentityMismatch = true;
+                                    break;
+                                }
+                                consensusCount++;
+                                FACELOGIN_INFO(L"Identity confirmed: %s [%d/3]",
+                                              initialSid.c_str(), consensusCount);
                             }
-                            anchored = true;
                         } else if (havePrevRect) {
                             // Middle frames: cheap geometric continuity. A real
                             // face swap displaces the box beyond the ~35% IoU
@@ -1023,10 +964,16 @@ bool FaceService::ProcessAuthRequest() {
                     }
                     // A partial sample set is not enough.  Previously one early
                     // passing frame could satisfy passRequired even when the
-                    // remaining required frames were never captured.
+                    // remaining required frames were never captured.  The
+                    // consensusCount >= 3 term is defensive: the loop's binding
+                    // schedule already forces all three embeddings to succeed
+                    // before totalChecked can reach totalChecks, but the check
+                    // makes it impossible for a future edit to silently weaken
+                    // consensus below three same-SID bindings.
                     livenessPassed = (!livenessInferenceError &&
                                       totalChecked == totalChecks &&
-                                      passCount >= passRequired);
+                                      passCount >= passRequired &&
+                                      consensusCount >= 3);
                     if (!livenessPassed) {
                         FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
                                        passCount, totalChecked, passRequired);
@@ -1043,7 +990,7 @@ bool FaceService::ProcessAuthRequest() {
                             : L"\u68c0\u6d4b\u5230\u653b\u51fb\uff0c\u8bf7\u4f7f\u7528\u771f\u5b9e\u4eba\u8138"));
                     FlushFileBuffers(m_pipeServer->GetHandle());
                     m_pipeServer->DrainOutput(5000);
-                    SecureClearMatchPassword(match);
+                    SecureClearMatchPassword(lockedMatch);
                     return false;
                 }
 
@@ -1067,7 +1014,7 @@ bool FaceService::ProcessAuthRequest() {
                     while (m_running && !verifyOk) {
                         if (m_pipeServer->IsClientDisconnected()) {
                             FACELOGIN_INFO(L"Client disconnected during final verify — aborting");
-                            SecureClearMatchPassword(match);
+                            SecureClearMatchPassword(lockedMatch);
                             return false;
                         }
                         auto vElapsed = std::chrono::steady_clock::now() - verifyStart;
@@ -1114,7 +1061,7 @@ bool FaceService::ProcessAuthRequest() {
                             L"\u6d3b\u4f53\u9a8c\u8bc1\u671f\u95f4\u4eba\u8138\u4e0d\u5339\u914d\uff0c\u8bf7\u91cd\u8bd5"));
                         FlushFileBuffers(m_pipeServer->GetHandle());
                         m_pipeServer->DrainOutput(5000);
-                        SecureClearMatchPassword(match);
+                        SecureClearMatchPassword(lockedMatch);
                         return false;
                     }
                 }
@@ -1123,12 +1070,12 @@ bool FaceService::ProcessAuthRequest() {
             // Serialize credentials only after liveness and same-SID final
             // verification have both succeeded.
             std::wstring msg = ipc::BuildAuthSuccessMessage(
-                match->sid, match->upn,
-                domain, match->username, match->password);
+                lockedMatch->sid, lockedMatch->upn,
+                domain, lockedMatch->username, lockedMatch->password);
             bool writeOk = m_pipeServer->WriteMessage(msg);
             FlushFileBuffers(m_pipeServer->GetHandle());
             SecureClearWideString(msg);
-            SecureClearMatchPassword(match);
+            SecureClearMatchPassword(lockedMatch);
 
             if (!writeOk) {
                 FACELOGIN_WARN(L"Failed to send authentication credentials");
@@ -1137,7 +1084,7 @@ bool FaceService::ProcessAuthRequest() {
 
             authSent = true;
             FACELOGIN_INFO(L"Credentials sent for %s\\%s",
-                          domain.c_str(), match->username.c_str());
+                          domain.c_str(), lockedMatch->username.c_str());
 
             // Mark user as logged in IMMEDIATELY after sending credentials.
             // This prevents a race condition: the user can lock (Win+L)
@@ -1162,11 +1109,7 @@ bool FaceService::ProcessAuthRequest() {
             // unbounded ReadFile(dummy) here — if the client closed the pipe
             // or never read, the service blocked forever and SCM killed it.
             m_pipeServer->DrainOutput(5000);
-            break;
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    }
 
     return authSent;
 }
