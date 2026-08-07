@@ -103,7 +103,8 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
         // on E-cores. Knowing the actual value distinguishes "few threads"
         // from "threads present but slow" in one log line.
         FACELOGIN_INFO(L"  ONNX intra-op threads: %d (hardware_concurrency=%zu)",
-                       OnnxThreadCount(), std::thread::hardware_concurrency());
+                       OnnxThreadCount(),
+                       static_cast<size_t>(std::thread::hardware_concurrency()));
 
         m_initialized = true;
         return true;
