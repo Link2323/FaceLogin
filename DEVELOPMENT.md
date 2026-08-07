@@ -725,7 +725,7 @@ Win32 GUI 应用程序。
 | 后端 | Go + Wails v2 Runtime |
 | 前端 | Vue 3 + Tailwind CSS + TypeScript |
 | 打包 | Wails 构建 (Go 编译 + WebView2 嵌入) |
-| 资源 | Go embed.FS 嵌入所有部署文件 (~220 MB) |
+| 资源 | Go embed.FS 嵌入所有部署文件 (~240 MB) |
 
 ### 8.2 命令行用法
 
@@ -744,7 +744,7 @@ FaceLoginSetup.exe          交互模式 (GUI)
 | 2 | 创建目标目录 | 12-25% | `os.MkdirAll` |
 | 2.5 | 设置安装目录 ACL（预保护） | 25-30% | `internal.SetDirectoryACL`；在写入可执行文件/模型前锁定，使后续解压文件继承仅 SYSTEM/管理员写权限 |
 | 3 | 写入注册表路径 (InstallPath, DataPath) | 30-35% | DataPath = 安装目录本身，C++ 端追加 `\models` |
-| 4 | 提取所有嵌入文件 (~220MB) | 35-60% | `internal.ExtractAll` |
+| 4 | 提取所有嵌入文件 (~240MB) | 35-60% | `internal.ExtractAll` |
 | 4.1 | 校验已复制模型（大小 + SHA-256） | — | `internal.ValidateInstalledModels`；与步骤 0 相同的固定哈希 |
 | 4.5 | 写入默认 config.json（选择性强制本版调整的默认参数） | 60% | `internal.EnsureConfigDefaults` |
 | 5 | 验证目录权限（递归后置 ACL） | 60-67% | `internal.SetDirectoryACL` 递归再校一次，防止解压文件携带意外显式 ACL |

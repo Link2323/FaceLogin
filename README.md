@@ -109,7 +109,7 @@ flowchart TB
 | 摄像头 | USB 或内置，支持 1280×720 |
 | 运行时 | WebView2（Windows 11 内置，Win10 自动安装） |
 | 权限 | 管理员权限（安装和注册需要） |
-| 磁盘空间 | ~220 MB（含四个 ONNX 模型约 185 MB：SCRFD ~15.5 MB + IResNet50 ~166 MB + 双 MiniFAS ~3.4 MB） |
+| 磁盘空间 | ~240 MB（含四个 ONNX 模型约 194 MB：SCRFD ~16 MB + IResNet50 ~174 MB + 双 MiniFAS ~3.5 MB；运行库 DLL 及可执行文件约 47 MB） |
 
 ---
 

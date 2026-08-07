@@ -153,7 +153,7 @@ async function doUninstall() {
             </svg>
           </button>
         </div>
-        <p class="mt-1 text-xs text-gray-400">模型文件（约 120 MB）将安装到该目录下的 models/ 子目录</p>
+        <p class="mt-1 text-xs text-gray-400">模型文件（约 190 MB：检测 + 识别 + 双活体）将安装到该目录下的 models/ 子目录</p>
 
         <button
           class="mt-6 w-full py-2.5 text-sm font-medium bg-gray-900 text-white
