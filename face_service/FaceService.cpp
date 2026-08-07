@@ -8,6 +8,7 @@
 #include <shlobj.h>
 #include <chrono>
 #include <thread>
+#include <future>
 #include <algorithm>
 #include <cmath>
 #include <wtsapi32.h>
@@ -902,14 +903,29 @@ bool FaceService::ProcessAuthRequest() {
                                    m_antiSpoofThreshold, totalChecks, passRequired);
                     auto asStart = std::chrono::steady_clock::now();
                     int passCount = 0, totalChecked = 0;
+                    // Identity binding: the FIRST and LAST PAD frames are bound
+                    // to the consensus winner with a full 512-D embedding; the
+                    // middle frames use a cheap bbox-overlap continuity check.
+                    // A full embedding on every frame costs ~1-2s on low-end
+                    // hardware (w600k_r50 is 174MB) and blew the old 5s window
+                    // there (5 × 2.1s vs 5s, observed as "3/3 passed (need 5)"
+                    // failures on a slow laptop). Start/end anchors plus the
+                    // post-PAD final verify still close the swap window: a
+                    // mid-PAD face change fails frame 5's embedding bind.
+                    bool anchored = false;    // frame 1 of this PAD run bound?
+                    bool havePrevRect = false;
+                    dlib::rectangle prevRect; // last counted frame's face box
                     while (m_running && totalChecked < totalChecks) {
                         if (m_pipeServer->IsClientDisconnected()) {
                             FACELOGIN_INFO(L"Client disconnected during anti-spoof — aborting");
                             SecureClearMatchPassword(match);
                             return false;
                         }
+                        // Window matches enrollment's 8s (EnrollmentWizard).
+                        // The old 5s assumed ~100ms PAD frames; a full
+                        // continuity embedding takes ~2s on low-end hardware.
                         auto asElapsed = std::chrono::steady_clock::now() - asStart;
-                        if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 5) break;
+                        if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 8) break;
 
                         dlib::matrix<dlib::rgb_pixel> asFrame;
                         if (!grabFrame(asFrame)) { if (!m_running) break; std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
@@ -918,36 +934,75 @@ bool FaceService::ProcessAuthRequest() {
                         auto asDet = m_onnxDetector->DetectLargestFace(asFrame);
                         if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
 
-                        // Bind every PAD sample to the same Windows identity
-                        // that won the initial consensus.  Otherwise user A's
-                        // stored credential could be released after user B (or
-                        // a swapped face) supplied the liveness frames.
-                        auto continuityEmb =
-                            m_onnxRecognizer->ComputeEmbedding(asFrame, asDet->kps);
-                        if (continuityEmb.empty()) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                            continue;
-                        }
-                        auto continuityMatch = m_store->FindBestMatch(
-                            continuityEmb.data(), continuityEmb.size(), m_matchThreshold);
-                        if (!continuityMatch) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                            continue;
-                        }
-                        const bool sameIdentity = !continuityMatch->sid.empty() &&
-                                                  continuityMatch->sid == initialSid;
-                        SecureClearMatchPassword(continuityMatch);
-                        if (!sameIdentity) {
-                            FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
-                            livenessIdentityMismatch = true;
-                            break;
+                        const dlib::rectangle faceRect(
+                            static_cast<long>(asDet->x1), static_cast<long>(asDet->y1),
+                            static_cast<long>(asDet->x2), static_cast<long>(asDet->y2));
+
+                        // Frame 1 (until the first anchor lands) and frame 5
+                        // (totalChecks-1) are identity anchors.
+                        const bool isAnchor = !anchored || totalChecked == totalChecks - 1;
+
+                        // On anchor frames the PAD inference runs concurrently
+                        // with the embedding (independent ONNX sessions, read-only
+                        // input — same rationale as the dual-MiniFAS overlap in
+                        // OnnxAntiSpoof::Predict). Middle frames run it alone.
+                        auto scoreFuture = std::async(std::launch::async,
+                            [&] { return m_antiSpoof->Predict(asFrame, faceRect); });
+
+                        if (isAnchor) {
+                            // Bind the PAD sample to the same Windows identity
+                            // that won the initial consensus.  Otherwise user A's
+                            // stored credential could be released after user B
+                            // (or a swapped face) supplied the liveness frames.
+                            auto continuityEmb =
+                                m_onnxRecognizer->ComputeEmbedding(asFrame, asDet->kps);
+                            if (continuityEmb.empty()) {
+                                scoreFuture.get(); // consume the running predict
+                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                                continue;
+                            }
+                            auto continuityMatch = m_store->FindBestMatch(
+                                continuityEmb.data(), continuityEmb.size(), m_matchThreshold);
+                            if (!continuityMatch) {
+                                scoreFuture.get();
+                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                                continue;
+                            }
+                            const bool sameIdentity = !continuityMatch->sid.empty() &&
+                                                      continuityMatch->sid == initialSid;
+                            SecureClearMatchPassword(continuityMatch);
+                            if (!sameIdentity) {
+                                scoreFuture.get();
+                                FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
+                                livenessIdentityMismatch = true;
+                                break;
+                            }
+                            anchored = true;
+                        } else if (havePrevRect) {
+                            // Middle frames: cheap geometric continuity. A real
+                            // face swap displaces the box beyond the ~35% IoU
+                            // band; frame 5 re-binds identity by embedding. An
+                            // IoU dip just skips the frame (forgiving of sway);
+                            // a sustained displacement starves totalChecked and
+                            // the run fails closed.
+                            const auto interW = std::max<long>(0,
+                                std::min(faceRect.right(), prevRect.right()) -
+                                std::max(faceRect.left(), prevRect.left()) + 1);
+                            const auto interH = std::max<long>(0,
+                                std::min(faceRect.bottom(), prevRect.bottom()) -
+                                std::max(faceRect.top(), prevRect.top()) + 1);
+                            const double inter = static_cast<double>(interW) * interH;
+                            const double uni = static_cast<double>(faceRect.width()) * faceRect.height() +
+                                               static_cast<double>(prevRect.width()) * prevRect.height() - inter;
+                            if (uni > 0.0 && inter / uni < 0.35) {
+                                scoreFuture.get();
+                                FACELOGIN_WARN(L"Face position discontinuity during anti-spoof — frame skipped");
+                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                                continue;
+                            }
                         }
 
-                        float score = m_antiSpoof->Predict(asFrame,
-                            dlib::rectangle(static_cast<long>(asDet->x1),
-                                            static_cast<long>(asDet->y1),
-                                            static_cast<long>(asDet->x2),
-                                            static_cast<long>(asDet->y2)));
+                        float score = scoreFuture.get();
                         if (!std::isfinite(score) || score < 0.0f || score > 1.0f) {
                             FACELOGIN_ERROR(L"Anti-spoof inference returned invalid score: %.4f", score);
                             livenessInferenceError = true;
@@ -955,6 +1010,8 @@ bool FaceService::ProcessAuthRequest() {
                         }
 
                         totalChecked++;
+                        prevRect = faceRect;
+                        havePrevRect = true;
                         if (score >= m_antiSpoofThreshold) passCount++; // config-driven threshold
                         FACELOGIN_INFO(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
 
@@ -998,8 +1055,12 @@ bool FaceService::ProcessAuthRequest() {
                 // two stages agree on face position. Retries over a short window:
                 // the frame right after liveness is often mid-motion and its
                 // box/embedding is noisy, so a single frame is unreliable. We
-                // keep grabbing until a frame both detects a face AND matches
-                // (or ~2s elapses).
+                // keep grabbing until a frame both detects a face AND matches.
+                // The 8s window matches the PAD stage: on low-end hardware a
+                // single detect+embed attempt takes ~2s, so the old 2s window
+                // allowed only one try there — the retry this loop exists for
+                // was defeated. Success breaks out immediately; only the
+                // fail path is extended.
                 if (method == LivenessMethod::AntiSpoof) {
                     auto verifyStart = std::chrono::steady_clock::now();
                     bool verifyOk = false;
@@ -1010,7 +1071,7 @@ bool FaceService::ProcessAuthRequest() {
                             return false;
                         }
                         auto vElapsed = std::chrono::steady_clock::now() - verifyStart;
-                        if (std::chrono::duration_cast<std::chrono::seconds>(vElapsed).count() >= 2) break;
+                        if (std::chrono::duration_cast<std::chrono::seconds>(vElapsed).count() >= 8) break;
 
                         dlib::matrix<dlib::rgb_pixel> verifyFrame;
                         if (!grabFrame(verifyFrame)) {
