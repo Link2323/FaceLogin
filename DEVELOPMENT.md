@@ -452,7 +452,7 @@ class OnnxRecognizer {
 };
 ```
 
-**初始化**: 加载 `w600k_r50.onnx` (ONNX Runtime, ~174 MB)
+**初始化**: 加载 `w600k_r50.onnx` (ONNX Runtime, ~44 MB INT8 量化版)
 
 **嵌入计算**: 输入对齐后的 112×112 帧 → 输出 512 维浮点向量 (L2 归一化)
 
@@ -725,7 +725,7 @@ Win32 GUI 应用程序。
 | 后端 | Go + Wails v2 Runtime |
 | 前端 | Vue 3 + Tailwind CSS + TypeScript |
 | 打包 | Wails 构建 (Go 编译 + WebView2 嵌入) |
-| 资源 | Go embed.FS 嵌入所有部署文件 (~240 MB) |
+| 资源 | Go embed.FS 嵌入所有部署文件 (~110 MB) |
 
 ### 8.2 命令行用法
 
@@ -797,7 +797,7 @@ C:\Program Files\FaceLogin\               # 安装目录 (用户可选)
 │   └── enrollment.log
 └── models/
     ├── det_10g_gnkps.onnx                           (~15.5 MB)
-    ├── w600k_r50.onnx                               (~174 MB)
+    ├── w600k_r50.onnx                               (~44 MB, INT8)
     ├── MiniFASNetV2.onnx                             (~1.74 MB)
     └── MiniFASNetV1SE.onnx                           (~1.74 MB)
 
@@ -818,7 +818,7 @@ C:\ProgramData\FaceLogin\                   # 数据目录
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
 | `det_10g_gnkps.onnx` | ~15.5 MB | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档 ~3.4× 快于 34g） | hf-mirror |
-| `w600k_r50.onnx` | ~174 MB | buffalo_l IResNet-50 512维嵌入 | InsightFace / hf-mirror |
+| `w600k_r50.onnx` | ~44 MB (INT8) | buffalo_l IResNet-50 512维嵌入，静态 QDQ 量化版（标定：同角度 p50 0.694，1.68× 加速） | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
 | `MiniFASNetV2.onnx` | ~1.74 MB | 双模型静默反欺诈（2.7× 裁剪） | Silent-Face-Anti-Spoofing |
 | `MiniFASNetV1SE.onnx` | ~1.74 MB | 双模型静默反欺诈（4.0× 裁剪） | Silent-Face-Anti-Spoofing |
 

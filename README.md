@@ -110,7 +110,7 @@ flowchart TB
 | 摄像头 | USB 或内置，支持 1280×720 |
 | 运行时 | WebView2（Windows 11 内置，Win10 自动安装） |
 | 权限 | 管理员权限（安装和注册需要） |
-| 磁盘空间 | ~240 MB（含四个 ONNX 模型约 194 MB：SCRFD ~16 MB + IResNet50 ~174 MB + 双 MiniFAS ~3.5 MB；运行库 DLL 及可执行文件约 47 MB） |
+| 磁盘空间 | ~110 MB（含四个 ONNX 模型约 64 MB：SCRFD ~16 MB + IResNet50 INT8 ~44 MB + 双 MiniFAS ~3.5 MB；运行库 DLL 及可执行文件约 47 MB） |
 
 ---
 
@@ -127,7 +127,7 @@ flowchart TB
 
 ## 性能说明（2026-08 三台机器实测）
 
-一次认证执行 **6 次 IResNet50 嵌入**（一致性 3 帧 + PAD 锚定 2 帧 + 最终验证 1 帧），这是多帧共识 + 每帧身份绑定 + PAD 5/5 的防照片/防换脸安全设计代价。实测：
+一次认证执行 **6 次 IResNet50 嵌入**（一致性 3 帧 + PAD 锚定 2 帧 + 最终验证 1 帧），这是多帧共识 + 每帧身份绑定 + PAD 5/5 的防照片/防换脸安全设计代价。实测（FP32 时代）：
 
 | 机器类型 | 单次嵌入 | 端到端解锁 |
 |---|---|---|
@@ -135,7 +135,9 @@ flowchart TB
 | 混合架构笔记本（4P+8E，散热正常 4.4GHz） | ~0.35s | **~5.5s** |
 | 同上（过热降频 2GHz） | ~1.6s | **~15-21s** |
 
-**结论：多帧全嵌入策略在低性能/散热受限机器上不可行。** CPU 频率是唯一决定性变量——薄本持续 AVX 负载撞温度墙降频是常态（电源模式无效，需散热维护）。混合架构（P+E 核）建议设置环境变量 `FACELOGIN_ONNX_THREADS=4`（8 线程跨核同步惩罚严重）。换轻量模型 w600k_mbf 已实测否决（同人距离贴阈值）。如需 <2s 目标，需重新设计认证管线并先通过 bug3 照片攻击评估，详细数据见本地 `docs/performance-baseline.md` 第 7 节。
+**结论：多帧全嵌入策略在低性能/散热受限机器上不可行。** CPU 频率是唯一决定性变量——薄本持续 AVX 负载撞温度墙降频是常态（电源模式无效，需散热维护）。混合架构（P+E 核）建议设置环境变量 `FACELOGIN_ONNX_THREADS=4`（8 线程跨核同步惩罚严重）。换轻量模型 w600k_mbf 已实测否决（同人距离贴阈值）。
+
+**已采用（2026-08）：r50 INT8 量化**——静态 QDQ（per-tensor，opset 11 限制），标定实测同角度 p50 0.665→0.694（余量 0.106，冒充安全持平），C++ 生产 onnxruntime 1.23.2 上 **1.68× 嵌入加速**（低端机嵌入 0.35s→~0.21s、1.6s→~0.95s），安装包减小 ~130 MB。模型文件 `w600k_r50.onnx` 现为量化产物，FP32 源模型与量化流程见 `scripts/download_models.ps1` + `tools/threshold_calibration/quantize_r50.py`。如需 <2s 目标，需重新设计认证管线并先通过 bug3 照片攻击评估，详细数据见本地 `docs/performance-baseline.md` 第 7 节。
 | 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重校验 |
 | 编译加固 | ASLR、DEP、CFG、64位高熵地址随机化 |
 
@@ -196,7 +198,7 @@ wails build -clean -platform windows/amd64
 | 文件 | 用途 | 下载 |
 |---|---|---|
 | `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g） | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
-| `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入 | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
+| `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入（INT8 量化，~44 MB，1.68× 加速，见性能说明） | `assets/models/`；由 `scripts/download_models.ps1` 下载 FP32 源并量化 |
 | `MiniFASNetV2.onnx` | 静默反欺诈（2.7× 裁剪） | `assets/models/`；构建时复制到安装包 |
 | `MiniFASNetV1SE.onnx` | 静默反欺诈（4.0× 裁剪） | `assets/models/`；构建时复制到安装包 |
 

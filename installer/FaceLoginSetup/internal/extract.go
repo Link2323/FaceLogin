@@ -37,8 +37,8 @@ var requiredModels = []requiredModel{
 	{
 		embeddedPath: "resources/models/w600k_r50.onnx",
 		fileName:     "w600k_r50.onnx",
-		size:         174383860,
-		sha256:       "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+		size:         43805153,
+		sha256:       "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185",
 	},
 	{
 		embeddedPath: "resources/models/MiniFASNetV2.onnx",

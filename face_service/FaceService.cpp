@@ -32,7 +32,7 @@ static constexpr wchar_t SERVICE_NAME[] = L"FaceLoginService";
 static constexpr char kDetSha256[] =
     "c940f97765fdc4b872b4a1ea041248d3e3d550202b7639f9488be558a6c0acb0";
 static constexpr char kRecognizerSha256[] =
-    "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43";
+    "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185";
 static constexpr char kMiniFasV2Sha256[] =
     "b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907";
 static constexpr char kMiniFasV1SeSha256[] =
@@ -274,7 +274,7 @@ bool FaceService::Initialize() {
     // Loaded SYNCHRONOUSLY because the pipe listener must be up as soon as
     // possible: SCRFD is needed for the very first frame of auth, and at
     // 15.5MB it loads in well under a second even on a cold disk. Everything
-    // heavier (w600k_r50 174MB + dual MiniFAS) is deferred to a background
+    // heavier (w600k_r50 44MB INT8 + dual MiniFAS) is deferred to a background
     // thread — see StartBackgroundModelLoad(). The lock screen therefore
     // connects to the pipe the moment it appears instead of waiting out the
     // model loads.
@@ -339,7 +339,7 @@ bool FaceService::Initialize() {
 // Lazy model loading (cold-boot acceleration)
 //
 // The pipe listener must be up as soon as possible so the credential provider
-// connects the moment the lock screen appears. Loading w600k_r50 (174MB) +
+// connects the moment the lock screen appears. Loading w600k_r50 (44MB INT8) +
 // dual MiniFAS synchronously in Initialize() pushed that by seconds on a cold
 // boot. Instead SCRFD (15.5MB) loads synchronously and the heavy models load
 // here, in a background thread kicked off right before Run() enters the pipe
@@ -352,7 +352,7 @@ bool FaceService::Initialize() {
 bool FaceService::LoadHeavyModels(bool lowLightEnhance) {
     FACELOGIN_INFO(L"Loading heavy models in background...");
 
-    // 1. InsightFace recognizer (w600k_r50.onnx, 174MB — the biggest load).
+    // 1. InsightFace recognizer (w600k_r50.onnx, 44MB INT8 — the biggest load).
     {
         auto recognizer = std::make_unique<OnnxRecognizer>();
         std::wstring path = m_modelsDir + L"\\w600k_r50.onnx";
@@ -907,7 +907,7 @@ bool FaceService::ProcessAuthRequest() {
                     // to the consensus winner with a full 512-D embedding; the
                     // middle frames use a cheap bbox-overlap continuity check.
                     // A full embedding on every frame costs ~1-2s on low-end
-                    // hardware (w600k_r50 is 174MB) and blew the old 5s window
+                    // hardware (w600k_r50 is 44MB INT8) and blew the old 5s window
                     // there (5 × 2.1s vs 5s, observed as "3/3 passed (need 5)"
                     // failures on a slow laptop). Start/end anchors plus the
                     // post-PAD final verify still close the swap window: a
