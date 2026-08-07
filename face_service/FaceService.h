@@ -4,6 +4,9 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "liveness_types.h"
 #include "onnx_models.h"
@@ -49,8 +52,21 @@ public:
 private:
     void Run();          // Main service loop
     void Stop();
-    bool Initialize();   // Load models, DB, camera
+    bool Initialize();   // Load DB, config, lightweight SCRFD; queue heavy models
     bool ProcessAuthRequest();  // Handle one auth session
+
+    // Lazy model loading (cold-boot acceleration). The heavy ONNX sessions
+    // (w600k_r50 recognizer 174MB + dual MiniFAS) take seconds to construct;
+    // loading them synchronously in Initialize() delayed the pipe listener by
+    // that much, so the credential provider (which connects the moment the
+    // lock screen shows) had to wait. SCRFD (15.5MB) loads synchronously
+    // because the pipe must be up ASAP and SCRFD is needed for the first frame
+    // of auth. The heavy models load in a background thread; if a request
+    // arrives before they finish, EnsureModelsLoaded() blocks until ready.
+    void StartBackgroundModelLoad();   // spawn the async loader thread
+    bool EnsureModelsLoaded();         // block until heavy models are ready
+    bool LoadHeavyModels(bool lowLightEnhance);  // recognizer + anti-spoof
+    void AbortModelLoadWait();         // release anyone blocked in EnsureModelsLoaded
 
     // Configuration
     std::wstring GetModelsDir();
@@ -88,6 +104,22 @@ private:
     std::wstring m_modelsDir;
     float m_matchThreshold = 0.30f;
     int m_authTimeoutSeconds = 15;
+
+    // --- Lazy model loading (cold-boot acceleration) ---
+    // The w600k_r50 recognizer (174MB) + dual MiniFAS sessions take seconds to
+    // construct. Loading them synchronously in Initialize() delayed the pipe
+    // listener by that much, so the credential provider (which connects the
+    // moment the lock screen shows) had to wait. Now the service starts with
+    // only SCRFD loaded and immediately begins listening; the heavy models
+    // load in a background thread. If a request arrives before they finish,
+    // EnsureModelsLoaded() blocks until ready.
+    std::atomic<bool> m_modelsReady{false};      // heavy models loaded OK
+    std::atomic<bool> m_modelsFailed{false};     // heavy models failed to load
+    std::atomic<bool> m_modelsLoading{false};    // loader in flight (or done)
+    std::atomic<bool> m_modelsAbort{false};      // service stopping — release waiters
+    std::thread m_modelLoadThread;
+    std::mutex m_modelMutex;                     // guards the model pointers
+    std::condition_variable m_modelCv;           // signaled when ready/failed/abort
 };
 
 } // namespace facelogin

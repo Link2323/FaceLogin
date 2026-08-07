@@ -251,6 +251,14 @@ bool FaceService::Initialize() {
     // Load SCRFD ONNX detector (gnkps variant — group-norm keypoints, the
     // rotation-fix family; provides the 5 alignment keypoints directly).
     // 10g tier: ~3.4x faster than 34g at -1% WIDER Face (96.17→95.19).
+    //
+    // Loaded SYNCHRONOUSLY because the pipe listener must be up as soon as
+    // possible: SCRFD is needed for the very first frame of auth, and at
+    // 15.5MB it loads in well under a second even on a cold disk. Everything
+    // heavier (w600k_r50 174MB + dual MiniFAS) is deferred to a background
+    // thread — see StartBackgroundModelLoad(). The lock screen therefore
+    // connects to the pipe the moment it appears instead of waiting out the
+    // model loads.
     m_onnxDetector = std::make_unique<OnnxDetector>();
     std::wstring onnxDetPath = m_modelsDir + L"\\det_10g_gnkps.onnx";
     if (m_onnxDetector->Initialize(onnxDetPath)) {
@@ -260,33 +268,11 @@ bool FaceService::Initialize() {
         return false;
     }
 
-    // Try loading InsightFace ONNX model (the only recognizer).
-    m_onnxRecognizer = std::make_unique<OnnxRecognizer>();
-    std::wstring onnxRecPath = m_modelsDir + L"\\w600k_r50.onnx";
-    if (m_onnxRecognizer->Initialize(onnxRecPath)) {
-        FACELOGIN_INFO(L"ONNX recognizer loaded — using InsightFace w600k_r50");
-    } else {
-        FACELOGIN_ERROR(L"ONNX recognizer failed to load — recognition unavailable");
-        return false;
-    }
-    m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
-
-    // Anti-spoof is a mandatory authentication component.  Never start the
-    // service without it: falling back to identity-only matching lets a photo
-    // release the stored Windows credential.
-    m_antiSpoof = std::make_unique<OnnxAntiSpoof>();
-    std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
-    std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
-    if (m_antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
-        FACELOGIN_INFO(L"Anti-spoof models loaded (MiniFASNetV2 + MiniFASNetV1SE)");
-    } else {
-        // Keep the pipe online so LogonUI receives a precise AUTH_ERROR instead
-        // of treating a missing service as a transient connectivity problem.
-        // ProcessAuthRequest remains fail-closed until CONFIG_RELOAD restores
-        // a valid model.
-        FACELOGIN_ERROR(L"Anti-spoof model unavailable — authentication will remain disabled");
-        m_antiSpoof.reset();
-    }
+    // Heavy models (w600k_r50 recognizer + dual MiniFAS anti-spoof) load in a
+    // background thread so Initialize() can return and the pipe starts
+    // listening immediately. ProcessAuthRequest() will wait for them via
+    // EnsureModelsLoaded(). See StartBackgroundModelLoad().
+    StartBackgroundModelLoad();
     if (m_isServiceMode) {
         // Camera is initialized lazily per auth request to avoid
         // device contention with the console app. See Run().
@@ -314,12 +300,129 @@ bool FaceService::Initialize() {
         return false;
     }
 
-    FACELOGIN_INFO(L"Liveness method: antispoof (mandatory, fail-closed; ready=%s)",
-                   (m_antiSpoof && m_antiSpoof->IsInitialized()) ? L"yes" : L"no");
+    // NOTE: the "Liveness method: antispoof (ready=...)" log is emitted by
+    // LoadHeavyModels() once the heavy models finish loading in the background
+    // — at this point m_antiSpoof is still being constructed.
+    FACELOGIN_INFO(L"Liveness method: antispoof (mandatory, fail-closed; heavy models loading in background)");
     FACELOGIN_INFO(L"Match threshold: %.3f", m_matchThreshold);
-    FACELOGIN_INFO(L"Initialization complete");
+    FACELOGIN_INFO(L"Initialization complete (pipe listening; heavy models loading)");
 
     return true;
+}
+
+// ============================================================================
+// Lazy model loading (cold-boot acceleration)
+//
+// The pipe listener must be up as soon as possible so the credential provider
+// connects the moment the lock screen appears. Loading w600k_r50 (174MB) +
+// dual MiniFAS synchronously in Initialize() pushed that by seconds on a cold
+// boot. Instead SCRFD (15.5MB) loads synchronously and the heavy models load
+// here, in a background thread kicked off right before Run() enters the pipe
+// loop. The lock screen shows several seconds after SCM starts the service,
+// which is normally enough for the loads to finish — the user never waits.
+// If a request arrives before they finish, ProcessAuthRequest() calls
+// EnsureModelsLoaded(), which blocks until ready (or fails/stop).
+// ============================================================================
+
+bool FaceService::LoadHeavyModels(bool lowLightEnhance) {
+    FACELOGIN_INFO(L"Loading heavy models in background...");
+
+    // 1. InsightFace recognizer (w600k_r50.onnx, 174MB — the biggest load).
+    {
+        auto recognizer = std::make_unique<OnnxRecognizer>();
+        std::wstring path = m_modelsDir + L"\\w600k_r50.onnx";
+        if (!recognizer->Initialize(path)) {
+            FACELOGIN_ERROR(L"ONNX recognizer failed to load — recognition unavailable");
+            return false;
+        }
+        recognizer->SetLowLightEnhance(lowLightEnhance);
+        std::lock_guard<std::mutex> lock(m_modelMutex);
+        m_onnxRecognizer = std::move(recognizer);
+    }
+    FACELOGIN_INFO(L"ONNX recognizer loaded — using InsightFace w600k_r50");
+
+    // 2. Anti-spoof (mandatory, fail-closed). Never fall back to identity-only
+    // matching: a photo could otherwise release the stored credential.
+    {
+        auto antiSpoof = std::make_unique<OnnxAntiSpoof>();
+        std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
+        std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
+        if (!antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+            // Keep the pipe online so LogonUI receives a precise AUTH_ERROR
+            // instead of treating a missing service as a transient problem.
+            // ProcessAuthRequest remains fail-closed until CONFIG_RELOAD
+            // restores a valid model.
+            FACELOGIN_ERROR(L"Anti-spoof model unavailable — authentication will remain disabled");
+            std::lock_guard<std::mutex> lock(m_modelMutex);
+            m_antiSpoof.reset();
+        } else {
+            // Note: PAD stays on its calibrated raw-camera preprocessing path
+            // (no low-light enhance) — only the recognizer uses that toggle.
+            std::lock_guard<std::mutex> lock(m_modelMutex);
+            m_antiSpoof = std::move(antiSpoof);
+            FACELOGIN_INFO(L"Anti-spoof models loaded (MiniFASNetV2 + MiniFASNetV1SE)");
+        }
+    }
+
+    FACELOGIN_INFO(L"Liveness method: antispoof (mandatory, fail-closed; ready=%s)",
+                   (m_antiSpoof && m_antiSpoof->IsInitialized()) ? L"yes" : L"no");
+    FACELOGIN_INFO(L"Heavy models loaded");
+    return true;
+}
+
+void FaceService::StartBackgroundModelLoad() {
+    // Capture the config value the loader needs NOW. The main thread can
+    // rewrite m_config via CONFIG_RELOAD while the loader is running; reading
+    // the struct here avoids a data race, and the loader's low-light toggle
+    // is overridden by CONFIG_RELOAD afterward anyway.
+    const bool lowLightEnhance = m_config.low_light_enhance;
+
+    m_modelsLoading.store(true);
+    m_modelLoadThread = std::thread([this, lowLightEnhance]() {
+        // Scoped RAII so the flags are cleared and waiters released on every
+        // exit path (including exceptions).
+        struct LoadGuard {
+            FaceService* svc;
+            bool ok;
+            ~LoadGuard() {
+                svc->m_modelsLoading.store(false);
+                svc->m_modelsReady.store(ok);
+                svc->m_modelsFailed.store(!ok);
+                svc->m_modelCv.notify_all();
+            }
+        };
+        bool ok = false;
+        try {
+            ok = LoadHeavyModels(lowLightEnhance);
+        } catch (const std::exception& e) {
+            FACELOGIN_ERROR(L"Model loader threw: %hs", e.what());
+        }
+        LoadGuard guard{ this, ok };
+    });
+}
+
+// Called from the main auth path before the first inference. Blocks until the
+// heavy models are ready, fail, or the service is stopping. Returns false only
+// if a REQUIRED model failed to load (auth cannot proceed) or service is stop.
+bool FaceService::EnsureModelsLoaded() {
+    if (m_modelsReady.load()) return true;
+    if (m_modelsFailed.load() && !m_modelsLoading.load()) return false;
+
+    std::unique_lock<std::mutex> lock(m_modelMutex);
+    m_modelCv.wait(lock, [this]() {
+        return m_modelsReady.load() || m_modelsFailed.load() || m_modelsAbort.load();
+    });
+    return m_modelsReady.load() && !m_modelsAbort.load();
+}
+
+// Release anyone blocked in EnsureModelsLoaded() during service shutdown so
+// Stop() can join the loader thread without deadlocking.
+void FaceService::AbortModelLoadWait() {
+    m_modelsAbort.store(true);
+    m_modelCv.notify_all();
+    if (m_modelLoadThread.joinable()) {
+        m_modelLoadThread.join();
+    }
 }
 
 void FaceService::Run() {
@@ -346,6 +449,11 @@ void FaceService::Run() {
             FACELOGIN_INFO(L"Database reloaded");
         }
         else if (request == ipc::MSG_CONFIG_RELOAD) {
+            // Wait for the background model loader to finish so the pointer
+            // reads/writes below don't race it. If loading failed, auth is
+            // fail-closed anyway and CONFIG_RELOAD may restore the model.
+            EnsureModelsLoaded();
+
             m_config = LoadConfig(m_dataDir);
             m_matchThreshold = m_config.match_threshold;
             m_livenessMethod = m_config.liveness_method;
@@ -363,22 +471,33 @@ void FaceService::Run() {
             }
 
             // Retry loading both anti-spoof models if either was unavailable.
-            if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
-                m_antiSpoof = std::make_unique<OnnxAntiSpoof>();
-                std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
-                std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
-                if (m_antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
-                    FACELOGIN_INFO(L"CONFIG_RELOAD: dual MiniFAS PAD loaded successfully");
-                } else {
-                    FACELOGIN_ERROR(L"CONFIG_RELOAD: anti-spoof unavailable — authentication remains fail-closed");
-                    m_antiSpoof.reset();
+            // All model-pointer mutations take m_modelMutex to stay consistent
+            // with the background loader and any CONFIG_RELOAD-triggered reload.
+            bool antiSpoofReady;
+            {
+                std::lock_guard<std::mutex> lock(m_modelMutex);
+                if (m_livenessMethod == LivenessMethod::AntiSpoof && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
+                    auto antiSpoof = std::make_unique<OnnxAntiSpoof>();
+                    std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
+                    std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
+                    if (antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+                        m_antiSpoof = std::move(antiSpoof);
+                        FACELOGIN_INFO(L"CONFIG_RELOAD: dual MiniFAS PAD loaded successfully");
+                    } else {
+                        m_antiSpoof.reset();
+                        FACELOGIN_ERROR(L"CONFIG_RELOAD: anti-spoof unavailable — authentication remains fail-closed");
+                    }
                 }
+                // Low-light enhancement is recognition-only. PAD stays on its
+                // calibrated raw-camera preprocessing path.
+                if (m_onnxRecognizer) {
+                    m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
+                }
+                antiSpoofReady = m_antiSpoof && m_antiSpoof->IsInitialized();
             }
-            // Low-light enhancement is recognition-only. PAD stays on its
-            // calibrated raw-camera preprocessing path.
-            m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
-            const bool antiSpoofReady =
-                m_antiSpoof && m_antiSpoof->IsInitialized();
+            m_pipeServer->WriteMessage(antiSpoofReady
+                ? ipc::MSG_CONFIG_RELOAD_OK
+                : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->WriteMessage(antiSpoofReady
                 ? ipc::MSG_CONFIG_RELOAD_OK
                 : ipc::MSG_CONFIG_RELOAD_ERROR);
@@ -475,6 +594,11 @@ void FaceService::Run() {
 
 void FaceService::Stop() {
     m_running = false;
+    // If the heavy models are still loading in the background (fast stop right
+    // after start), release anyone blocked in EnsureModelsLoaded() and join the
+    // loader thread before tearing down the rest — otherwise the loader could
+    // write to m_onnxRecognizer/m_antiSpoof after they're destroyed.
+    AbortModelLoadWait();
     if (m_isServiceMode && m_webcamDS) {
         m_webcamDS->Shutdown();
         m_webcamDS.reset();
@@ -489,6 +613,24 @@ void FaceService::Stop() {
 
 bool FaceService::ProcessAuthRequest() {
     FACELOGIN_INFO(L"Starting face authentication...");
+
+    // Heavy models (w600k_r50 + dual MiniFAS) load in the background during
+    // startup. Normally ready by the time the user triggers auth; if the lock
+    // screen appeared unusually fast (cold boot), block here until they finish
+    // rather than failing. The auth timeout is running from when the CP
+    // connected, so this only ever costs the tail of the boot time.
+    if (m_modelsLoading.load() && !m_modelsReady.load()) {
+        m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) +
+                                   L"\u6b63\u5728\u52a0\u8f7d\u6a21\u578b...");
+    }
+    if (!EnsureModelsLoaded()) {
+        FACELOGIN_ERROR(L"Required models not loaded — cannot authenticate");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"\u670d\u52a1\u6a21\u578b\u52a0\u8f7d\u5931\u8d25"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        m_pipeServer->Disconnect();
+        return false;
+    }
 
     // Authentication must never degrade to identity-only matching.  This
     // check also covers a model that was removed/corrupted after startup and a
