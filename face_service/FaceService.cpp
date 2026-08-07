@@ -4,6 +4,7 @@
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
 #include "../common/image_utils.h"
+#include "../common/sha256_util.h"
 #include <shlobj.h>
 #include <chrono>
 #include <thread>
@@ -18,6 +19,23 @@ namespace facelogin {
 FaceService* FaceService::s_pInstance = nullptr;
 
 static constexpr wchar_t SERVICE_NAME[] = L"FaceLoginService";
+
+// Expected SHA-256 (lowercase hex) of each bundled v1.5 model file. The
+// installer validates against the same values (see installer/FaceLoginSetup/
+// internal/extract.go::requiredModels) at install time; the service re-verifies
+// on every load so a model swapped on disk after install is rejected fail-closed
+// (a tampered PAD model could otherwise always return real≥0.99 and defeat the
+// bug3 photo-attack defense). These are the single source of truth for the C++
+// runtime check; the Go manifest and tools/pad_calibration predate this and are
+// not changed here.
+static constexpr char kDetSha256[] =
+    "c940f97765fdc4b872b4a1ea041248d3e3d550202b7639f9488be558a6c0acb0";
+static constexpr char kRecognizerSha256[] =
+    "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43";
+static constexpr char kMiniFasV2Sha256[] =
+    "b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907";
+static constexpr char kMiniFasV1SeSha256[] =
+    "ebab7f90c7833fbccd46d3a555410e78d969db5438e169b6524be444862b3676";
 
 // UTF-8 → wide string, for passing config.camera_device to the camera backends.
 static std::wstring Utf8ToWstr(const std::string& s) {
@@ -261,6 +279,12 @@ bool FaceService::Initialize() {
     // model loads.
     m_onnxDetector = std::make_unique<OnnxDetector>();
     std::wstring onnxDetPath = m_modelsDir + L"\\det_10g_gnkps.onnx";
+    if (!VerifyModelIntegrity(onnxDetPath, kDetSha256, L"SCRFD detector")) {
+        FACELOGIN_ERROR(L"SCRFD detector integrity check failed — refusing to load "
+                        L"(face detection unavailable). Reinstall FaceLogin or restore "
+                        L"the original det_10g_gnkps.onnx.");
+        return false;
+    }
     if (m_onnxDetector->Initialize(onnxDetPath)) {
         FACELOGIN_INFO(L"SCRFD detector loaded");
     } else {
@@ -331,6 +355,10 @@ bool FaceService::LoadHeavyModels(bool lowLightEnhance) {
     {
         auto recognizer = std::make_unique<OnnxRecognizer>();
         std::wstring path = m_modelsDir + L"\\w600k_r50.onnx";
+        if (!VerifyModelIntegrity(path, kRecognizerSha256, L"InsightFace w600k_r50 recognizer")) {
+            FACELOGIN_ERROR(L"ONNX recognizer integrity check failed — recognition unavailable");
+            return false;
+        }
         if (!recognizer->Initialize(path)) {
             FACELOGIN_ERROR(L"ONNX recognizer failed to load — recognition unavailable");
             return false;
@@ -347,7 +375,17 @@ bool FaceService::LoadHeavyModels(bool lowLightEnhance) {
         auto antiSpoof = std::make_unique<OnnxAntiSpoof>();
         std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
         std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
-        if (!antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+        if (!VerifyModelIntegrity(miniFasV2Path, kMiniFasV2Sha256, L"MiniFASNetV2 (PAD)") ||
+            !VerifyModelIntegrity(miniFasV1SePath, kMiniFasV1SeSha256, L"MiniFASNetV1SE (PAD)")) {
+            // A tampered PAD model is the most dangerous integrity failure — it
+            // could always return real≥0.99 and defeat the bug3 photo-attack
+            // defense. Stay fail-closed: do not call Initialize, leave
+            // m_antiSpoof null, and let ProcessAuthRequest reject everything.
+            FACELOGIN_ERROR(L"Anti-spoof model integrity check failed — authentication "
+                            L"will remain disabled (fail-closed)");
+            std::lock_guard<std::mutex> lock(m_modelMutex);
+            m_antiSpoof.reset();
+        } else if (!antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
             // Keep the pipe online so LogonUI receives a precise AUTH_ERROR
             // instead of treating a missing service as a transient problem.
             // ProcessAuthRequest remains fail-closed until CONFIG_RELOAD
@@ -443,10 +481,22 @@ void FaceService::Run() {
         FACELOGIN_INFO(L"Received request: %s", request.c_str());
 
         if (request == ipc::MSG_RELOAD_DB) {
-            m_store->LoadDatabase();
-            m_pipeServer->WriteMessage(ipc::MSG_RELOAD_OK);
-            m_pipeServer->Disconnect();
-            FACELOGIN_INFO(L"Database reloaded");
+            // Honor LoadDatabase()'s return value: a corrupt users.dat (bad
+            // magic, length fields out of range, truncated read) returns false
+            // and clears the in-memory user list. Reporting success here would
+            // leave the service with an empty database while logging "reloaded",
+            // causing every subsequent auth to fail as "no registered users"
+            // until the service is restarted. Surface the failure instead.
+            if (m_store->LoadDatabase()) {
+                m_pipeServer->WriteMessage(ipc::MSG_RELOAD_OK);
+                m_pipeServer->Disconnect();
+                FACELOGIN_INFO(L"Database reloaded");
+            } else {
+                m_pipeServer->WriteMessage(ipc::MSG_CONFIG_RELOAD_ERROR);
+                m_pipeServer->Disconnect();
+                FACELOGIN_ERROR(L"Database reload failed — users.dat parse error; "
+                                L"in-memory database may be empty until next successful reload");
+            }
         }
         else if (request == ipc::MSG_CONFIG_RELOAD) {
             // Wait for the background model loader to finish so the pointer
@@ -480,7 +530,14 @@ void FaceService::Run() {
                     auto antiSpoof = std::make_unique<OnnxAntiSpoof>();
                     std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
                     std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
-                    if (antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+                    // Re-verify integrity on CONFIG_RELOAD recovery too — a model
+                    // swapped between service start and a reload attempt must not
+                    // sneak in just because the original load failed.
+                    if (!VerifyModelIntegrity(miniFasV2Path, kMiniFasV2Sha256, L"CONFIG_RELOAD MiniFASNetV2 (PAD)") ||
+                        !VerifyModelIntegrity(miniFasV1SePath, kMiniFasV1SeSha256, L"CONFIG_RELOAD MiniFASNetV1SE (PAD)")) {
+                        m_antiSpoof.reset();
+                        FACELOGIN_ERROR(L"CONFIG_RELOAD: anti-spoof integrity check failed — authentication remains fail-closed");
+                    } else if (antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
                         m_antiSpoof = std::move(antiSpoof);
                         FACELOGIN_INFO(L"CONFIG_RELOAD: dual MiniFAS PAD loaded successfully");
                     } else {
@@ -495,9 +552,6 @@ void FaceService::Run() {
                 }
                 antiSpoofReady = m_antiSpoof && m_antiSpoof->IsInitialized();
             }
-            m_pipeServer->WriteMessage(antiSpoofReady
-                ? ipc::MSG_CONFIG_RELOAD_OK
-                : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->WriteMessage(antiSpoofReady
                 ? ipc::MSG_CONFIG_RELOAD_OK
                 : ipc::MSG_CONFIG_RELOAD_ERROR);

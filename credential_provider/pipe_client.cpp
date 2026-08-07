@@ -207,8 +207,17 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             len--;
         }
         std::wstring msg(self->m_readBuffer, len);
-        FACELOGIN_INFO(L"Background read received: %s (len=%zu)",
-                       msg.substr(0, 80).c_str(), len);
+        // SECURITY: AUTH_SUCCESS carries the plaintext password in its payload
+        // (AUTH_SUCCESS:SID:UPN:DOMAIN\USER:PASSWORD). Never log its content —
+        // even a truncated prefix leaks password characters into a Users-readable
+        // log file. Log only the status name + total length for diagnostics.
+        if (msg.starts_with(ipc::MSG_AUTH_SUCCESS_PREFIX)) {
+            FACELOGIN_INFO(L"Background read received: AUTH_SUCCESS (len=%zu, payload redacted)",
+                           len);
+        } else {
+            FACELOGIN_INFO(L"Background read received: %s (len=%zu)",
+                           msg.substr(0, 80).c_str(), len);
+        }
 
         // STATUS: prefix → dispatch immediately, keep reading
         if (msg.starts_with(ipc::MSG_STATUS_PREFIX)) {

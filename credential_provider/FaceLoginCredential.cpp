@@ -167,6 +167,13 @@ FaceLoginCredential::~FaceLoginCredential() {
     // SENSITIVE: Zero the password from memory
     SecureZeroMemory(m_password.data(), m_password.size() * sizeof(wchar_t));
 
+    // Stop the background input-detection thread before tearing down any state
+    // it touches. COM release order does not guarantee UnAdvise (which also
+    // calls StopInputDetectionThread) runs before the destructor — if the
+    // thread is still running when `this` is freed, its next access to pCred
+    // is a use-after-free. Idempotent and safe to call when not running.
+    StopInputDetectionThread();
+
     if (m_hCredsReady) {
         CloseHandle(m_hCredsReady);
         m_hCredsReady = nullptr;
@@ -582,7 +589,9 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
                 m_username = result.username;
                 m_password = result.password;
                 m_state = State::Ready;
-                SetEvent(m_hCredsReady);
+                if (m_hCredsReady) {
+                    SetEvent(m_hCredsReady);
+                }
             }
             else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
                 FACELOGIN_INFO(L"Auth timeout");
@@ -913,7 +922,9 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             m_username = result.username;
             m_password = result.password;
             m_state = State::Ready;
-            SetEvent(m_hCredsReady);
+            if (m_hCredsReady) {
+                SetEvent(m_hCredsReady);
+            }
             // Ask LogonUI to call GetSerialization again right away
             TriggerReEnumeration();
             return;
