@@ -12,7 +12,7 @@ struct AppConfig {
     std::string    recognition_model      = "onnx";      // retained for compat
     std::string    detector               = "scrfd";     // retained for compat
     LivenessMethod liveness_method        = LivenessMethod::AntiSpoof;
-    float          match_threshold        = 0.30f;
+    float          match_threshold        = 0.80f;       // 512-D calibrated; EmbeddingThresholdForDim clamps to [0.70, 1.00]
     float          anti_spoof_threshold   = 0.281f;      // calibrated 50/50 MiniFAS fusion threshold
     // Low-light enhancement. false (default) = no preprocessing. true = apply
     // brightness normalization to dark face chips before recognition. PAD

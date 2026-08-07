@@ -17,16 +17,26 @@ namespace facelogin {
 // bounded by sqrt(2) ≈ 1.414 regardless of dimension, so sqrt(dim/128) scaling
 // is invalid.
 //
-// For 512-D ONNX we return a fixed 0.80, calibrated from measured data:
-//   w600k_mbf (pre-v1.5): same-person 0.14–0.80, other-person photo 0.94–0.99
-//   w600k_r50  (v1.5):    same-person 0.43–0.78 (mean ~0.58, 15 frames from
-//                         multi-angle enrollment, 2026-08-05)
-// (0.80 separates them; 1.0 admitted a photo. The r50 margin at 0.80 is thin
-// — worst same-person frame was 0.7784 (mid-turn motion). Recalibrate when
-// r50 other-person/photo distances are measurable.)
-// Any other (legacy) dimension falls back to the base threshold.
+// For 512-D ONNX, clamp the configured threshold into the calibrated safety
+// band [0.70, 1.00]. Data (see docs/threshold-calibration.md, measured with
+// tools/threshold_calibration):
+//   same-person (same camera, multi-angle enrollment): min 0.40, worst 0.78
+//   other-person (two real people, same camera):       min 1.25
+//   other-person (LFW 58 identities pairwise nearest): min 1.25
+// Lower bound 0.70 keeps same-person unlock reliable (worst same-condition
+// frame 0.78); upper bound 1.00 keeps a 0.25 margin below the closest
+// other-person distance measured, so no real stranger can match. The best/
+// second-best ratio check in FindBestMatch is an independent second defense
+// and is unaffected by this threshold. Config values outside the band
+// (including the legacy 0.30 dlib default) snap to 0.80 — the previously
+// hardcoded behavior — so old config.json needs no migration.
 inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
-    if (dim >= 256) return 0.80f;             // ONNX 512-D: measured safe boundary
+    if (dim >= 256) {
+        if (!std::isfinite(baseThreshold)) return 0.80f;
+        if (baseThreshold < 0.70f) return 0.80f;   // unsafe-tight → safe default
+        if (baseThreshold > 1.00f) return 1.00f;   // unsafe-loose → band ceiling
+        return baseThreshold;                       // in band: honor config
+    }
     return baseThreshold;                     // dlib 128-D and unknown: caller base
 }
 

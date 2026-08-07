@@ -604,10 +604,10 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
         return std::nullopt;
     }
 
-    // The base threshold is dlib-calibrated. For 512-D ONNX embeddings,
-    // EmbeddingThresholdForDim returns 0.80, measured to separate same-person
-    // (0.14–0.80) from other-person photos (0.94–0.99). For 128-D dlib it
-    // returns the base unchanged.
+    // The base threshold comes from config (default 0.80). For 512-D ONNX,
+    // EmbeddingThresholdForDim honors it inside the calibrated band [0.70,
+    // 1.00] and clamps outside values to that band — see credential_store.h.
+    // For 128-D dlib it returns the base unchanged.
     // (DEBUG level: this runs on every frame and would spam the log.)
     float effThreshold = EmbeddingThresholdForDim(threshold, probeDim);
     if (effThreshold != threshold) {

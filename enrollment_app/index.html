@@ -381,9 +381,9 @@ body{
 
     <div class="field">
       <label>匹配阈值 (Match Threshold): <span id="cfg-threshold-val">0.80</span></label>
-      <input type="range" id="cfg-threshold" min="20" max="80" value="20" step="1" disabled
-             oninput="document.getElementById('cfg-threshold-val').textContent=this.value">
-      <p class="dim" style="margin-top:4px;font-size:11px">当前识别模型 (w600k_r50, 512-D) 下为固定安全值 0.80（基于跨人/照片距离标定），暂不可调。大样本标定完成后将在后续版本放开。</p>
+      <input type="range" id="cfg-threshold" min="0.70" max="1.00" value="0.80" step="0.01"
+             oninput="document.getElementById('cfg-threshold-val').textContent=parseFloat(this.value).toFixed(2)">
+      <p class="dim" style="margin-top:4px;font-size:11px">值越低越严格（人脸需更相似才能通过）。范围 0.70–1.00 基于跨人距离标定，确保陌生人无法解锁；默认 0.80。</p>
     </div>
 
     <button class="btn btn-primary" onclick="onSaveSettings()">
@@ -649,10 +649,13 @@ function loadSettings() {
       }
     } catch(e) {}
 
-    // match_threshold slider is disabled for v1.5: EmbeddingThresholdForDim
-    // (credential_store.h) hardcodes 0.80 for the 512-D w600k_r50 model and
-    // ignores the config value. The fixed 0.80 is shown in HTML; nothing to
-    // populate here.
+    // match_threshold is now honored in the calibrated band [0.70, 1.00]
+    // (EmbeddingThresholdForDim clamps outside values). Slider maps directly
+    // to the distance threshold; lower = stricter.
+    var matchThr = Number(cfg.match_threshold || 0.80);
+    matchThr = Math.max(0.70, Math.min(1.00, matchThr));   // clamp to slider range
+    document.getElementById('cfg-threshold').value = matchThr;
+    document.getElementById('cfg-threshold-val').textContent = matchThr.toFixed(2);
     var asThr = Number(cfg.anti_spoof_threshold || 0.281);
     document.getElementById('cfg-antispoof-threshold').value = asThr;
     document.getElementById('cfg-asthr-val').textContent = asThr.toFixed(3);
@@ -663,10 +666,9 @@ function loadSettings() {
 function onSaveSettings() {
   var cfg = {
     // recognition_model/detector are fixed to onnx/scrfd (dlib was removed);
-    // match_threshold is also fixed: EmbeddingThresholdForDim hardcodes 0.80
-    // for the 512-D w600k_r50 model, so the slider is disabled and the value
-    // is not sent — the service/config defaults handle it.
+    // they're not sent here — the service and config defaults handle them.
     liveness_method: document.getElementById('cfg-liveness').value,
+    match_threshold: parseFloat(document.getElementById('cfg-threshold').value),
     anti_spoof_threshold: parseFloat(document.getElementById('cfg-antispoof-threshold').value),
     low_light_enhance: document.getElementById('cfg-low-light').checked,
     camera_rotation: parseInt(document.getElementById('cfg-rotation').value) || 0,

@@ -139,7 +139,17 @@ AppConfig ConfigFromJson(const std::string& json) {
     if (!det.empty()) cfg.detector = det;
     auto live = jsonGetString(json, "liveness_method");
     if (!live.empty()) cfg.liveness_method = LivenessMethodFromString(live);
-    cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.30f);
+    cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.80f);
+    // UI permits [0.70, 1.00] for 512-D (calibrated band; see
+    // docs/threshold-calibration.md). Enforce here too because config.json
+    // can be hand-edited. EmbeddingThresholdForDim re-clamps at match time,
+    // but bounding at load keeps the persisted value honest and the log clean.
+    if (!std::isfinite(cfg.match_threshold) ||
+        cfg.match_threshold < 0.70f || cfg.match_threshold > 1.00f) {
+        FACELOGIN_WARN(L"Unsafe match_threshold=%.3f; enforcing calibrated default 0.80",
+                       cfg.match_threshold);
+        cfg.match_threshold = 0.80f;
+    }
     cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.281f);
     // The UI only permits [0.281, 0.50]. Enforce the same range in the
     // security boundary because config.json can also be edited by hand.
@@ -182,7 +192,7 @@ AppConfig LoadConfig(const std::wstring& dataDir) {
         FACELOGIN_INFO(L"No config.json found, using defaults + registry");
         AppConfig cfg = DefaultConfig();
         // Fall back to registry match threshold if set
-        float regThresh = 0.30f;
+        float regThresh = 0.80f;
         HKEY hKey;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, FACELOGIN_REG_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             DWORD val = 0, size = sizeof(val);
