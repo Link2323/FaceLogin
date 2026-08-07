@@ -137,7 +137,7 @@ flowchart TB
 
 **结论：多帧全嵌入策略在低性能/散热受限机器上不可行。** CPU 频率是唯一决定性变量——薄本持续 AVX 负载撞温度墙降频是常态（电源模式无效，需散热维护）。混合架构（P+E 核）建议设置环境变量 `FACELOGIN_ONNX_THREADS=4`（8 线程跨核同步惩罚严重）。换轻量模型 w600k_mbf 已实测否决（同人距离贴阈值）。
 
-**已采用（2026-08）：r50 INT8 量化**——静态 QDQ（per-tensor，opset 11 限制），标定实测同角度 p50 0.665→0.694（余量 0.106，冒充安全持平），C++ 生产 onnxruntime 1.23.2 上 **1.68× 嵌入加速**（低端机嵌入 0.35s→~0.21s、1.6s→~0.95s），安装包减小 ~130 MB。模型文件 `w600k_r50.onnx` 现为量化产物，FP32 源模型与量化流程见 `scripts/download_models.ps1` + `tools/threshold_calibration/quantize_r50.py`。如需 <2s 目标，需重新设计认证管线并先通过 bug3 照片攻击评估，详细数据见本地 `docs/performance-baseline.md` 第 7 节。
+**已采用（2026-08）：r50 INT8 量化**——静态 QDQ（per-tensor，opset 11 限制），标定实测同角度 p50 0.665→0.694（余量 0.106，冒充安全持平），C++ 生产 onnxruntime 1.23.2 上 **1.68× 嵌入加速**，开发机 DS 模式实测端到端 **2.16s→1.46s（−32%）**（低端机嵌入 0.35s→~0.21s、1.6s→~0.95s），安装包减小 ~130 MB。模型文件 `w600k_r50.onnx` 现为量化产物，FP32 源模型与量化流程见 `scripts/download_models.ps1` + `tools/threshold_calibration/quantize_r50.py`。如需 <2s 目标，需重新设计认证管线并先通过 bug3 照片攻击评估，详细数据见本地 `docs/performance-baseline.md` 第 7、8 节。
 | 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重校验 |
 | 编译加固 | ASLR、DEP、CFG、64位高熵地址随机化 |
 
