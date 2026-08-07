@@ -97,6 +97,13 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
 
         FACELOGIN_INFO(L"OnnxRecognizer initialized: %s", modelPath.c_str());
         FACELOGIN_INFO(L"  Input: %hs, Output: %hs", m_inputName.c_str(), m_outputName.c_str());
+        // Diagnostic for slow-machine reports (e.g. i5-13500H embedding ~1.4s):
+        // the thread count is derived from hardware_concurrency, which can be
+        // wrong in Session 0 or masked by power policies, and threads can land
+        // on E-cores. Knowing the actual value distinguishes "few threads"
+        // from "threads present but slow" in one log line.
+        FACELOGIN_INFO(L"  ONNX intra-op threads: %d (hardware_concurrency=%zu)",
+                       OnnxThreadCount(), std::thread::hardware_concurrency());
 
         m_initialized = true;
         return true;
