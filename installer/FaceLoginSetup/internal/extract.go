@@ -31,8 +31,8 @@ var requiredModels = []requiredModel{
 	{
 		embeddedPath: "resources/models/det_10g_gnkps.onnx",
 		fileName:     "det_10g_gnkps.onnx",
-		size:         16272909,
-		sha256:       "c940f97765fdc4b872b4a1ea041248d3e3d550202b7639f9488be558a6c0acb0",
+		size:         4257451,
+		sha256:       "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc",
 	},
 	{
 		embeddedPath: "resources/models/w600k_r50.onnx",

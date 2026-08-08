@@ -228,18 +228,21 @@ std::vector<float> OnnxDetector::Preprocess(const dlib::matrix<dlib::rgb_pixel>&
     int srcH = static_cast<int>(image.nr());
     int srcW = static_cast<int>(image.nc());
 
-    // SCRFD is exported for a fixed 640×640 input. insightface's official
-    // SCRFD detect() does a DIRECT resize (no letterbox, no aspect-preserving
-    // pad) — the 640×640 blob is a full distort of the source frame. Using the
-    // same preprocessing is essential; a letterbox would shift the feature-map
+    // SCRFD model input is dynamic; we feed 512×512 (was 640×640).  Validated
+    // 2026-08 over 60 photos: 60/60 detected (640 missed 1), box IoU 0.96,
+    // detect time -30% (memory-bandwidth-bound on weak CPUs, so INT8 did not
+    // help but smaller input does).  insightface's official SCRFD detect()
+    // does a DIRECT resize (no letterbox, no aspect-preserving pad) — the
+    // square blob is a full distort of the source frame. Using the same
+    // preprocessing is essential; a letterbox would shift the feature-map
     // anchors and produce misaligned boxes.
     //
     // CRITICAL: because the resize DISTORTS non-square frames (e.g. a 1280×720
-    // camera frame is squeezed into 640×640), the x and y scale factors are
+    // camera frame is squeezed into 512×512), the x and y scale factors are
     // DIFFERENT. Using a single uniform scale here misplaces boxes by the
     // aspect-ratio difference — for 1280×720 a uniform factor pushes boxes past
     // the frame edge, so dlib landmark extraction fails and auth times out.
-    const int targetSize = 640;
+    const int targetSize = 512;
     outScaleX = static_cast<float>(srcW) / static_cast<float>(targetSize);
     outScaleY = static_cast<float>(srcH) / static_cast<float>(targetSize);
 
@@ -296,8 +299,8 @@ std::vector<OnnxDetector::Detection> OnnxDetector::Detect(
         float scaleX = 0.0f, scaleY = 0.0f;
         auto input = Preprocess(image, scaleX, scaleY);
 
-        // Fixed 640×640 model input.
-        const int inputSize = 640;
+        // Fixed 512×512 model input (dynamic-dimension graph, see Preprocess).
+        const int inputSize = 512;
         std::array<int64_t, 4> shape = {1, 3, inputSize, inputSize};
         Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
             *m_memoryInfo, input.data(), input.size(), shape.data(), shape.size());
@@ -314,7 +317,7 @@ std::vector<OnnxDetector::Detection> OnnxDetector::Detect(
         //   scores  [N, 1]
         //   bboxes  [N, 4]   (distance-to-center: l,t,r,b in stride units)
         //   kps     [N, 10]  (5 points × 2, also distance-to-center)
-        // N = (640/stride)² × 2 (num_anchors=2), centers repeated per anchor.
+        // N = (512/stride)² × 2 (num_anchors=2), centers repeated per anchor.
         constexpr int kStrides[3] = {8, 16, 32};
         constexpr float kScoreThreshold = 0.5f;
 

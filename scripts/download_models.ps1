@@ -15,12 +15,26 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$detector = @{
-    Name = 'det_10g_gnkps.onnx'
+# The release detector is a locally-quantized INT8 build (static QDQ,
+# per-tensor) of the normalized FP32 artifact — see
+# tools/threshold_calibration/quantize_scrfd.py for the experiment that
+# validated it (60/60 detection agreement, box IoU 0.99, 1.23x detect
+# speedup, 15.5 -> 4.3 MB).  This script downloads the raw upstream export,
+# normalizes it, then quantizes it in place.
+$detectorRaw = @{
+    Name = 'det_10g_gnkps.onnx.raw-download'
     Url = 'https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/main/scrfd_10g_gnkps_fp32.onnx'
     RawSize = 16273449
+}
+$detectorFp32 = @{
+    Name = 'det_10g_gnkps.fp32.onnx'
     Size = 16272909
     Sha256 = 'C940F97765FDC4B872B4A1EA041248D3E3D550202B7639F9488BE558A6C0ACB0'
+}
+$detectorInt8 = @{
+    Name = 'det_10g_gnkps.onnx'
+    Size = 4257451
+    Sha256 = '07B62718EB454EE1881465C12D0D0546F2E916E3BB549F142DC221729BF7F4DC'
 }
 # The release recognizer is a locally-quantized INT8 build (static QDQ,
 # per-tensor) of the pinned FP32 artifact — see
@@ -82,34 +96,53 @@ Write-Host "Models directory: $ModelsDir"
 
 New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
 
-$detectorPath = Join-Path $ModelsDir $detector.Name
-if (Test-PinnedFile -Path $detectorPath -ExpectedSize $detector.Size -ExpectedSha256 $detector.Sha256) {
-    Write-Host "[SKIP] $($detector.Name) is already normalized and verified." -ForegroundColor Green
+$detectorFp32Path = Join-Path $ModelsDir $detectorFp32.Name
+$detectorPath = Join-Path $ModelsDir $detectorInt8.Name
+if (Test-PinnedFile -Path $detectorPath -ExpectedSize $detectorInt8.Size -ExpectedSha256 $detectorInt8.Sha256) {
+    Write-Host "[SKIP] $($detectorInt8.Name) is already the verified INT8 artifact." -ForegroundColor Green
 }
 else {
-    $rawDetectorPath = "$detectorPath.raw-download"
-    Write-Host "[DOWNLOAD] raw $($detector.Name)" -ForegroundColor Yellow
-    try {
-        Download-File -Url $detector.Url -Destination $rawDetectorPath
-        if ((Get-Item -LiteralPath $rawDetectorPath).Length -ne $detector.RawSize) {
-            throw "Raw detector size is unexpected: $rawDetectorPath"
+    # 1. Fetch + normalize + pin the canonical FP32 detector.
+    if (-not (Test-PinnedFile -Path $detectorFp32Path -ExpectedSize $detectorFp32.Size -ExpectedSha256 $detectorFp32.Sha256)) {
+        $rawDetectorPath = "$detectorFp32Path.raw-download"
+        Write-Host "[DOWNLOAD] raw SCRFD export" -ForegroundColor Yellow
+        try {
+            Download-File -Url $detectorRaw.Url -Destination $rawDetectorPath
+            if ((Get-Item -LiteralPath $rawDetectorPath).Length -ne $detectorRaw.RawSize) {
+                throw "Raw detector size is unexpected: $rawDetectorPath"
+            }
+
+            $normalizer = Join-Path $PSScriptRoot 'normalize_scrfd_export.py'
+            Write-Host '[NORMALIZE] converting SCRFD export to the decoder convention' -ForegroundColor Yellow
+            & $PythonExe $normalizer $rawDetectorPath $detectorFp32Path
+            if ($LASTEXITCODE -ne 0) {
+                throw "SCRFD normalization failed with exit code $LASTEXITCODE."
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $rawDetectorPath -Force -ErrorAction SilentlyContinue
         }
 
-        $normalizer = Join-Path $PSScriptRoot 'normalize_scrfd_export.py'
-        Write-Host '[NORMALIZE] converting SCRFD export to the decoder convention' -ForegroundColor Yellow
-        & $PythonExe $normalizer $rawDetectorPath $detectorPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "SCRFD normalization failed with exit code $LASTEXITCODE."
+        if (-not (Test-PinnedFile -Path $detectorFp32Path -ExpectedSize $detectorFp32.Size -ExpectedSha256 $detectorFp32.Sha256)) {
+            throw "Normalized detector did not match the pinned artifact: $detectorFp32Path"
         }
+        Write-Host "[OK] $($detectorFp32.Name) normalized and verified." -ForegroundColor Green
     }
-    finally {
-        Remove-Item -LiteralPath $rawDetectorPath -Force -ErrorAction SilentlyContinue
+    else {
+        Write-Host "[SKIP] $($detectorFp32.Name) is already verified." -ForegroundColor Green
     }
 
-    if (-not (Test-PinnedFile -Path $detectorPath -ExpectedSize $detector.Size -ExpectedSha256 $detector.Sha256)) {
-        throw "Normalized detector did not match the pinned artifact: $detectorPath"
+    # 2. Quantize in place to the release INT8 artifact.
+    Write-Host "[QUANTIZE] $($detectorFp32.Name) -> $($detectorInt8.Name)" -ForegroundColor Yellow
+    $quantizer = Join-Path $PSScriptRoot '..\tools\threshold_calibration\quantize_scrfd.py'
+    & $PythonExe $quantizer --model $detectorFp32Path --output $detectorPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "SCRFD quantization failed with exit code $LASTEXITCODE. Pass -CalibImages to point at a folder of real face photos (one subdir per person)."
     }
-    Write-Host "[OK] $($detector.Name) normalized and verified." -ForegroundColor Green
+    if (-not (Test-PinnedFile -Path $detectorPath -ExpectedSize $detectorInt8.Size -ExpectedSha256 $detectorInt8.Sha256)) {
+        throw "Quantized detector did not match the pinned artifact: $detectorPath"
+    }
+    Write-Host "[OK] $($detectorInt8.Name) quantized and verified." -ForegroundColor Green
 }
 
 $recognizerFp32Path = Join-Path $ModelsDir $recognizerFp32.Name

@@ -31,7 +31,7 @@ static constexpr wchar_t SERVICE_NAME[] = L"FaceLoginService";
 // runtime check; the Go manifest and tools/pad_calibration predate this and are
 // not changed here.
 static constexpr char kDetSha256[] =
-    "c940f97765fdc4b872b4a1ea041248d3e3d550202b7639f9488be558a6c0acb0";
+    "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc";
 static constexpr char kRecognizerSha256[] =
     "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185";
 static constexpr char kMiniFasV2Sha256[] =
