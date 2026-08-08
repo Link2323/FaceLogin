@@ -895,6 +895,26 @@ bool FaceService::ProcessAuthRequest() {
                     bool havePrevRect = false;
                     FaceRect prevRect; // last counted frame's face box
                     int consensusCount = 0;   // anchor + mid + final = 3 bindings
+                    // Fail-fast timers (wall-clock, machine-independent). The
+                    // inter-frame pacing (30ms retry on no-face / no-grab,
+                    // 60ms between counted PAD frames) makes a frame-count
+                    // cutoff machine-dependent: on a throttled 2GHz laptop a
+                    // frame is ~600-1000ms, so "N frames" lasts several times
+                    // longer there than on the dev Ryzen.  Wall-clock seconds
+                    // give the same perceived wait on every machine and only
+                    // ever shorten the failure path — the success path's frame
+                    // schedule and the 8s/15s windows are untouched.
+                    //   noFaceStart: when the current no-face streak began.
+                    //   noPassStart: when the current all-PAD-fail streak began.
+                    // Both reset to "now" when their condition clears, and both
+                    // start at the window start.
+                    auto noFaceStart = asStart;
+                    auto noPassStart = asStart;
+                    // Fail-fast triggers (set below, consulted after the loop).
+                    // When either fires we break out and skip the normal
+                    // livenessPassed computation so the false verdict sticks.
+                    bool failFastEmpty = false;   // empty scene ≥ 2.5s
+                    bool failFastAttack = false;  // face seen, PAD all-fail ≥ 2s
                     while (m_running && totalChecked < totalChecks) {
                         if (m_pipeServer->IsClientDisconnected()) {
                             FACELOGIN_INFO(L"Client disconnected during anti-spoof — aborting");
@@ -916,6 +936,25 @@ bool FaceService::ProcessAuthRequest() {
                         auto asElapsed = std::chrono::steady_clock::now() - asStart;
                         if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 8) break;
 
+                        // Fail-fast: empty scene. If no face has been detected
+                        // yet this window and 2.5s have elapsed, the scene is
+                        // empty — bail now with "未检测到人脸" instead of
+                        // making the user wait the full 8s window. 2.5s
+                        // tolerates slow camera exposure / weak-light first-
+                        // frame delay (anyFaceSeen flips true the instant a
+                        // face appears, which stops this check for the rest of
+                        // the window). Wall-clock so the wait is the same on a
+                        // 2GHz throttled laptop as on the dev Ryzen.
+                        if (!anyFaceSeen) {
+                            auto noFaceElapsed = std::chrono::steady_clock::now() - noFaceStart;
+                            if (std::chrono::duration<double>(noFaceElapsed).count() >= 2.5) {
+                                FACELOGIN_INFO(L"No face detected within 2.5s — failing fast (empty scene)");
+                                failFastEmpty = true;
+                                // anyFaceSeen stays false -> "未检测到人脸" below
+                                break;
+                            }
+                        }
+
                         FrameImage asFrame;
                         if (!grabFrame(asFrame)) { if (!m_running) break; std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
 
@@ -923,6 +962,26 @@ bool FaceService::ProcessAuthRequest() {
                         auto asDet = m_onnxDetector->DetectLargestFace(asFrame);
                         if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
                         anyFaceSeen = true;
+
+                        // Fail-fast: persistent PAD rejection. A face is
+                        // present but passCount is still 0 (no frame has
+                        // cleared the threshold) and 2s have elapsed since the
+                        // first detection — the subject is almost certainly a
+                        // photo/mask, so fail now instead of running the
+                        // remaining PAD frames. The 2s grace window lets a
+                        // real face that needs a frame or two of exposure
+                        // settle clear the threshold first; once any frame
+                        // passes, noPassStart is reset below and this check
+                        // stays dormant for the rest of the window.
+                        if (passCount == 0) {
+                            auto noPassElapsed = std::chrono::steady_clock::now() - noPassStart;
+                            if (std::chrono::duration<double>(noPassElapsed).count() >= 2.0) {
+                                FACELOGIN_INFO(L"PAD persistently below threshold for 2s — failing fast (likely attack)");
+                                failFastAttack = true;
+                                // anyFaceSeen is true -> "未通过活体检测" below
+                                break;
+                            }
+                        }
 
                         const FaceRect faceRect(
                             static_cast<long>(asDet->x1), static_cast<long>(asDet->y1),
@@ -1048,7 +1107,14 @@ bool FaceService::ProcessAuthRequest() {
                         totalChecked++;
                         prevRect = faceRect;
                         havePrevRect = true;
-                        if (score >= m_antiSpoofThreshold) passCount++; // config-driven threshold
+                        if (score >= m_antiSpoofThreshold) {
+                            passCount++; // config-driven threshold
+                            // A frame cleared the threshold — the persistent-
+                            // rejection streak is broken; reset the fail-fast
+                            // timer so a later run of failures must again
+                            // exceed 2s before early-exiting.
+                            noPassStart = std::chrono::steady_clock::now();
+                        }
                         FACELOGIN_INFO(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
 
                         // Inter-frame pacing for temporal diversity (distinct
@@ -1065,10 +1131,14 @@ bool FaceService::ProcessAuthRequest() {
                     // before totalChecked can reach totalChecks, but the check
                     // makes it impossible for a future edit to silently weaken
                     // consensus below three same-SID bindings.
-                    livenessPassed = (!livenessInferenceError &&
-                                      totalChecked == totalChecks &&
-                                      passCount >= passRequired &&
-                                      consensusCount >= 3);
+                    // Fail-fast breaks leave livenessPassed=false (its init);
+                    // skip the normal computation so the verdict sticks.
+                    if (!failFastEmpty && !failFastAttack) {
+                        livenessPassed = (!livenessInferenceError &&
+                                          totalChecked == totalChecks &&
+                                          passCount >= passRequired &&
+                                          consensusCount >= 3);
+                    }
                     if (!livenessPassed) {
                         FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
                                        passCount, totalChecked, passRequired);
