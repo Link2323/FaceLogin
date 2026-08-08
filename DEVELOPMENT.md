@@ -335,7 +335,7 @@ struct AppConfig {
     std::string    recognition_model      = "onnx";      // 保留兼容（dlib 识别器已移除，仅 onnx 有效）
     std::string    detector               = "scrfd";     // 保留兼容（dlib HOG 检测器已移除，仅 scrfd 有效）
     LivenessMethod liveness_method        = LivenessMethod::AntiSpoof;
-    float          match_threshold        = 0.30f;
+    float          match_threshold        = 0.80f;      // 512-D 欧氏距离阈值（默认 0.80，可配置，EmbeddingThresholdForDim 钳到 [0.70, 1.00]）
     float          anti_spoof_threshold   = 0.281f;      // 校准后的 50/50 双 MiniFAS 融合阈值
     bool           low_light_enhance      = false;       // 暗光增强（仅作用于识别嵌入，不影响 PAD）
     std::string    camera_device          = "";          // 设备符号链接；空 = 首个摄像头
@@ -396,18 +396,17 @@ ServiceMain()
 1. 检查注册用户数 > 0
 2. 活体方法强制为 antispoof（dlib 识别器/HOG 检测器已移除，系统为纯 ONNX）
 3. 延时初始化摄像头 (仅在收到认证请求时打开，避免摄像头占用)
-4. 丢弃前5帧 (自动曝光调整)
+4. 丢弃前3帧 (自动曝光调整)
 5. 重置活体检测器
-6. 循环 (最长时间 m_authTimeoutSeconds = 15秒):
+6. 融合循环 (最长时间 m_authTimeoutSeconds = 15秒全局；PAD 另有 8 秒窗口)，共 5 个计数帧、要求 5/5 通过：
    a. 抓取一帧
-   b. SCRFD gnkps 检测 (bbox + 5 关键点)
-   c. 检测最大人脸
-   d. 5 点相似变换对齐到 112×112（无独立地标模型）
-   e. 活体检测 (双 MiniFAS 50/50 融合，要求 5/5 帧达标)
-   f. 计算512维嵌入向量 (InsightFace w600k_r50)
-   g. 数据库匹配 (欧氏距离 < EmbeddingThresholdForDim(512)=0.80 + 最佳/次佳比 < 0.75)
-   h. 匹配成功 → 发送 STATUS: 识别成功 → 构建 AUTH_SUCCESS → 发送凭据 → 退出
-   i. 匹配失败 → 继续循环
+   b. SCRFD gnkps 检测 (bbox + 5 关键点)；检测最大人脸
+   c. 5 点相似变换对齐到 112×112（无独立地标模型）
+   d. 活体检测 (双 MiniFAS 50/50 融合，60ms 帧间间隔)
+   e. 身份绑定：**仅在第 1/3/5 个计数帧**计算 512 维嵌入向量 (InsightFace w600k_r50) → 数据库匹配。首帧锚定 SID；第 3 帧与末帧必须返回同一 SID，否则 fail-closed（换脸拒绝）。末帧即最终身份门（无独立 post-liveness 验证，已删除）
+   f. 第 2/4 帧用 bbox IoU 连续性校验 (阈值 0.35)；未匹配的绑定帧滑出计数不增 totalChecked
+   g. 匹配成功 (欧氏距离 < 阈值[默认 0.80，可配置，钳到 0.70–1.00] + 最佳/次佳比 < 0.75) → 构建 AUTH_SUCCESS → 发送凭据 → 退出
+   h. 每**次成功认证恰好 3 次 r50 嵌入**（6→4→3 优化轨迹见 `docs/performance-baseline.md` 实验 7）
 7. 超时 → 发送 AUTH_TIMEOUT
 8. 完成后关闭摄像头，释放资源
 ```
@@ -429,8 +428,11 @@ ServiceMain()
 | `recognition_model` | `"onnx"` | 保留兼容 (仅 onnx 支持) |
 | `detector` | `"scrfd"` | 保留兼容 (仅 scrfd 支持) |
 | `liveness_method` | `"antispoof"` | 活体方法: antispoof / none (blink 已随 dlib 68点移除, 配置兼容映射到 antispoof) |
-| `match_threshold` | 0.30 | 欧氏距离阈值 (512-D 经 EmbeddingThresholdForDim 用 0.80) |
+| `match_threshold` | 0.80 | 512-D 欧氏距离阈值（默认 0.80；可配置，`EmbeddingThresholdForDim` 钳到 [0.70, 1.00]，越界回退 0.80） |
 | `anti_spoof_threshold` | 0.281 | 双 MiniFAS 融合阈值 (越高越严格) |
+| `low_light_enhance` | `false` | 暗光增强：对暗光人脸 chip 做亮度归一化后再识别。**仅作用于识别嵌入，不影响 PAD**（PAD 保持标定时的原始预处理） |
+| `camera_device` | `""` | 摄像头设备符号链接；空 = 自动选第一个摄像头，可指定多摄中的某一个 |
+| `camera_rotation` | `0` | 摄像头画面顺时针旋转角度，合法值 0/90/180/270；非法值回退 0 并告警。用于物理安装方向非标的摄像头（如竖装 PC 摄像头） |
 
 ### 5.3 人脸对齐 (`face_align.h`)
 
@@ -468,7 +470,7 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除。当前使用 MiniFASNetV2 与
 
 | 类 | 模型 | 输入 | 输出 | 用途 |
 |---|---|---|---|---|
-| `OnnxDetector` | SCRFD gnkps (`det_10g_gnkps.onnx`) | 640×640 直接拉伸 | 检测框+5点关键点 | 人脸检测 |
+| `OnnxDetector` | SCRFD gnkps (`det_10g_gnkps.onnx`) | 512×512 直接拉伸（动态维度图；原 640→512 已实测 60/60 IoU 0.96 无损） | 检测框+5点关键点 | 人脸检测 |
 | `OnnxRecognizer` | InsightFace buffalo_l (`w600k_r50.onnx`) | 112×112 对齐人脸 | 512维嵌入 | 人脸识别 |
 | `OnnxAntiSpoof` | `MiniFASNetV2.onnx` + `MiniFASNetV1SE.onnx` | bbox 扩展裁剪（2.7× / 4.0×） | 50/50 融合活体分数 [0,1] | 静默反欺诈 |
 
@@ -725,7 +727,7 @@ Win32 GUI 应用程序。
 | 后端 | Go + Wails v2 Runtime |
 | 前端 | Vue 3 + Tailwind CSS + TypeScript |
 | 打包 | Wails 构建 (Go 编译 + WebView2 嵌入) |
-| 资源 | Go embed.FS 嵌入所有部署文件 (~110 MB) |
+| 资源 | Go embed.FS 嵌入所有部署文件 (~122 MB；INT8 量化后，原 FP32 ~252 MB) |
 
 ### 8.2 命令行用法
 
@@ -744,7 +746,7 @@ FaceLoginSetup.exe          交互模式 (GUI)
 | 2 | 创建目标目录 | 12-25% | `os.MkdirAll` |
 | 2.5 | 设置安装目录 ACL（预保护） | 25-30% | `internal.SetDirectoryACL`；在写入可执行文件/模型前锁定，使后续解压文件继承仅 SYSTEM/管理员写权限 |
 | 3 | 写入注册表路径 (InstallPath, DataPath) | 30-35% | DataPath = 安装目录本身，C++ 端追加 `\models` |
-| 4 | 提取所有嵌入文件 (~240MB) | 35-60% | `internal.ExtractAll` |
+| 4 | 提取所有嵌入文件 (~122MB) | 35-60% | `internal.ExtractAll` |
 | 4.1 | 校验已复制模型（大小 + SHA-256） | — | `internal.ValidateInstalledModels`；与步骤 0 相同的固定哈希 |
 | 4.5 | 写入默认 config.json（选择性强制本版调整的默认参数） | 60% | `internal.EnsureConfigDefaults` |
 | 5 | 验证目录权限（递归后置 ACL） | 60-67% | `internal.SetDirectoryACL` 递归再校一次，防止解压文件携带意外显式 ACL |
@@ -817,7 +819,7 @@ C:\ProgramData\FaceLogin\                   # 数据目录
 
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
-| `det_10g_gnkps.onnx` | ~15.5 MB | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档 ~3.4× 快于 34g） | hf-mirror |
+| `det_10g_gnkps.onnx` | ~4.3 MB (INT8) | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档 ~3.4× 快于 34g；INT8 量化，原 FP32 ~15.5 MB） | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
 | `w600k_r50.onnx` | ~44 MB (INT8) | buffalo_l IResNet-50 512维嵌入，静态 QDQ 量化版（标定：同角度 p50 0.694，1.68× 加速） | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
 | `MiniFASNetV2.onnx` | ~1.74 MB | 双模型静默反欺诈（2.7× 裁剪） | Silent-Face-Anti-Spoofing |
 | `MiniFASNetV1SE.onnx` | ~1.74 MB | 双模型静默反欺诈（4.0× 裁剪） | Silent-Face-Anti-Spoofing |

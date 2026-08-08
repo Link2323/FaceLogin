@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="DEVELOPMENT.md"><img src="https://img.shields.io/badge/platform-Windows%2010%2B%20x64-blue" alt="Platform"></a>
   <a href="DEVELOPMENT.md"><img src="https://img.shields.io/badge/language-C%2B%2B20%20%7C%20Go-orange" alt="Language"></a>
-  <a href="https://github.com/EthanZer0/FaceLogin/releases"><img src="https://img.shields.io/badge/version-1.4.0-green" alt="Version"></a>
+  <a href="https://github.com/EthanZer0/FaceLogin/releases"><img src="https://img.shields.io/badge/version-1.6.0%20(dev)-green" alt="Version"></a>
 </p>
 
 ---
@@ -123,6 +123,8 @@ flowchart TB
 | 内存保护 | 密码使用后 `SecureZeroMemory` 即时擦除 |
 | 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 50/50 融合，固定 5/5 帧验证 |
 | 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重校验 |
+| 模型完整性 | 4 个 ONNX 模型启动时 SHA-256 校验，篡改/损坏即 fail-closed（拒绝认证） |
+| 日志脱敏 | AUTH_SUCCESS 凭据载荷不再写入日志 |
 | 编译加固 | ASLR、DEP、CFG、64位高熵地址随机化 |
 
 ---
@@ -131,13 +133,12 @@ flowchart TB
 
 解锁耗时主要取决于 CPU 性能与散热状况。一次认证需执行 3 次人脸嵌入（活体验证期间的 3 次身份绑定，防照片/换脸攻击的安全设计），实测参考：
 
-| 机器类型 | 端到端解锁 |
-|---|---|
-| 高性能桌面 CPU（如 Ryzen 9） | ~1.5s |
-| 主流笔记本（散热正常） | ~1.5-2s |
-| 笔记本散热受限（降频） | ~2s |
+| 机器类型 | 端到端解锁（中位/范围） | 实测机型 |
+|---|---|---|
+| 高性能桌面 CPU（满频） | **~0.84s**（0.79–0.87s，σ 23ms） | Ryzen 9 7945HX（16C/32T） |
+| 笔记本（2GHz 热降频，P-core 绑定生效） | **~1.56s**（1.49–1.63s，σ 46ms） | i7-1360P（6P+8E，mask 0xFF） |
 
-> 保持散热良好可明显提升解锁速度；混合架构 CPU（P+E 核）服务已自动将推理线程绑定到性能核，无需手动配置。
+> 实测于 2026-08-08，两台机器同代码版本（融合认证 + tail anchor，5/5 帧活体，3 次身份绑定）。端到端计时从 `Starting face authentication` 到 `Credentials sent`。CPU 频率是决定性变量——嵌入推理是耗时大头，散热良好可明显提升解锁速度；混合架构 CPU（P+E 核）服务已自动将推理线程绑定到性能核，无需手动配置。
 
 ---
 
