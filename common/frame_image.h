@@ -318,17 +318,23 @@ inline void ExtractChip(const FrameImage& src, const FaceRect& rect,
     const double chipArea = static_cast<double>(rows) * cols;
     long depth = 0;
     double grow = 2.0;
-    double rl = rect.left(), rt = rect.top(), rr = rect.right(), rb = rect.bottom();
+    // dlib keeps TWO coordinate chains: the down-sampled `rect` is used ONLY
+    // to count pyramid depth, while the bounding box is grown from the
+    // ORIGINAL rect (rot_rect). Mixing them shrinks the box by 2^depth and
+    // feeds the chip extraction garbage — PAD scores collapse.
+    const double rectL = rect.left(), rectT = rect.top();
+    const double rectR = rect.right(), rectB = rect.bottom();
+    double rl = rectL, rt = rectT, rr = rectR, rb = rectB;
     while (rectDownArea(rl, rt, rr, rb) > chipArea) {
         pointDown(rl, rt); pointDown(rr, rb);   // rect = rect_down(rect)
         ++depth;
         grow = grow * 2.0 + 2.0;
     }
 
-    // bounding_box = grow_rect(rect, grow) ∩ image rect (integers here, so
-    // the drectangle→rectangle conversion is exact).
-    long bl = static_cast<long>(rl - grow), bt = static_cast<long>(rt - grow);
-    long br = static_cast<long>(rr + grow), bb = static_cast<long>(rb + grow);
+    // bounding_box = grow_rect(ORIGINAL rect, grow) ∩ image rect (integers
+    // here, so the drectangle→rectangle conversion is exact).
+    long bl = static_cast<long>(rectL - grow), bt = static_cast<long>(rectT - grow);
+    long br = static_cast<long>(rectR + grow), bb = static_cast<long>(rectB + grow);
     bl = std::max(bl, 0L); bt = std::max(bt, 0L);
     br = std::min(br, sw - 1);
     bb = std::min(bb, sh - 1);
