@@ -127,16 +127,20 @@ inline void RotateFrame(FrameImage& frame, int rotation) {
     }
 }
 
-// dlib-exact bilinear blend: double precision, truncated uchar result
+// dlib-exact bilinear blend: same operation ORDER as dlib's
+// interpolate_bilinear (top = (1-lr)*tl + lr*tr, bot = (1-lr)*bl + lr*br,
+// out = (1-tb)*top + tb*bot), double precision, truncated uchar result
 // (dlib's vector_to_pixel for rgb_pixel truncates — no rounding).
-// Used by ExtractChip, whose dlib reference path is also scalar double.
+// Used by ExtractChip, whose dlib reference path is scalar double.
 inline RgbPixel BlendBilinear(const RgbPixel& tl, const RgbPixel& tr,
                               const RgbPixel& bl, const RgbPixel& br,
                               double lr, double tb) {
+    const double ilr = 1.0 - lr;
+    const double itb = 1.0 - tb;
     auto b = [&](double c00, double c10, double c01, double c11) {
-        const double top = c00 + (c10 - c00) * lr;
-        const double bot = c01 + (c11 - c01) * lr;
-        return static_cast<uint8_t>(top + (bot - top) * tb);
+        const double top = ilr * c00 + lr * c10;
+        const double bot = ilr * c01 + lr * c11;
+        return static_cast<uint8_t>(itb * top + tb * bot);
     };
     return RgbPixel(b(tl.red,   tr.red,   bl.red,   br.red),
                     b(tl.green, tr.green, bl.green, br.green),
@@ -172,25 +176,35 @@ inline void ResizeBilinear(const FrameImage& src, FrameImage& dst) {
     const long dw = dst.nc(), dh = dst.nr();
     if (dst.is_empty() || src.is_empty()) return;
 
-    const float x_scale = (sw - 1.0f) / static_cast<float>(std::max(dw - 1, 1L));
-    const float y_scale = (sh - 1.0f) / static_cast<float>(std::max(dh - 1, 1L));
-    float y = -y_scale;
+    // dlib computes the scales in DOUBLE; the SIMD bulk path converts to float
+    // (simd4f(x + k*x_scale)), the scalar tail keeps double throughout.
+    const double x_scale = (sw - 1.0) / static_cast<double>(std::max(dw - 1, 1L));
+    const double y_scale = (sh - 1.0) / static_cast<double>(std::max(dh - 1, 1L));
+    double y = -y_scale;
     for (long r = 0; r < dh; ++r) {
         y += y_scale;
         const long top = static_cast<long>(std::floor(y));
         const long bottom = std::min(top + 1, sh - 1);
-        const float tb_frac = y - top;
+        const double tb_d = y - top;                       // tail: double frac
+        // bulk: dlib computes `1 - tb_frac` in DOUBLE (tb_frac is the double
+        // y-top there) and only then converts to simd4f; do the same.
+        const float tb_frac = static_cast<float>(tb_d);    // bulk: float frac
+        const float itb_frac = static_cast<float>(1.0 - tb_d);
 
-        // 4-wide SSE2 bulk. _x holds 4 source x positions (float, like dlib);
-        // left = trunc(x) (x ≥ 0, so trunc == floor), frac = x - left.
+        // 4-wide SSE2 bulk, bit-compatible with dlib's simd4f path: float
+        // coordinates accumulated from float(double) lane seeds.
         const __m128 one = _mm_set1_ps(1.0f);
-        const __m128 _x_scale = _mm_set1_ps(4.0f * x_scale);
+        const __m128 _x_scale = _mm_set1_ps(static_cast<float>(4.0 * x_scale));
         const __m128 _tb = _mm_set1_ps(tb_frac);
-        const __m128 _itb = _mm_set1_ps(1.0f - tb_frac);
+        const __m128 _itb = _mm_set1_ps(itb_frac);
         // dlib starts at x = -4*x_scale and adds 4*x_scale per iteration, so
-        // iteration 1 samples output cols 0-3 at source 0..3*x_scale.
-        __m128 _x = _mm_set_ps(-1.0f * x_scale, -2.0f * x_scale,
-                               -3.0f * x_scale, -4.0f * x_scale);
+        // iteration 1 samples output cols 0-3 at source 0..3*x_scale. Lane k
+        // seeds with float(x + k*x_scale) where x = -4*x_scale is computed in
+        // DOUBLE (so the k*x_scale add rounds before the float conversion).
+        __m128 _x = _mm_set_ps(static_cast<float>(-4.0 * x_scale + 3.0 * x_scale),
+                               static_cast<float>(-4.0 * x_scale + 2.0 * x_scale),
+                               static_cast<float>(-4.0 * x_scale + 1.0 * x_scale),
+                               static_cast<float>(-4.0 * x_scale));
         long c = 0;
         for (;; c += 4) {
             _x = _mm_add_ps(_x, _x_scale);
@@ -203,7 +217,13 @@ inline void ResizeBilinear(const FrameImage& src, FrameImage& dst) {
             _mm_storeu_si128(reinterpret_cast<__m128i*>(fright), righti);
             if (fright[3] >= sw) break;   // all 4 right-neighbors in-bounds
 
-            // Per-channel bilinear blend, 4 lanes, dlib's formula.
+            // Per-channel bilinear blend, 4 lanes, dlib's EXACT formula:
+            //   tlf*tl + trf*tr + blf*bl + brf*br
+            // with tlf = (1-tb)*(1-lr), trf = (1-tb)*lr, blf = tb*(1-lr), brf = tb*lr.
+            const __m128 tlf = _mm_mul_ps(_itb, ilr);
+            const __m128 trf = _mm_mul_ps(_itb, lr);
+            const __m128 blf = _mm_mul_ps(_tb, ilr);
+            const __m128 brf = _mm_mul_ps(_tb, lr);
             auto lane = [&](uint8_t RgbPixel::*ch, RgbPixel* outRow) {
                 __m128 tl = _mm_set_ps(src(top, fleft[3]).*ch, src(top, fleft[2]).*ch,
                                        src(top, fleft[1]).*ch, src(top, fleft[0]).*ch);
@@ -213,9 +233,11 @@ inline void ResizeBilinear(const FrameImage& src, FrameImage& dst) {
                                        src(bottom, fleft[1]).*ch, src(bottom, fleft[0]).*ch);
                 __m128 br = _mm_set_ps(src(bottom, fright[3]).*ch, src(bottom, fright[2]).*ch,
                                        src(bottom, fright[1]).*ch, src(bottom, fright[0]).*ch);
-                __m128 v = _mm_add_ps(_mm_mul_ps(_itb,
-                                       _mm_add_ps(_mm_mul_ps(ilr, tl), _mm_mul_ps(lr, tr))),
-                                       _mm_mul_ps(_tb, _mm_add_ps(_mm_mul_ps(ilr, bl), _mm_mul_ps(lr, br))));
+                // dlib's expression is LEFT-associative: ((tlf*tl + trf*tr) + blf*bl) + brf*br
+                __m128 v = _mm_mul_ps(tlf, tl);
+                v = _mm_add_ps(v, _mm_mul_ps(trf, tr));
+                v = _mm_add_ps(v, _mm_mul_ps(blf, bl));
+                v = _mm_add_ps(v, _mm_mul_ps(brf, br));
                 __m128i outi = _mm_cvttps_epi32(v);           // truncate, like dlib
                 int32_t fout[4];
                 _mm_storeu_si128(reinterpret_cast<__m128i*>(fout), outi);
@@ -227,16 +249,17 @@ inline void ResizeBilinear(const FrameImage& src, FrameImage& dst) {
             lane(&RgbPixel::green, outRow);
             lane(&RgbPixel::blue, outRow);
         }
-        // Scalar tail (dlib re-derives x from c: x = -x_scale + c*x_scale).
-        float xt = -x_scale + static_cast<float>(c) * x_scale;
+        // Scalar tail (dlib re-derives x from c: x = -x_scale + c*x_scale,
+        // double everywhere; blend is dlib's double interpolate_bilinear).
+        double xt = -x_scale + static_cast<double>(c) * x_scale;
         for (; c < dw; ++c) {
             xt += x_scale;
             const long left = static_cast<long>(std::floor(xt));
             const long right = std::min(left + 1, sw - 1);
-            const float lr_frac = xt - left;
-            dst(r, c) = BlendBilinearF(src(top, left), src(top, right),
-                                       src(bottom, left), src(bottom, right),
-                                       lr_frac, tb_frac);
+            const double lr_frac = xt - left;
+            dst(r, c) = BlendBilinear(src(top, left), src(top, right),
+                                      src(bottom, left), src(bottom, right),
+                                      lr_frac, tb_d);
         }
     }
 }
@@ -381,20 +404,29 @@ inline void ExtractChip(const FrameImage& src, const FaceRect& rect,
         return;   // depth was 0 but the loop ran? unreachable — guard.
     }
 
-    // Chip pixel (c, r) → source: corner-anchored affine from the chip's tl/tr
-    // corners onto rect2's tl/tr/br (dlib find_affine_transform for these
-    // non-collinear points). Axis-aligned rect2 keeps it separable.
-    const double stepX = (r2 - l2) / static_cast<double>(cols - 1);
-    const double stepY = (b2 - t2) / static_cast<double>(rows - 1);
+    // Chip pixel (c, r) → source: dlib's find_affine_transform result for the
+    // three corner pairs (chip tl/tr/br → rect2 tl/tr/br). dlib keeps these
+    // coefficients in DOUBLE (point_transform_affine stores matrix<double,2,2>
+    // — there is NO float conversion), so we do the same: double coefficients
+    // evaluated as m_a*p + m_b in double. Axis-aligned rect2 makes the cross
+    // terms exactly zero.
+    const double a11 = (r2 - l2) / static_cast<double>(cols - 1);
+    const double b1 = l2;
+    const double a22 = (b2 - t2) / static_cast<double>(rows - 1);
+    const double b2f = t2;
 
     for (int r = 0; r < rows; ++r) {
-        const double sy = t2 + r * stepY;
-        const long top = static_cast<long>(std::floor(sy));
-        const double tb_frac = sy - top;
         for (int c = 0; c < cols; ++c) {
-            const double sx = l2 + c * stepX;
+            const double sx = a11 * c + b1;
+            const double sy = a22 * r + b2f;
             const long left = static_cast<long>(std::floor(sx));
+            const long top = static_cast<long>(std::floor(sy));
             const double lr_frac = sx - left;
+            const double tb_frac = sy - top;
+#ifdef EXTRACTCHIP_DEBUG
+            std::fprintf(stderr, "MYSAMPLE %d %d %.17g %.17g %ld %ld\n",
+                         r, c, sx, sy, left, top);
+#endif
 
             // dlib interpolate_bilinear strict in-range rule: the full 2×2
             // neighborhood must lie inside the source; otherwise black.
