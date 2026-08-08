@@ -407,7 +407,7 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
             if (!m_statusText.empty()) {
                 return SHStrDupW(m_statusText.c_str(), ppwsz);
             }
-            return SHStrDupW(L"识别中...", ppwsz);
+            return SHStrDupW(L"正在识别...", ppwsz);
         case State::Ready:
             return SHStrDupW(L"人脸识别成功，正在解锁...", ppwsz);
         case State::Failed:
@@ -597,6 +597,10 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
                 m_username = result.username;
                 m_password = result.password;
                 m_state = State::Ready;
+                m_statusText = L"人脸识别成功，正在解锁...";
+                if (m_pCredentialEvents) {
+                    m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+                }
                 if (m_hCredsReady) {
                     SetEvent(m_hCredsReady);
                 }
@@ -708,7 +712,14 @@ void FaceLoginCredential::StartAuth() {
     if (m_pipeClient->Connect()) {
         m_pipeClient->SendMessage(facelogin::ipc::MSG_AUTH_REQUEST);
 
-        m_statusText = L"识别中...";
+        // Push "正在识别..." immediately so the tile does not keep showing the
+        // previous content (last round's failure text or the idle prompt)
+        // during the pipe round-trip before the service's first STATUS
+        // message arrives — that gap reads as a brief flash of stale text.
+        m_statusText = L"正在识别...";
+        if (m_pCredentialEvents) {
+            m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+        }
 
         auto self = this;
         m_pipeClient->StartBackgroundRead(
@@ -939,6 +950,13 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             m_username = result.username;
             m_password = result.password;
             m_state = State::Ready;
+            // Push the success text immediately so the tile does not keep
+            // showing the last in-flight status ("正在识别...") during
+            // the re-enumeration gap before LogonUI calls GetStringValue.
+            m_statusText = L"人脸识别成功，正在解锁...";
+            if (m_pCredentialEvents) {
+                m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+            }
             if (m_hCredsReady) {
                 SetEvent(m_hCredsReady);
             }

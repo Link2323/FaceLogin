@@ -818,12 +818,10 @@ bool FaceService::ProcessAuthRequest() {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    // STATUS: Notify credential provider that recognition has started.
-    // L"\u8bc6\u522b\u4e2d..." = L"识别中..."
-    {
-        std::wstring statusMsg = std::wstring(ipc::MSG_STATUS_PREFIX) + L"\u8bc6\u522b\u4e2d...";
-        m_pipeServer->WriteMessage(statusMsg);
-    }
+    // No separate "识别中..." status push here — the credential provider's
+    // StartAuth already pushed it on connect, and the fused loop below pushes
+    // "正在识别..." as soon as it begins. A status between them would just
+    // cause a brief text flash on the tile.
 
     auto startTime = std::chrono::steady_clock::now();
     bool authSent = false;
@@ -866,8 +864,11 @@ bool FaceService::ProcessAuthRequest() {
             {
                 LivenessMethod method = m_livenessMethod;
 
-                // Determine status text
-                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"正在进行活体检测...");
+                // Determine status text. The fused loop runs face detection,
+                // liveness, and identity binding together on each frame — show
+                // one unified "recognizing" status rather than implying a
+                // standalone "liveness-only" phase.
+                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"正在识别...");
                 FlushFileBuffers(m_pipeServer->GetHandle());
 
                 bool livenessPassed = false;
