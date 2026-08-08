@@ -132,6 +132,18 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	}
 	a.emit(35, "配置注册表路径", "done", "")
 
+	// Lock the registry key's DACL (security #3): now that the DataPath/
+	// InstallPath values are written, protect them against non-admin
+	// redirection. Failure is fatal — an unprotected key leaves the data
+	// directory redirectable, which the C++ allow-list alone only partially
+	// mitigates.
+	a.emit(36, "保护注册表", "running", "")
+	if err = internal.SetRegistryKeyACL(); err != nil {
+		a.emit(36, "保护注册表", "fail", err.Error())
+		return result(false, fmt.Sprintf("注册表安全保护失败: %v", err))
+	}
+	a.emit(38, "保护注册表", "done", "")
+
 	// Step 4: Extract all embedded resources
 	a.emit(35, "复制文件", "running", "")
 	if err = internal.ExtractAll(installDir, func(step, total int, name string) {

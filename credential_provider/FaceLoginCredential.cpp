@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
+#include "../common/secure_clear.h"
 #include <wincred.h>
 #include <ntstatus.h>
 #include <ntsecapi.h>
@@ -165,7 +166,7 @@ FaceLoginCredential::FaceLoginCredential() {
 
 FaceLoginCredential::~FaceLoginCredential() {
     // SENSITIVE: Zero the password from memory
-    SecureZeroMemory(m_password.data(), m_password.size() * sizeof(wchar_t));
+    facelogin::SecureClearWString(m_password);
 
     // Stop the background input-detection thread before tearing down any state
     // it touches. COM release order does not guarantee UnAdvise (which also
@@ -410,7 +411,13 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
         case State::Ready:
             return SHStrDupW(L"人脸识别成功，正在解锁...", ppwsz);
         case State::Failed:
-            return SHStrDupW(L"未识别到人脸，请重试或使用密码登录", ppwsz);
+            // Surface a specific failure reason if one was provided by the
+            // service (e.g. "未检测到人脸", "未通过活体检测，请使用真实人脸",
+            // "识别超时，请重试"); otherwise the generic fallback.
+            if (!m_statusText.empty()) {
+                return SHStrDupW(m_statusText.c_str(), ppwsz);
+            }
+            return SHStrDupW(L"人脸识别失败，请重试或使用密码登录", ppwsz);
         case State::Blocked:
             // Passwordless account notice (set by OnPipeResponse / polling).
             return SHStrDupW(m_statusText.empty() ?
@@ -566,6 +573,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
             const LONGLONG AUTH_TIMEOUT_100NS = 200000000LL;
             if (now - m_authStartTime > AUTH_TIMEOUT_100NS) {
                 FACELOGIN_WARN(L"Auth timed out waiting for service response");
+                m_statusText = L"识别超时，请重试";
                 m_state = State::Failed;
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
@@ -595,6 +603,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
             }
             else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
                 FACELOGIN_INFO(L"Auth timeout");
+                m_statusText = L"识别超时，请重试";
                 m_state = State::Failed;
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
@@ -791,6 +800,14 @@ void FaceLoginCredential::StopInputDetectionThread() {
 HRESULT FaceLoginCredential::PackCredentials(
     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs) {
 
+    // RAII: guarantee m_password is zeroed on EVERY return path, including
+    // the three early-returns below (CredPack query failure / OOM / pack
+    // failure). Previously only the success path cleared it, so a packing
+    // failure left plaintext in the member wstring until the destructor —
+    // and LogonUI re-polls GetSerialization, so the password sat there for
+    // the credential's lifetime (security #9).
+    facelogin::SecureWStringGuard pwdGuard(m_password);
+
     FACELOGIN_INFO(L"Packing credentials for: %s\\%s (UPN=%s)",
                   m_domain.c_str(), m_username.c_str(),
                   m_upn.empty() ? L"<none>" : m_upn.c_str());
@@ -864,8 +881,8 @@ HRESULT FaceLoginCredential::PackCredentials(
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    // CRITICAL: Zero the password immediately after packing
-    SecureZeroMemory(pwzPassword, m_password.size() * sizeof(wchar_t));
+    // Password clearing is handled by pwdGuard on return (success path
+    // included) — no manual SecureZeroMemory needed here.
 
     pcpcs->rgbSerialization = pPackedCreds;
     pcpcs->cbSerialization = cbPackedCreds;
@@ -930,7 +947,11 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             return;
         } else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
             FACELOGIN_INFO(L"OnPipeResponse: Auth timeout");
+            m_statusText = L"识别超时，请重试";
             m_state = State::Failed;
+            if (m_pCredentialEvents) {
+                m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+            }
         } else if (result.status == facelogin::ipc::AuthResult::Status::Error) {
             FACELOGIN_WARN(L"OnPipeResponse: Auth error: %s", result.errorMessage.c_str());
             // Passwordless account: show the notice in-place and stop — do NOT

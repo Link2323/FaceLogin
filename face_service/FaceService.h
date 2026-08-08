@@ -68,9 +68,6 @@ private:
     bool LoadHeavyModels(bool lowLightEnhance);  // recognizer + anti-spoof
     void AbortModelLoadWait();         // release anyone blocked in EnsureModelsLoaded
 
-    // Configuration
-    std::wstring GetModelsDir();
-
     // Service state
     SERVICE_STATUS_HANDLE m_hStatus = nullptr;
     SERVICE_STATUS m_status = {};

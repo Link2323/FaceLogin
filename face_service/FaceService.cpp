@@ -5,6 +5,8 @@
 #include "../common/config_util.h"
 #include "../common/frame_image.h"
 #include "../common/sha256_util.h"
+#include "../common/data_path.h"
+#include "../common/secure_clear.h"
 #include <shlobj.h>
 #include <chrono>
 #include <thread>
@@ -50,16 +52,8 @@ static std::wstring Utf8ToWstr(const std::string& s) {
 }
 
 static void SecureClearMatchPassword(std::optional<CredentialStore::MatchResult>& match) {
-    if (match && !match->password.empty()) {
-        SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
-        match->password.clear();
-    }
-}
-
-static void SecureClearWideString(std::wstring& value) {
-    if (!value.empty()) {
-        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
-        value.clear();
+    if (match) {
+        SecureClearWString(match->password);
     }
 }
 
@@ -196,13 +190,23 @@ void FaceService::RunStandalone() {
     FaceService service;
 
     {
-        std::wstring logDir = ReadRegString(REGVAL_DATA_PATH, L"");
+        // Resolve the log directory through the same secure resolver as
+        // Initialize(). In standalone (development) mode this trusts the
+        // EXE directory and %ProgramData%\FaceLogin, so dev workflows are
+        // unaffected. A defensive fallback to the EXE directory keeps
+        // logging alive even if the resolver unexpectedly rejects.
+        std::wstring reason;
+        std::wstring logDir = ResolveSecureDataDir(L"", &reason);
         if (logDir.empty()) {
-            wchar_t programData[MAX_PATH];
-            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, programData))) {
-                logDir = std::wstring(programData) + L"\\FaceLogin";
+            FACELOGIN_WARN(L"Standalone: secure data dir rejected (%s) — "
+                           L"logging next to the EXE", reason.c_str());
+            wchar_t exeBuf[MAX_PATH] = {};
+            if (GetModuleFileNameW(nullptr, exeBuf, MAX_PATH) != 0) {
+                std::wstring exePath(exeBuf);
+                size_t slash = exePath.find_last_of(L"\\/");
+                logDir = (slash != std::wstring::npos) ? exePath.substr(0, slash) : L".";
             } else {
-                logDir = L"C:\\ProgramData\\FaceLogin";
+                logDir = L".";
             }
         }
         CreateDirectoryW(logDir.c_str(), nullptr);
@@ -283,21 +287,23 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
 }
 
 bool FaceService::Initialize() {
+    // Resolve the data directory through the security whitelist check
+    // (security #3 — DataPath registry redirection defense). The registry
+    // DataPath value is trusted only if it points at a allow-listed location
+    // (EXE dir in production; EXE dir / ProgramData / hint in development).
+    // A rejected path is fail-closed: the service refuses to start rather
+    // than load models / users.dat from an attacker-controlled directory.
     {
-        std::wstring regData = ReadRegString(REGVAL_DATA_PATH, L"");
-        if (!regData.empty()) {
-            m_dataDir = regData;
-        } else {
-            wchar_t programData[MAX_PATH];
-            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, programData))) {
-                m_dataDir = std::wstring(programData) + L"\\FaceLogin";
-            } else {
-                m_dataDir = L"C:\\ProgramData\\FaceLogin";
-            }
+        std::wstring reason;
+        m_dataDir = ResolveSecureDataDir(L"", &reason);
+        if (m_dataDir.empty()) {
+            FACELOGIN_ERROR(L"Refusing to start — data directory rejected: %s",
+                            reason.c_str());
+            return false;
         }
     }
     CreateDirectoryW(m_dataDir.c_str(), nullptr);
-    m_modelsDir = GetModelsDir();
+    m_modelsDir = m_dataDir + L"\\models";
 
     // Load configuration from config.json (falls back to registry). Must happen
     // before camera init — the configured camera_device is used below.
@@ -867,6 +873,7 @@ bool FaceService::ProcessAuthRequest() {
                 bool livenessPassed = false;
                 bool livenessInferenceError = false;
                 bool livenessIdentityMismatch = false;
+                bool anyFaceSeen = false; // any frame detected a face this window?
 
                 if (method == LivenessMethod::AntiSpoof) {
                     // Calibrated dual-model consensus: all five frames must pass.
@@ -914,6 +921,7 @@ bool FaceService::ProcessAuthRequest() {
                         // MiniFASNet consumes expanded crops around the SCRFD bbox.
                         auto asDet = m_onnxDetector->DetectLargestFace(asFrame);
                         if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
+                        anyFaceSeen = true;
 
                         const FaceRect faceRect(
                             static_cast<long>(asDet->x1), static_cast<long>(asDet->y1),
@@ -1068,12 +1076,23 @@ bool FaceService::ProcessAuthRequest() {
 
                 if (!livenessPassed) {
                     FACELOGIN_WARN(L"Liveness check failed");
-                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-                        livenessInferenceError
-                            ? L"活体检测模块异常，请使用密码登录"
-                            : livenessIdentityMismatch
-                            ? L"活体验证期间人脸不匹配，请重试"
-                            : L"\u68c0\u6d4b\u5230\u653b\u51fb\uff0c\u8bf7\u4f7f\u7528\u771f\u5b9e\u4eba\u8138"));
+                    // Distinguish "never detected a face this window" from a
+                    // genuine anti-spoof rejection.  Previously an empty scene
+                    // (5/5 frames with no detection) timed out the 8s window
+                    // with all three flags false and fell through to the
+                    // attack-rejection message — telling the user "检测到攻击"
+                    // when in fact no face was ever seen.
+                    std::wstring failMsg;
+                    if (livenessInferenceError) {
+                        failMsg = L"活体检测模块异常，请使用密码登录";
+                    } else if (livenessIdentityMismatch) {
+                        failMsg = L"活体验证期间人脸不匹配，请重试";
+                    } else if (!anyFaceSeen) {
+                        failMsg = L"未检测到人脸";
+                    } else {
+                        failMsg = L"未通过活体检测，请使用真实人脸";
+                    }
+                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(failMsg));
                     FlushFileBuffers(m_pipeServer->GetHandle());
                     m_pipeServer->DrainOutput(5000);
                     SecureClearMatchPassword(lockedMatch);
@@ -1101,7 +1120,7 @@ bool FaceService::ProcessAuthRequest() {
                 domain, lockedMatch->username, lockedMatch->password);
             bool writeOk = m_pipeServer->WriteMessage(msg);
             FlushFileBuffers(m_pipeServer->GetHandle());
-            SecureClearWideString(msg);
+            SecureClearWString(msg);
             SecureClearMatchPassword(lockedMatch);
 
             if (!writeOk) {
@@ -1139,20 +1158,6 @@ bool FaceService::ProcessAuthRequest() {
         }
 
     return authSent;
-}
-
-std::wstring FaceService::GetModelsDir() {
-    {
-        std::wstring regData = ReadRegString(REGVAL_DATA_PATH, L"");
-        if (!regData.empty()) {
-            return regData + L"\\models";
-        }
-    }
-    wchar_t programData[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, programData))) {
-        return std::wstring(programData) + L"\\FaceLogin\\models";
-    }
-    return L"C:\\ProgramData\\FaceLogin\\models";
 }
 
 bool FaceService::Install(const std::wstring& exePath) {
