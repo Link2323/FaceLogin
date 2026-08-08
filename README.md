@@ -110,7 +110,7 @@ flowchart TB
 | 摄像头 | USB 或内置，支持 1280×720 |
 | 运行时 | WebView2（Windows 11 内置，Win10 自动安装） |
 | 权限 | 管理员权限（安装和注册需要） |
-| 磁盘空间 | ~110 MB（含四个 ONNX 模型约 64 MB：SCRFD ~16 MB + IResNet50 INT8 ~44 MB + 双 MiniFAS ~3.5 MB；运行库 DLL 及可执行文件约 47 MB） |
+| 磁盘空间 | ~110 MB（含四个 ONNX 模型约 52 MB：SCRFD INT8 ~4 MB + IResNet50 INT8 ~44 MB + 双 MiniFAS ~3.5 MB；运行库 DLL 及可执行文件约 47 MB） |
 
 ---
 
@@ -134,10 +134,10 @@ flowchart TB
 | 机器类型 | 端到端解锁 |
 |---|---|
 | 高性能桌面 CPU（如 Ryzen 9） | ~1.5s |
-| 主流笔记本 | ~3-4s |
-| 笔记本散热受限（降频） | ~4-5s |
+| 主流笔记本（散热正常） | ~1.5-2s |
+| 笔记本散热受限（降频） | ~2s |
 
-> 保持散热良好可明显提升解锁速度；混合架构 CPU（P+E 核）可设置环境变量 `FACELOGIN_ONNX_THREADS=4` 获得最佳性能。
+> 保持散热良好可明显提升解锁速度；混合架构 CPU（P+E 核）服务已自动将推理线程绑定到性能核，无需手动配置。
 
 ---
 
@@ -195,7 +195,7 @@ wails build -clean -platform windows/amd64
 
 | 文件 | 用途 | 下载 |
 |---|---|---|
-| `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g） | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
+| `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g；INT8 量化，~4 MB） | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
 | `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入（INT8 量化，~44 MB，1.68× 加速，见性能说明） | `assets/models/`；由 `scripts/download_models.ps1` 下载 FP32 源并量化 |
 | `MiniFASNetV2.onnx` | 静默反欺诈（2.7× 裁剪） | `assets/models/`；构建时复制到安装包 |
 | `MiniFASNetV1SE.onnx` | 静默反欺诈（4.0× 裁剪） | `assets/models/`；构建时复制到安装包 |
