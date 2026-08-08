@@ -410,7 +410,13 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
         case State::Ready:
             return SHStrDupW(L"人脸识别成功，正在解锁...", ppwsz);
         case State::Failed:
-            return SHStrDupW(L"未识别到人脸，请重试或使用密码登录", ppwsz);
+            // Surface a specific failure reason if one was provided by the
+            // service (e.g. "未检测到人脸", "未通过活体检测，请使用真实人脸",
+            // "识别超时，请重试"); otherwise the generic fallback.
+            if (!m_statusText.empty()) {
+                return SHStrDupW(m_statusText.c_str(), ppwsz);
+            }
+            return SHStrDupW(L"人脸识别失败，请重试或使用密码登录", ppwsz);
         case State::Blocked:
             // Passwordless account notice (set by OnPipeResponse / polling).
             return SHStrDupW(m_statusText.empty() ?
@@ -566,6 +572,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
             const LONGLONG AUTH_TIMEOUT_100NS = 200000000LL;
             if (now - m_authStartTime > AUTH_TIMEOUT_100NS) {
                 FACELOGIN_WARN(L"Auth timed out waiting for service response");
+                m_statusText = L"识别超时，请重试";
                 m_state = State::Failed;
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
@@ -595,6 +602,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
             }
             else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
                 FACELOGIN_INFO(L"Auth timeout");
+                m_statusText = L"识别超时，请重试";
                 m_state = State::Failed;
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
@@ -930,7 +938,11 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             return;
         } else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
             FACELOGIN_INFO(L"OnPipeResponse: Auth timeout");
+            m_statusText = L"识别超时，请重试";
             m_state = State::Failed;
+            if (m_pCredentialEvents) {
+                m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+            }
         } else if (result.status == facelogin::ipc::AuthResult::Status::Error) {
             FACELOGIN_WARN(L"OnPipeResponse: Auth error: %s", result.errorMessage.c_str());
             // Passwordless account: show the notice in-place and stop — do NOT

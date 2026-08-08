@@ -867,6 +867,7 @@ bool FaceService::ProcessAuthRequest() {
                 bool livenessPassed = false;
                 bool livenessInferenceError = false;
                 bool livenessIdentityMismatch = false;
+                bool anyFaceSeen = false; // any frame detected a face this window?
 
                 if (method == LivenessMethod::AntiSpoof) {
                     // Calibrated dual-model consensus: all five frames must pass.
@@ -914,6 +915,7 @@ bool FaceService::ProcessAuthRequest() {
                         // MiniFASNet consumes expanded crops around the SCRFD bbox.
                         auto asDet = m_onnxDetector->DetectLargestFace(asFrame);
                         if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
+                        anyFaceSeen = true;
 
                         const FaceRect faceRect(
                             static_cast<long>(asDet->x1), static_cast<long>(asDet->y1),
@@ -1068,12 +1070,23 @@ bool FaceService::ProcessAuthRequest() {
 
                 if (!livenessPassed) {
                     FACELOGIN_WARN(L"Liveness check failed");
-                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-                        livenessInferenceError
-                            ? L"活体检测模块异常，请使用密码登录"
-                            : livenessIdentityMismatch
-                            ? L"活体验证期间人脸不匹配，请重试"
-                            : L"\u68c0\u6d4b\u5230\u653b\u51fb\uff0c\u8bf7\u4f7f\u7528\u771f\u5b9e\u4eba\u8138"));
+                    // Distinguish "never detected a face this window" from a
+                    // genuine anti-spoof rejection.  Previously an empty scene
+                    // (5/5 frames with no detection) timed out the 8s window
+                    // with all three flags false and fell through to the
+                    // attack-rejection message — telling the user "检测到攻击"
+                    // when in fact no face was ever seen.
+                    std::wstring failMsg;
+                    if (livenessInferenceError) {
+                        failMsg = L"活体检测模块异常，请使用密码登录";
+                    } else if (livenessIdentityMismatch) {
+                        failMsg = L"活体验证期间人脸不匹配，请重试";
+                    } else if (!anyFaceSeen) {
+                        failMsg = L"未检测到人脸";
+                    } else {
+                        failMsg = L"未通过活体检测，请使用真实人脸";
+                    }
+                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(failMsg));
                     FlushFileBuffers(m_pipeServer->GetHandle());
                     m_pipeServer->DrainOutput(5000);
                     SecureClearMatchPassword(lockedMatch);
