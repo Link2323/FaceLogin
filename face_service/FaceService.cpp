@@ -742,9 +742,11 @@ bool FaceService::ProcessAuthRequest() {
     auto startTime = std::chrono::steady_clock::now();
     bool authSent = false;
     // The first anti-spoof anchor frame (below) locks the identity for this
-    // auth; every later embedding (mid-window consensus frame, final anchor,
-    // post-PAD verify) must return this same SID or authentication fails
-    // closed.  lockedMatch carries the credential released on success.
+    // auth; every later embedding (mid-window consensus frame, final anchor)
+    // must return this same SID or authentication fails closed.  The final
+    // anchor (PAD frame 5) is the last identity gate — there is no separate
+    // post-liveness verify (see the tail-anchor note further down).
+    // lockedMatch carries the credential released on success.
     std::wstring initialSid;
     std::optional<CredentialStore::MatchResult> lockedMatch;
 
@@ -764,7 +766,11 @@ bool FaceService::ProcessAuthRequest() {
     // the first anchor locks the SID, the mid-window embedding and the final
     // anchor must return the same SID.  The "3-frame consensus" strength is
     // preserved with three spaced samples (harder for a transient lighting
-    // glitch to hit than three consecutive frames) at 4 embeddings per auth.
+    // glitch to hit than three consecutive frames) at 3 embeddings per auth —
+    // the final anchor doubles as the post-liveness identity gate, so no
+    // separate fresh-frame final verify runs (tail-anchor reuse, reviewed
+    // 2026-08: the old verify closed only the ~200ms window between frame 5
+    // and credential release at the cost of a full extra embedding).
     // An embedding that fails to produce a match slides the frame out of the
     // count — it is neither counted for PAD nor allowed to satisfy the anchor
     // schedule, so consensus can never silently shrink below three bindings.
@@ -994,81 +1000,22 @@ bool FaceService::ProcessAuthRequest() {
                     return false;
                 }
 
-                FACELOGIN_INFO(L"Liveness passed \u2014 verifying match");
+                // The final anchor (PAD frame 5) doubles as the post-liveness
+                // identity check: it is the last PAD sample AND its embedding
+                // already proved the same SID as the first anchor.  A separate
+                // fresh-frame final verify existed solely to close the ~200ms
+                // window between frame 5 and credential release - it cost a
+                // whole extra embedding (~0.7s on slow hardware).  After
+                // review the window is accepted and that step removed: the
+                // tail-anchor binding is the final identity gate (see
+                // docs/performance-baseline.md experiment 7).  Credentials go
+                // out immediately after the 5/5 PAD pass.
+                FACELOGIN_INFO(L"Liveness passed \u2014 tail anchor bound, releasing credentials");
 
-                // Final match verify (prevents face-swap).
-                //
-                // Uses the SAME SCRFD detector as the recognition stage so the
-                // two stages agree on face position. Retries over a short window:
-                // the frame right after liveness is often mid-motion and its
-                // box/embedding is noisy, so a single frame is unreliable. We
-                // keep grabbing until a frame both detects a face AND matches.
-                // The 8s window matches the PAD stage: on low-end hardware a
-                // single detect+embed attempt takes ~2s, so the old 2s window
-                // allowed only one try there — the retry this loop exists for
-                // was defeated. Success breaks out immediately; only the
-                // fail path is extended.
-                if (method == LivenessMethod::AntiSpoof) {
-                    auto verifyStart = std::chrono::steady_clock::now();
-                    bool verifyOk = false;
-                    while (m_running && !verifyOk) {
-                        if (m_pipeServer->IsClientDisconnected()) {
-                            FACELOGIN_INFO(L"Client disconnected during final verify — aborting");
-                            SecureClearMatchPassword(lockedMatch);
-                            return false;
-                        }
-                        auto vElapsed = std::chrono::steady_clock::now() - verifyStart;
-                        if (std::chrono::duration_cast<std::chrono::seconds>(vElapsed).count() >= 8) break;
-
-                        dlib::matrix<dlib::rgb_pixel> verifyFrame;
-                        if (!grabFrame(verifyFrame)) {
-                            if (!m_running) break;
-                            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                            continue;
-                        }
-
-                        // Detect with SCRFD (primary), same as the recognition loop.
-                        auto det = m_onnxDetector->DetectLargestFace(verifyFrame);
-                        if (!det) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                            continue;
-                        }
-
-                        std::optional<CredentialStore::MatchResult> verifyMatch;
-                        auto verifyEmb = m_onnxRecognizer->ComputeEmbedding(verifyFrame, det->kps);
-                        if (!verifyEmb.empty()) {
-                            verifyMatch = m_store->FindBestMatch(verifyEmb.data(), verifyEmb.size(), m_matchThreshold);
-                        }
-
-                        if (verifyMatch) {
-                            if (!verifyMatch->sid.empty() && verifyMatch->sid == initialSid) {
-                                verifyOk = true;
-                            } else {
-                                FACELOGIN_WARN(L"Final verify matched a different SID — rejecting face swap");
-                            }
-                            // The final check only proves continuity.  Never
-                            // replace the original credential with an arbitrary
-                            // registered user's MatchResult.
-                            SecureClearMatchPassword(verifyMatch);
-                            if (verifyOk) break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                    }
-
-                    if (!verifyOk) {
-                        FACELOGIN_WARN(L"Final match verify failed \u2014 face swap detected");
-                        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-                            L"\u6d3b\u4f53\u9a8c\u8bc1\u671f\u95f4\u4eba\u8138\u4e0d\u5339\u914d\uff0c\u8bf7\u91cd\u8bd5"));
-                        FlushFileBuffers(m_pipeServer->GetHandle());
-                        m_pipeServer->DrainOutput(5000);
-                        SecureClearMatchPassword(lockedMatch);
-                        return false;
-                    }
-                }
             }
 
-            // Serialize credentials only after liveness and same-SID final
-            // verification have both succeeded.
+            // Serialize credentials only after liveness 5/5 and the tail-anchor
+            // same-SID binding have both succeeded.
             std::wstring msg = ipc::BuildAuthSuccessMessage(
                 lockedMatch->sid, lockedMatch->upn,
                 domain, lockedMatch->username, lockedMatch->password);
