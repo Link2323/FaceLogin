@@ -254,16 +254,34 @@ func (a *App) Uninstall() map[string]interface{} {
 		a.emit(70, "删除程序文件", "done", "")
 	}
 
-	// Step 4: Clean registry — remove the whole HKLM\SOFTWARE\FaceLogin key.
+	// Step 4: Remove shared runtime data under %ProgramData%\FaceLogin
+	// (config.json, enrolled face database users.dat, logs, model cache). The
+	// installer points DataPath at the install dir, so this directory only
+	// exists when an older release used it as the default or the app ran
+	// standalone — but on such machines it holds real data that must not
+	// survive a full uninstall. Done before the registry key is deleted so the
+	// data path is still resolvable if this ever switches back to registry.
+	a.emit(70, "删除运行数据", "running", "")
+	removedData, dataErr := internal.RemoveProgramData()
+	if dataErr != nil {
+		a.emit(80, "删除运行数据", "warn",
+			"部分运行数据删除失败，将在重启后清除。")
+	} else if removedData {
+		a.emit(80, "删除运行数据", "done", "已删除运行数据目录。")
+	} else {
+		a.emit(80, "删除运行数据", "done", "无运行数据目录。")
+	}
+
+	// Step 5: Clean registry — remove the whole HKLM\SOFTWARE\FaceLogin key.
 	// The service and credential provider write runtime values
 	// (ServiceStartUptime, UserLoggedIn) that the installer never created, so
 	// deleting only InstallPath/DataPath would leave the key behind.
-	a.emit(70, "清理注册表", "running", "")
+	a.emit(80, "清理注册表", "running", "")
 	_ = internal.DeleteRegKey()
-	a.emit(85, "清理注册表", "done", "")
+	a.emit(90, "清理注册表", "done", "")
 
-	// Step 5: Notify complete
-	a.emit(85, "完成", "running", "")
+	// Step 6: Notify complete
+	a.emit(90, "完成", "running", "")
 	a.emit(100, "完成", "done",
 		"卸载完成，程序文件、人脸数据和日志已全部删除。")
 

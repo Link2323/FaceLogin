@@ -60,6 +60,23 @@ var legacyModelFiles = []string{
 	"OULU_Protocol_2_model_0_0.onnx",
 }
 
+// Runtime DLLs shipped by v1.5 and earlier (when the pipeline still depended on
+// dlib, which pulled in OpenBLAS/LAPACK via MinGW). v1.6 removed dlib and now
+// ships a different runtime set (onnxruntime/abseil/re2/protobuf), so these
+// older DLLs linger in the install dir of upgraded machines. Because they are
+// not in the current manifest, RemoveInstalledFiles would never touch them,
+// leaving RemoveInstalledDir to see a non-empty directory and (correctly)
+// refuse to delete it — so the whole install folder survived uninstall. Listed
+// here so they are swept away by name, exactly like legacyModelFiles.
+var legacyRuntimeFiles = []string{
+	"libgcc_s_seh-1.dll",
+	"libgfortran-5.dll",
+	"liblapack.dll",
+	"libquadmath-0.dll",
+	"libwinpthread-1.dll",
+	"openblas.dll",
+}
+
 func validateModelReader(label string, r io.Reader, actualSize int64, model requiredModel) error {
 	if actualSize != model.size {
 		return fmt.Errorf("%s has size %d, expected %d", label, actualSize, model.size)
@@ -369,6 +386,19 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 			}
 		}
 	}
+	// Sweep legacy runtime DLLs (dlib/OpenBLAS, v1.5 and earlier) from the
+	// install-dir root. Without this, leftover DLLs from an upgraded install
+	// keep the directory non-empty and RemoveInstalledDir refuses to remove it.
+	for _, name := range legacyRuntimeFiles {
+		dstPath := filepath.Join(destDir, name)
+		if FileExists(dstPath) {
+			if err := os.Remove(dstPath); err != nil {
+				recordErr(err)
+			} else {
+				removed++
+			}
+		}
+	}
 
 	// Full purge: also remove user data and logs (config.json, the enrolled
 	// face database in data/, and log/). Only invoked when the caller opted in
@@ -449,4 +479,38 @@ func RemoveInstalledDir(destDir string) (bool, error) {
 		}
 	}
 	return false, nil // not empty — do NOT delete
+}
+
+// RemoveProgramData deletes the shared runtime-data directory
+// (%ProgramData%\FaceLogin: config.json, the enrolled face database users.dat,
+// logs, and the models cache). The installer points DataPath at the install
+// directory, so this directory is only populated when an older release used it
+// as the default or when the app was run standalone — but on such machines it
+// accumulates real data that should not survive a full uninstall.
+//
+// The path is resolved from %ProgramData% rather than the registry because the
+// uninstall flow deletes the registry key shortly after this call. A safety
+// guard mirrors IsSafeInstallDir: the resolved directory's base name must be
+// exactly "FaceLogin" (case-insensitive) before anything is removed, so a
+// maliciously empty or corrupted %ProgramData% can never turn this into a
+// recursive wipe of an arbitrary folder. Returns removed=true when the
+// directory existed and was purged (some entries may be pending reboot delete).
+func RemoveProgramData() (removed bool, err error) {
+	root := os.Getenv("ProgramData")
+	if root == "" {
+		return false, nil
+	}
+	dir := filepath.Join(root, "FaceLogin")
+	if !DirExists(dir) {
+		return false, nil
+	}
+	// Guard: base name must be exactly "FaceLogin". Belt-and-suspenders against
+	// a tampered %ProgramData% pointing somewhere unexpected.
+	if !strings.EqualFold(filepath.Base(filepath.Clean(dir)), "FaceLogin") {
+		return false, nil
+	}
+	if rerr := removeAllOrScheduleReboot(dir); rerr != nil {
+		return true, rerr
+	}
+	return true, nil
 }
