@@ -11,6 +11,7 @@
 #include <future>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <wtsapi32.h>
 
 #pragma comment(lib, "wtsapi32.lib")
@@ -61,6 +62,81 @@ static void SecureClearWideString(std::wstring& value) {
         value.clear();
     }
 }
+
+// ============================================================================
+// Hybrid (P+E core) affinity — auth-window optimization
+// ============================================================================
+//
+// On P+E hybrid CPUs (e.g. i7-1360P: 4P+8E) the ONNX thread pool (8 threads =
+// hardware_concurrency/2) spreads across P and E cores; every layer-reduction
+// waits on the slowest E-core.  During an auth we pin the whole process to the
+// P-cores (highest EfficiencyClass, including HT siblings) so every ONNX and
+// MiniFAS thread runs on a fast core.  Uniform CPUs (max EfficiencyClass == 0,
+// e.g. Ryzen 9 7945HX) are untouched — the mask is 0 and the guard is a no-op.
+
+// Returns a mask of the highest-EfficiencyClass cores' logical processors,
+// or 0 on uniform CPUs / failure.
+static DWORD_PTR GetPerformanceCoreMask() {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (len == 0) return 0;
+
+    std::vector<BYTE> buf(len);
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
+            reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()),
+            &len)) {
+        return 0;
+    }
+
+    BYTE maxEff = 0;
+    for (size_t off = 0; off < buf.size();) {
+        const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
+        if (info->Relationship == RelationProcessorCore) {
+            maxEff = (std::max)(maxEff, info->Processor.EfficiencyClass);
+        }
+        off += info->Size;
+        if (info->Size == 0) break;  // malformed — bail
+    }
+    if (maxEff == 0) return 0;  // uniform CPU — no P/E split
+
+    DWORD_PTR mask = 0;
+    for (size_t off = 0; off < buf.size();) {
+        const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
+        if (info->Relationship == RelationProcessorCore &&
+            info->Processor.EfficiencyClass == maxEff) {
+            mask |= info->Processor.GroupMask[0].Mask;
+        }
+        off += info->Size;
+        if (info->Size == 0) break;
+    }
+    return mask;
+}
+
+// RAII: pins the process to the P-core mask for the auth duration and restores
+// the original mask on every exit path.
+class ScopedPerformanceCoreAffinity {
+public:
+    explicit ScopedPerformanceCoreAffinity(DWORD_PTR mask) : m_active(mask != 0) {
+        if (m_active) {
+            GetProcessAffinityMask(GetCurrentProcess(), &m_oldMask, &m_systemMask);
+            if (!SetProcessAffinityMask(GetCurrentProcess(), mask)) {
+                FACELOGIN_WARN(L"SetProcessAffinityMask failed: %lu", GetLastError());
+                m_active = false;
+            } else {
+                FACELOGIN_INFO(L"P-core affinity enabled (mask 0x%llX)", (unsigned long long)mask);
+            }
+        }
+    }
+    ~ScopedPerformanceCoreAffinity() {
+        if (m_active) SetProcessAffinityMask(GetCurrentProcess(), m_oldMask);
+    }
+    ScopedPerformanceCoreAffinity(const ScopedPerformanceCoreAffinity&) = delete;
+    ScopedPerformanceCoreAffinity& operator=(const ScopedPerformanceCoreAffinity&) = delete;
+private:
+    bool m_active;
+    DWORD_PTR m_oldMask = 0;
+    DWORD_PTR m_systemMask = 0;
+};
 
 FaceService::FaceService() {
     s_pInstance = this;
@@ -668,6 +744,10 @@ void FaceService::Stop() {
 
 bool FaceService::ProcessAuthRequest() {
     FACELOGIN_INFO(L"Starting face authentication...");
+
+    // Pin ONNX/MiniFAS threads to the P-cores for the whole auth on hybrid
+    // CPUs (no-op elsewhere).  Restored on every exit path by the guard.
+    const ScopedPerformanceCoreAffinity affinityGuard(GetPerformanceCoreMask());
 
     // Heavy models (w600k_r50 + dual MiniFAS) load in the background during
     // startup. Normally ready by the time the user triggers auth; if the lock
