@@ -311,7 +311,6 @@ body{
       </button>
       <button class="btn btn-secondary" id="btn-append-cancel" onclick="onAppendCancel()" style="flex:1">取消</button>
     </div>
-    </div>
   </div>
   <div class="footer"><p>FaceLogin Console</p></div>
 </div>
@@ -467,6 +466,11 @@ body{
 var H = window.chrome.webview.hostObjects.sync.host;
 var viewing = true, lastB64 = '', lastFacesJson = '', timer = 0, faceImg = new Image();
 var captureMultiAngle = false;  // set by onCapture, read by finishCapture / showAppendScreen
+// True while an angle sequence is in flight (CaptureFaceSamples started but
+// finishCapture/abort not yet run). Guards the idle status poll from writing
+// the cumulative total into samples-tag during the ~400ms gap between angles,
+// where the per-angle poll is briefly idle but the sequence is not done.
+var capturing = false;
 var captureAngleIndex = 0;  // angle being captured; used to name/describe a single-angle append
 var camReady = false, currentTab = 'cam';
 var refreshState = 0;  // account-type-change state shown in the refresh modal (0/1/2)
@@ -755,12 +759,17 @@ function captureAngleSequence(idx, total) {
   var prog = document.getElementById('cap-progress');
   var spinner = document.getElementById('cap-spinner');
 
+  // Mark the whole angle sequence as in-flight; only finishCapture / an abort
+  // path clears it. Keeps the idle status poll from clobbering samples-tag
+  // with the cumulative total during the gap between two angles.
+  capturing = true;
+
   // Start the capture. A false return means a previous capture is still
   // winding down server-side — surface that instead of freezing silently.
   var started = true;
   try { started = H.CaptureFaceSamples(idx); } catch(e) { started = false; }
   if (started === false) {
-    clearTimeout(timer);
+    capturing = false;
     prog.style.display = 'none';
     btn.disabled = false;
     spinner.style.display = 'none';
@@ -781,6 +790,7 @@ function captureAngleSequence(idx, total) {
     if (st.collected > 0) gotProgress = true;
     if (!gotProgress && !st.done && st.collected === 0 && Date.now() - pollStart > 25000) {
       clearInterval(poll);
+      capturing = false;
       prog.style.display = 'none';
       btn.disabled = false;
       spinner.style.display = 'none';
@@ -800,6 +810,7 @@ function captureAngleSequence(idx, total) {
     // Liveness failed -> abort with the classic error banner.
     if (st.done && !st.livenessPassed) {
       clearInterval(poll);
+      capturing = false;
       prog.style.display = 'none';
       btn.disabled = false;
       spinner.style.display = 'none';
@@ -845,6 +856,7 @@ function finishCapture() {
   btn.disabled = false;
   spinner.style.display = 'none';
 
+  capturing = false;
   viewing = false;
   clearTimeout(timer);
   H.StopPreview();
@@ -1324,7 +1336,7 @@ function refreshLogs() {
 }
 
 function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function clearLogs() {
@@ -1409,9 +1421,10 @@ function onCamPickerSkip() {
 
   setInterval(function() {
     if (!viewing) return;
+    if (capturing) return;  // sequence in flight — the capture poll owns the tag
     try {
       var st = JSON.parse(H.GetCaptureStatus());
-      // The capture poll owns the text while capturing; idle shows the total.
+      // Only after the whole sequence has ended do we show the running total.
       if (st.done && !st.livenessChecking) {
         document.getElementById('samples-tag').textContent = '已采 ' + st.total + ' 帧';
       }
