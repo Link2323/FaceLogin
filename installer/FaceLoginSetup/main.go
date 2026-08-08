@@ -88,18 +88,25 @@ func main() {
 	// B) Upgrade notice — per-release announcement shown only on UPGRADE.
 	// =========================================================================
 	internal.NoticeEnabled = true
-	internal.NoticeVersion = "1.4.0"
-	internal.NoticeTitle = "FaceLogin 1.4.0 更新说明"
-	internal.NoticeBody = "安全升级：\n" +
-		"- 活体检测升级为 MiniFASNetV2 + MiniFASNetV1SE 双模型融合，显著加强照片与屏幕攻击拦截\n" +
-		"- 登录和每个录入角度均要求连续 5 帧全部通过；模型缺失、损坏或推理异常时拒绝认证\n" +
-		"- 安装前后校验四个正式 ONNX 模型的固定大小与 SHA-256，防止错误模型进入运行环境\n\n" +
-		"修复与优化：\n" +
-		"- 录入活体与实际保存的人脸帧绑定，阻止通过独立调用或中途换照片绕过\n" +
-		"- 账号身份切换后可刷新已保存信息，人脸数据无需重新录入\n" +
-		"- 暗光增强仅用于人脸识别，活体检测保持标定时的原始预处理\n\n" +
+	internal.NoticeVersion = "1.6.0"
+	internal.NoticeTitle = "FaceLogin 1.6.0 更新说明"
+	internal.NoticeBody = "功能：\n" +
+		"- 多角度人脸录入：正面、左转 30°、右转 30° 三角度，侧脸识别更稳定\n" +
+		"- 匹配阈值滑块生效：基于真实标定数据放开，限定在安全区间，可按需调节严格度\n" +
+		"- 采用 SCRFD 自带 5 关键点对齐，不再依赖 dlib，精度无损\n\n" +
+		"性能：\n" +
+		"- 模型 INT8 量化 + 安装包体积大幅缩减\n" +
+		"- 混合架构 CPU 自动绑定 P 核，低端笔记本识别速度显著提升\n" +
+		"- 重型模型后台懒加载，冷启动更快\n\n" +
+		"安全：\n" +
+		"- 注册表数据目录重定向防护（运行时路径校验 + 注册表权限锁定）\n" +
+		"- 密码内存清零加固，认证失败路径不再残留明文\n" +
+		"- 运行时模型完整性校验，阻止替换活体模型绕过防御\n\n" +
+		"修复：\n" +
+		"- 修复锁屏空场景误报「检测到攻击」，失败提示文案更准确\n" +
+		"- 修复账号身份切换误报、录入撞槽位等问题\n\n" +
 		"说明：\n" +
-		"- 现有人脸数据兼容；旧活体阈值会自动迁移到双模型标定值"
+		"- 现有人脸数据兼容，无需重新录入（多角度为新增可选能力）"
 
 	// Initialize the embedded resource filesystem in the internal package
 	internal.EmbeddedFS = resources
