@@ -13,9 +13,7 @@
 // the training distribution. dlib's own face_recognition pipeline uses the
 // same 5-point similarity convention.
 
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
-#include <dlib/geometry.h>
+#include "../common/frame_image.h"
 #include <algorithm>
 #include <cmath>
 
@@ -24,7 +22,7 @@ namespace facelogin {
 // A detected face with its 5 SCRFD keypoints. Used by the enrollment
 // preview overlay to draw the face box.
 struct FaceWithKps {
-    dlib::rectangle rect;
+    FaceRect rect;
     float kps[10];  // 5 points (x,y pairs): left-eye, right-eye, nose,
                     // left-mouth, right-mouth — source-pixel coordinates
 };
@@ -81,9 +79,9 @@ inline bool EstimateSimilarityTransform(const float src[10], const float dst[10]
 // (inverse mapping with bilinear sampling; out-of-bounds samples are black).
 // Handles the general affine inverse, so a stray non-similarity matrix
 // degrades gracefully instead of warping incorrectly.
-inline void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image,
+inline void WarpAffine(const FrameImage& image,
                        const float m[6], int size,
-                       dlib::matrix<dlib::rgb_pixel>& out) {
+                       FrameImage& out) {
     const long srcH = static_cast<long>(image.nr());
     const long srcW = static_cast<long>(image.nc());
     out.set_size(size, size);
@@ -93,7 +91,7 @@ inline void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image,
     if (std::abs(det) < 1e-6f) {
         for (int y = 0; y < size; y++)
             for (int x = 0; x < size; x++)
-                out(y, x) = dlib::rgb_pixel(0, 0, 0);
+                out(y, x) = RgbPixel(0, 0, 0);
         return;
     }
 
@@ -105,7 +103,7 @@ inline void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image,
             float sx = (e * (X - c) - b * (Y - f)) / det;
             float sy = (-d * (X - c) + a * (Y - f)) / det;
             if (sx < 0 || sy < 0 || sx >= srcW || sy >= srcH) {
-                out(Y, X) = dlib::rgb_pixel(0, 0, 0);
+                out(Y, X) = RgbPixel(0, 0, 0);
                 continue;
             }
             long x0 = static_cast<long>(sx);
@@ -124,7 +122,7 @@ inline void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image,
                 float bot = c01 + (c11 - c01) * fx;
                 return static_cast<unsigned char>(top + (bot - top) * fy + 0.5f);
             };
-            dlib::rgb_pixel p;
+            RgbPixel p;
             p.red   = blend(p00.red,   p10.red,   p01.red,   p11.red);
             p.green = blend(p00.green, p10.green, p01.green, p11.green);
             p.blue  = blend(p00.blue,  p10.blue,  p01.blue,  p11.blue);
@@ -136,9 +134,9 @@ inline void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image,
 // High-level alignment: map the face described by kps into a size×size chip
 // using the InsightFace reference frame. Returns false if the transform is
 // degenerate (e.g. collinear keypoints).
-inline bool AlignFace5(const dlib::matrix<dlib::rgb_pixel>& image,
+inline bool AlignFace5(const FrameImage& image,
                        const float kps[10], int size,
-                       dlib::matrix<dlib::rgb_pixel>& out) {
+                       FrameImage& out) {
     float m[6];
     if (!EstimateSimilarityTransform(kps, kInsightFaceRef112, m)) return false;
     WarpAffine(image, m, size, out);

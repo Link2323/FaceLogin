@@ -12,17 +12,63 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include <dlib/image_io.h>
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
+#include "../../common/frame_image.h"
 
 #include "onnx_models.h"
 
 namespace fs = std::filesystem;
+
+// Minimal uncompressed 24/32-bit BMP reader (replaces dlib::load_bmp, which
+// was the last remaining dlib use outside the shipped runtime). The chips
+// come from the threshold-calibration pipeline as standard BI_RGB BMPs.
+static bool LoadBmp(const std::string& path, facelogin::FrameImage& img) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    uint8_t hdr[54];
+    f.read(reinterpret_cast<char*>(hdr), sizeof(hdr));
+    if (f.gcount() != static_cast<std::streamsize>(sizeof(hdr)) ||
+        hdr[0] != 'B' || hdr[1] != 'M') {
+        return false;
+    }
+    auto u32 = [&](int o) { return static_cast<uint32_t>(hdr[o]) |
+                                   (static_cast<uint32_t>(hdr[o + 1]) << 8) |
+                                   (static_cast<uint32_t>(hdr[o + 2]) << 16) |
+                                   (static_cast<uint32_t>(hdr[o + 3]) << 24); };
+    auto i16 = [&](int o) { return static_cast<int16_t>(hdr[o] | (hdr[o + 1] << 8)); };
+    auto i32 = [&](int o) { return static_cast<int32_t>(u32(o)); };
+
+    const uint32_t dataOffset = u32(10);
+    const uint32_t dibSize = u32(14);
+    if (dibSize < 40) return false;                       // BITMAPINFOHEADER only
+    const int32_t w = i32(18), h = i32(22);
+    const int16_t bpp = i16(28);
+    const uint32_t compression = u32(30);
+    if (w <= 0 || h == 0 || (bpp != 24 && bpp != 32) || compression != 0) {
+        return false;
+    }
+    const bool topDown = h < 0;
+    const int32_t rows = std::abs(h);
+    img.set_size(rows, w);
+
+    const size_t rowSize = ((static_cast<size_t>(w) * bpp + 31) / 32) * 4;
+    std::vector<uint8_t> row(rowSize);
+    f.seekg(dataOffset);
+    for (int32_t y = 0; y < rows; ++y) {
+        f.read(reinterpret_cast<char*>(row.data()), static_cast<std::streamsize>(rowSize));
+        if (!f) return false;
+        const int32_t dstY = topDown ? y : (rows - 1 - y);   // BMP rows are bottom-up
+        for (int32_t x = 0; x < w; ++x) {
+            const uint8_t* p = row.data() + static_cast<size_t>(x) * (bpp / 8);
+            img(dstY, x) = facelogin::RgbPixel(p[2], p[1], p[0]);   // BGR → RGB
+        }
+    }
+    return true;
+}
 
 static std::string AngleOf(const std::string& fname) {
     const auto pos = fname.find('_');
@@ -65,11 +111,14 @@ int main(int argc, char** argv) {
     }
     const fs::path chipDir = argv[1];
 
-    std::vector<dlib::matrix<dlib::rgb_pixel>> chips;
+    std::vector<facelogin::FrameImage> chips;
     std::vector<std::string> names;
     for (const auto& p : ListChips(chipDir)) {
-        dlib::matrix<dlib::rgb_pixel> img;
-        dlib::load_bmp(img, p.string());
+        facelogin::FrameImage img;
+        if (!LoadBmp(p.string(), img)) {
+            std::cerr << "[skip] " << p.filename() << " is not a 24/32-bit BI_RGB BMP\n";
+            continue;
+        }
         if (img.nr() != 112 || img.nc() != 112) {
             std::cerr << "[skip] " << p.filename() << " is " << img.nc()
                       << "x" << img.nr() << ", not 112x112\n";

@@ -8,7 +8,7 @@ add_executable(EmbeddingTest
 
 target_link_libraries(EmbeddingTest PRIVATE
     facelogin_common
-    dlib::dlib
+
     onnxruntime::onnxruntime
 )
 

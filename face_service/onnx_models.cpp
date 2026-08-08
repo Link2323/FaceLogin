@@ -1,7 +1,6 @@
 #include "onnx_models.h"
 #include "face_align.h"
 #include "../common/logger.h"
-#include <dlib/image_transforms.h>
 #include <fstream>
 #include <algorithm>
 #include <array>
@@ -43,7 +42,7 @@ static constexpr float kLowLightMeanThreshold = 40.0f;
 // close to what InsightFace was trained on.
 static constexpr float kLowLightTargetMean   = 110.0f;
 
-void ApplyLowLightEnhance(dlib::matrix<dlib::rgb_pixel>& chip) {
+void ApplyLowLightEnhance(FrameImage& chip) {
     const long n = static_cast<long>(chip.size());
     if (n == 0) return;
 
@@ -115,7 +114,7 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
 }
 
 std::vector<float> OnnxRecognizer::ComputeEmbedding(
-    const dlib::matrix<dlib::rgb_pixel>& faceChip) {
+    const FrameImage& faceChip) {
     if (!m_initialized) return {};
 
     try {
@@ -124,8 +123,8 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
 
         // InsightFace buffalo_s expects 112x112 RGB, normalized to [-1, 1]
         // First resize to 112x112
-        dlib::matrix<dlib::rgb_pixel> resized(112, 112);
-        dlib::resize_image(faceChip, resized);
+        FrameImage resized(112, 112);
+        ResizeBilinear(faceChip, resized);
 
         // Optional low-light enhancement (config-gated): normalize brightness
         // of dark chips so the embedding isn't distorted by a dark scene.
@@ -177,10 +176,10 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
 }
 
 std::vector<float> OnnxRecognizer::ComputeEmbedding(
-    const dlib::matrix<dlib::rgb_pixel>& image, const float kps[10]) {
+    const FrameImage& image, const float kps[10]) {
     // Align via 5-point similarity transform (InsightFace convention), then
     // ONNX infer. No landmark model involved — SCRFD provides the keypoints.
-    dlib::matrix<dlib::rgb_pixel> faceChip;
+    FrameImage faceChip;
     if (!AlignFace5(image, kps, 112, faceChip)) return {};
     return ComputeEmbedding(faceChip);
 }
@@ -223,7 +222,7 @@ bool OnnxDetector::Initialize(const std::wstring& modelPath) {
     }
 }
 
-std::vector<float> OnnxDetector::Preprocess(const dlib::matrix<dlib::rgb_pixel>& image,
+std::vector<float> OnnxDetector::Preprocess(const FrameImage& image,
                                               float& outScaleX, float& outScaleY) {
     int srcH = static_cast<int>(image.nr());
     int srcW = static_cast<int>(image.nc());
@@ -246,8 +245,8 @@ std::vector<float> OnnxDetector::Preprocess(const dlib::matrix<dlib::rgb_pixel>&
     outScaleX = static_cast<float>(srcW) / static_cast<float>(targetSize);
     outScaleY = static_cast<float>(srcH) / static_cast<float>(targetSize);
 
-    dlib::matrix<dlib::rgb_pixel> resized(targetSize, targetSize);
-    dlib::resize_image(image, resized);
+    FrameImage resized(targetSize, targetSize);
+    ResizeBilinear(image, resized);
 
     // BGR planar NCHW, normalized to [-1, 1] with (pixel - 127.5) / 128.
     // insightface normalizes with 128, NOT 255.
@@ -291,7 +290,7 @@ static inline void DistanceToKps(float cx, float cy,
 }
 
 std::vector<OnnxDetector::Detection> OnnxDetector::Detect(
-    const dlib::matrix<dlib::rgb_pixel>& image) {
+    const FrameImage& image) {
     std::vector<Detection> results;
     if (!m_initialized) return results;
 
@@ -439,7 +438,7 @@ std::vector<OnnxDetector::Detection> OnnxDetector::Detect(
 }
 
 std::optional<OnnxDetector::Detection> OnnxDetector::DetectLargestFace(
-    const dlib::matrix<dlib::rgb_pixel>& image) {
+    const FrameImage& image) {
     auto detections = Detect(image);
     if (detections.empty()) return std::nullopt;
 
@@ -525,8 +524,8 @@ bool MiniFasEvaluator::Initialize(const std::wstring& modelPath, float cropScale
     }
 }
 
-float MiniFasEvaluator::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                                const dlib::rectangle& faceRect) {
+float MiniFasEvaluator::Predict(const FrameImage& image,
+                                const FaceRect& faceRect) {
     if (!m_initialized || !m_session || !m_memoryInfo || image.size() == 0 ||
         faceRect.is_empty() || m_inputHeight <= 0 || m_inputWidth <= 0) {
         return -1.0f;
@@ -565,18 +564,15 @@ float MiniFasEvaluator::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
             bottom = sourceHeight - 1.0;
         }
 
-        const dlib::rectangle cropRect(
+        const FaceRect cropRect(
             std::max(0L, static_cast<long>(left)),
             std::max(0L, static_cast<long>(top)),
             std::min(image.nc() - 1, static_cast<long>(right)),
             std::min(image.nr() - 1, static_cast<long>(bottom)));
         if (cropRect.is_empty()) return -1.0f;
 
-        dlib::matrix<dlib::rgb_pixel> crop;
-        dlib::extract_image_chip(
-            image,
-            dlib::chip_details(cropRect, dlib::chip_dims(m_inputHeight, m_inputWidth)),
-            crop);
+        FrameImage crop;
+        ExtractChip(image, cropRect, m_inputHeight, m_inputWidth, crop);
 
         const size_t plane = static_cast<size_t>(m_inputHeight) *
                              static_cast<size_t>(m_inputWidth);
@@ -652,15 +648,15 @@ bool OnnxAntiSpoof::Initialize(const std::wstring& miniFasV2Path,
     return true;
 }
 
-float OnnxAntiSpoof::Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                             const dlib::rectangle& rect) {
+float OnnxAntiSpoof::Predict(const FrameImage& image,
+                             const FaceRect& rect) {
     if (!m_initialized || !m_miniFasV2 || !m_miniFasV1Se) return -1.0f;
 
     // V2 and V1SE are independent (each owns its own env/session, both pinned to
     // a single intra-op thread, share no mutable state), so they can run
     // concurrently.  This roughly halves the PAD inference portion of each
     // anti-spoof frame.  Both operate on the same input image/rect, which is
-    // only read (dlib::matrix is not mutated by Predict), so the aliasing is
+    // only read (FrameImage is not mutated by Predict), so the aliasing is
     // safe.  std::async with std::launch::async guarantees a real thread.
     auto v2Future = std::async(std::launch::async,
         [&] { return m_miniFasV2->Predict(image, rect); });

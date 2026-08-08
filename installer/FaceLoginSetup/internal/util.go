@@ -117,13 +117,3 @@ func RunCommand(name string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
-
-// DefaultDLLs lists runtime DLLs that must be bundled alongside the service.
-var DefaultDLLs = []string{
-	"openblas.dll",
-	"liblapack.dll",
-	"libgfortran-5.dll",
-	"libquadmath-0.dll",
-	"libgcc_s_seh-1.dll",
-	"libwinpthread-1.dll",
-}

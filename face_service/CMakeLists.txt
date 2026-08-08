@@ -10,7 +10,7 @@ add_executable(FaceLoginService
 
 target_link_libraries(FaceLoginService PRIVATE
     facelogin_common
-    dlib::dlib
+
     onnxruntime::onnxruntime
     mfplat
     mf

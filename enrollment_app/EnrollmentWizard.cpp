@@ -4,7 +4,7 @@
 #include "../common/ipc_protocol.h"
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
-#include "../common/image_utils.h"
+#include "../common/frame_image.h"
 #include <comdef.h>
 #include <shlobj.h>
 #include <wincodec.h>
@@ -364,7 +364,7 @@ bool EnrollmentWizard::StartPreview() {
     // The UI thread stays completely free; JS polls the caches via GetLatest*().
     m_frameThread = std::thread([this]() {
         while (m_frameRunning) {
-            dlib::matrix<dlib::rgb_pixel> frame;
+            FrameImage frame;
             if (!m_webcam->GrabFrame(frame)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
@@ -380,7 +380,7 @@ bool EnrollmentWizard::StartPreview() {
                 if (det) {
                     std::vector<facelogin::FaceWithKps> faces;
                     FaceWithKps fwl;
-                    fwl.rect = dlib::rectangle(static_cast<long>(det->x1),
+                    fwl.rect = FaceRect(static_cast<long>(det->x1),
                                                static_cast<long>(det->y1),
                                                static_cast<long>(det->x2),
                                                static_cast<long>(det->y2));
@@ -466,7 +466,7 @@ static std::string EncodeBase64(const BYTE* data, size_t len) {
     return out;
 }
 
-std::string EnrollmentWizard::EncodeJPEGBase64(const dlib::matrix<dlib::rgb_pixel>& frame) {
+std::string EnrollmentWizard::EncodeJPEGBase64(const FrameImage& frame) {
     if (!m_wicFactory) return {};
 
     int srcW = static_cast<int>(frame.nc());
@@ -657,7 +657,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         // cached camera frame at most once so a stalled preview cannot turn one
         // PAD result into a synthetic 5/5 sequence.
         const auto copyFreshFrame = [this, &lastFrameSequence](
-            dlib::matrix<dlib::rgb_pixel>& output) -> bool {
+            FrameImage& output) -> bool {
             std::lock_guard<std::mutex> lock(m_frameCacheMutex);
             if (m_latestFrame.size() == 0 ||
                 m_latestFrameSequence == lastFrameSequence) {
@@ -683,7 +683,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 auto elapsed = std::chrono::steady_clock::now() - asStart;
                 if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= 8) break;
 
-                dlib::matrix<dlib::rgb_pixel> frame;
+                FrameImage frame;
                 if (!copyFreshFrame(frame)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(33));
                     continue;
@@ -693,7 +693,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(33)); continue; }
 
                 float score = m_antiSpoof->Predict(frame,
-                    dlib::rectangle(static_cast<long>(asDet->x1),
+                    FaceRect(static_cast<long>(asDet->x1),
                                     static_cast<long>(asDet->y1),
                                     static_cast<long>(asDet->x2),
                                     static_cast<long>(asDet->y2)));
@@ -736,7 +736,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         int failCount = 0;
         while (m_angleSampleCounts[angleIndex] < kAngleTargetFrames && m_capturing) {
             // Read the latest frame from the frame-grab thread (no camera contention)
-            dlib::matrix<dlib::rgb_pixel> frame;
+            FrameImage frame;
             if (!copyFreshFrame(frame)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(33));
                 continue;
@@ -762,7 +762,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
             }
 
             const float samplePadScore = m_antiSpoof->Predict(frame,
-                dlib::rectangle(static_cast<long>(onnxDet->x1),
+                FaceRect(static_cast<long>(onnxDet->x1),
                                 static_cast<long>(onnxDet->y1),
                                 static_cast<long>(onnxDet->x2),
                                 static_cast<long>(onnxDet->y2)));
@@ -782,10 +782,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            dlib::matrix<float, 0, 1> emb;
-            emb.set_size(static_cast<long>(onnxEmb.size()));
-            for (size_t k = 0; k < onnxEmb.size(); k++)
-                emb(static_cast<long>(k)) = onnxEmb[k];
+            std::vector<float> emb = onnxEmb;
 
             failCount = 0;
             m_embeddings.push_back(std::move(emb));
@@ -1112,8 +1109,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
                 for (size_t j = i + 1; j < g.begin + g.count; j++) {
                     double sum = 0.0;
                     for (size_t k = 0; k < dim; k++) {
-                        double diff = m_embeddings[i](static_cast<long>(k)) -
-                                      m_embeddings[j](static_cast<long>(k));
+                        double diff = m_embeddings[i][k] - m_embeddings[j][k];
                         sum += diff * diff;
                     }
                     totalDist += std::sqrt(sum);
@@ -1132,22 +1128,17 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
         }
 
         // Average this group's samples. Initialize to the samples'
-        // dimensionality — the matrix adds require matching sizes.
-        dlib::matrix<float, 0, 1> avgEmbedding;
-        avgEmbedding.set_size(static_cast<long>(dim));
-        avgEmbedding = 0;
+        // dimensionality — the vectors require matching sizes.
+        std::vector<float> avgEmbedding(dim, 0.0f);
         for (size_t i = g.begin; i < g.begin + g.count; i++) {
             const auto& emb = m_embeddings[i];
             if (emb.size() != avgEmbedding.size()) continue;  // defensive
-            avgEmbedding += emb;
+            for (size_t k = 0; k < dim; k++) avgEmbedding[k] += emb[k];
         }
-        avgEmbedding /= static_cast<float>(g.count);
+        for (float& v : avgEmbedding) v /= static_cast<float>(g.count);
 
-        // Copy the average embedding into a plain float vector (full
-        // dimensionality — 512-D for ONNX). Never truncate.
-        std::vector<float> ef(static_cast<size_t>(avgEmbedding.size()));
-        for (long i = 0; i < avgEmbedding.size(); i++)
-            ef[static_cast<size_t>(i)] = avgEmbedding(static_cast<long>(i));
+        // Full dimensionality — 512-D for ONNX. Never truncate.
+        std::vector<float> ef = std::move(avgEmbedding);
 
         // create-or-append (1.3.0): the same account may hold several faces.
         // First-time enrollment stores the (protected) password and face #1;

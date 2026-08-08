@@ -9,9 +9,8 @@
 #include <mutex>
 #include <atomic>
 #include <cstdint>
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
 
+#include "../common/frame_image.h"
 #include "../face_service/face_align.h"
 #include "../face_service/liveness_types.h"
 #include "../face_service/onnx_models.h"
@@ -158,7 +157,7 @@ public:
     bool IsPreviewRunning() const { return m_previewRunning; }
 
 private:
-    std::string EncodeJPEGBase64(const dlib::matrix<dlib::rgb_pixel>& frame);
+    std::string EncodeJPEGBase64(const FrameImage& frame);
     std::string FacesToJson(const std::vector<facelogin::FaceWithKps>& faces);
 
     bool SaveEnrollmentImpl(const std::wstring& password, bool passwordless,
@@ -188,14 +187,14 @@ private:
     std::mutex  m_frameCacheMutex;
     std::string m_latestFrameB64;
     std::string m_latestFacesJson;
-    dlib::matrix<dlib::rgb_pixel> m_latestFrame;   // for capture to read
+    FrameImage m_latestFrame;                      // for capture to read
     std::uint64_t m_latestFrameSequence = 0;       // guarded by m_frameCacheMutex
 
     // Preview state
     bool m_previewRunning = false;
 
     // Enrollment state
-    std::vector<dlib::matrix<float, 0, 1>> m_embeddings;
+    std::vector<std::vector<float>> m_embeddings;
     std::atomic<int> m_samplesCollected{0};
     std::atomic<bool> m_capturing{false};
     std::atomic<bool> m_livenessPassed{false};

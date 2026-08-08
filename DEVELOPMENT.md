@@ -4,7 +4,7 @@
 
 ### 1.1 项目简介
 
-FaceLogin 是一个 Windows 人脸识别登录系统，允许用户通过摄像头人脸识别解锁 Windows 桌面。项目基于 Windows Credential Provider 框架实现锁屏/登录界面集成，使用 ONNX Runtime 进行人脸检测（SCRFD）、识别（InsightFace w600k_r50）与活体检测（双 MiniFAS 融合）；dlib 仅保留为图像容器/缩放基础库。
+FaceLogin 是一个 Windows 人脸识别登录系统，允许用户通过摄像头人脸识别解锁 Windows 桌面。项目基于 Windows Credential Provider 框架实现锁屏/登录界面集成，使用 ONNX Runtime 进行人脸检测（SCRFD）、识别（InsightFace w600k_r50）与活体检测（双 MiniFAS 融合）；图像容器/缩放/裁剪为自研 `common/frame_image.h`（v1.6 起 dlib 完全移除）。
 
 ### 1.2 技术栈
 
@@ -40,7 +40,7 @@ FaceLogin 是一个 Windows 人脸识别登录系统，允许用户通过摄像�
 ```
 FaceLogin/
 ├── CMakeLists.txt                  # 根构建文件
-├── vcpkg.json                      # vcpkg 依赖定义 (dlib, onnxruntime)
+├── vcpkg.json                      # vcpkg 依赖定义 (onnxruntime)
 ├── .gitignore
 ├── common/                         # 公共库 (facelogin_common)
 │   ├── CMakeLists.txt
@@ -438,7 +438,7 @@ v1.5 起不再使用 dlib 68 点形状预测器。SCRFD (gnkps 变体) 直接输
 
 ```cpp
 bool EstimateSimilarityTransform(const float src[10], const float dst[10], float out[6]);
-void WarpAffine(const dlib::matrix<dlib::rgb_pixel>& image, const float m[6], int size, ...);
+void WarpAffine(const FrameImage& image, const float m[6], int size, ...);   // FrameImage = common/frame_image.h
 float EstimateYawDeg(const float kps[10]);   // 偏航角估计 (弱透视模型, k=1.86 实测标定)
 ```
 
@@ -833,7 +833,6 @@ v1.5 起不再使用 dlib 68 点形状预测器：SCRFD 直接输出 5 关键点
 
 **vcpkg**:
 ```
-dlib[core]
 onnxruntime
 ```
 

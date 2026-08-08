@@ -294,7 +294,7 @@ bool WebcamCapture::ConfigureReader(int width, int height) {
     return false;
 }
 
-bool WebcamCapture::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
+bool WebcamCapture::GrabFrame(FrameImage& outFrame) {
     if (!m_initialized || !m_pReader) return false;
 
     DWORD streamIndex, flags;
@@ -330,7 +330,7 @@ bool WebcamCapture::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
 }
 
 bool WebcamCapture::ConvertNV12toRGB(IMFSample* pSample,
-                                      dlib::matrix<dlib::rgb_pixel>& outFrame) {
+                                      FrameImage& outFrame) {
     IMFMediaBuffer* pBuffer = nullptr;
     HRESULT hr = pSample->ConvertToContiguousBuffer(&pBuffer);
     if (FAILED(hr)) return false;
@@ -386,7 +386,7 @@ bool WebcamCapture::ConvertNV12toRGB(IMFSample* pSample,
 }
 
 bool WebcamCapture::ConvertYUY2toRGB(IMFSample* pSample,
-                                      dlib::matrix<dlib::rgb_pixel>& outFrame) {
+                                      FrameImage& outFrame) {
     IMFMediaBuffer* pBuffer = nullptr;
     HRESULT hr = pSample->ConvertToContiguousBuffer(&pBuffer);
     if (FAILED(hr)) return false;

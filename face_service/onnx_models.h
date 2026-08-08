@@ -1,8 +1,7 @@
 #pragma once
 
 #include <onnxruntime_cxx_api.h>
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
+#include "../common/frame_image.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -20,7 +19,7 @@ namespace facelogin {
 // Safe by construction: only affects genuinely dark chips; a normal-brightness
 // chip is returned unchanged, so the match threshold and photo-rejection
 // boundary are untouched.
-void ApplyLowLightEnhance(dlib::matrix<dlib::rgb_pixel>& chip);
+void ApplyLowLightEnhance(FrameImage& chip);
 
 // ONNX-based face recognition using InsightFace (w600k_mbf / w600k_r50).
 // Embedding dimension: 512 (auto-detected from the model output).
@@ -33,12 +32,12 @@ public:
 
     // Compute 512-D embedding from a face chip (already aligned, 112x112 RGB).
     // Returns empty vector on failure.
-    std::vector<float> ComputeEmbedding(const dlib::matrix<dlib::rgb_pixel>& faceChip);
+    std::vector<float> ComputeEmbedding(const FrameImage& faceChip);
 
     // Convenience: compute embedding from a full frame + the 5 SCRFD
     // keypoints (source-pixel coordinates). Aligns to 112×112 internally
     // via a similarity transform (see face_align.h).
-    std::vector<float> ComputeEmbedding(const dlib::matrix<dlib::rgb_pixel>& image,
+    std::vector<float> ComputeEmbedding(const FrameImage& image,
                                         const float kps[10]);
 
     bool IsInitialized() const { return m_initialized; }
@@ -74,10 +73,10 @@ public:
     };
 
     // Detect faces. Returns detections sorted by confidence (highest first).
-    std::vector<Detection> Detect(const dlib::matrix<dlib::rgb_pixel>& image);
+    std::vector<Detection> Detect(const FrameImage& image);
 
     // Detect the largest face (by area). Returns nullopt if none found.
-    std::optional<Detection> DetectLargestFace(const dlib::matrix<dlib::rgb_pixel>& image);
+    std::optional<Detection> DetectLargestFace(const FrameImage& image);
 
     bool IsInitialized() const { return m_initialized; }
 
@@ -96,7 +95,7 @@ private:
     // Because the resize DISTORTS non-square frames (e.g. 1280×720 → 640×640),
     // the x and y scales are DIFFERENT. scaleX/scaleY map 640-space back to
     // source pixels: srcX = detX * scaleX, srcY = detY * scaleY.
-    std::vector<float> Preprocess(const dlib::matrix<dlib::rgb_pixel>& image,
+    std::vector<float> Preprocess(const FrameImage& image,
                                    float& outScaleX, float& outScaleY);
 };
 
@@ -112,8 +111,8 @@ public:
     MiniFasEvaluator& operator=(const MiniFasEvaluator&) = delete;
 
     bool Initialize(const std::wstring& modelPath, float cropScale);
-    float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                  const dlib::rectangle& faceRect);
+    float Predict(const FrameImage& image,
+                  const FaceRect& faceRect);
     bool IsInitialized() const { return m_initialized; }
 
 private:
@@ -141,8 +140,8 @@ public:
                     const std::wstring& miniFasV1SePath);
 
     // Returns the 50/50 fused real-face probability, or -1 on any model error.
-    float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                  const dlib::rectangle& rect);
+    float Predict(const FrameImage& image,
+                  const FaceRect& rect);
 
     bool IsInitialized() const { return m_initialized; }
 

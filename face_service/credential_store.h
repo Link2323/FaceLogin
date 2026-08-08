@@ -1,6 +1,5 @@
 #pragma once
 
-#include <dlib/matrix.h>
 #include <string>
 #include <vector>
 #include <optional>

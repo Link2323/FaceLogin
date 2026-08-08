@@ -3,7 +3,7 @@
 #include "webcam_capture_dshow.h"
 #include "logger.h"
 #include "config_util.h"
-#include "image_utils.h"
+#include "frame_image.h"
 #include "registry_util.h"
 
 #include <windows.h>
@@ -32,6 +32,9 @@ using facelogin::OnnxDetector;
 using facelogin::WebcamCapture;
 using facelogin::WebcamCaptureDS;
 using facelogin::MiniFasEvaluator;
+using facelogin::FrameImage;
+using facelogin::FaceRect;
+using facelogin::RgbPixel;
 
 namespace {
 
@@ -254,7 +257,7 @@ std::string UtcNow() {
     return out.str();
 }
 
-std::uint64_t FrameHash(const dlib::matrix<dlib::rgb_pixel>& frame) {
+std::uint64_t FrameHash(const FrameImage& frame) {
     constexpr std::uint64_t offset = 1469598103934665603ULL;
     constexpr std::uint64_t prime = 1099511628211ULL;
     std::uint64_t hash = offset;
@@ -580,16 +583,16 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     if (options.validateModelsOnly) {
-        dlib::matrix<dlib::rgb_pixel> synthetic(480, 640);
+        FrameImage synthetic(480, 640);
         for (long y = 0; y < synthetic.nr(); ++y) {
             for (long x = 0; x < synthetic.nc(); ++x) {
-                synthetic(y, x) = dlib::rgb_pixel(
+                synthetic(y, x) = RgbPixel(
                     static_cast<unsigned char>((x + y) % 256),
                     static_cast<unsigned char>((x * 2 + y) % 256),
                     static_cast<unsigned char>((x + y * 2) % 256));
             }
         }
-        const dlib::rectangle testRect(220, 90, 420, 390);
+        const FaceRect testRect(220, 90, 420, 390);
         const float productionScore = pad.Predict(synthetic, testRect);
         const float v2Score = miniV2.Predict(synthetic, testRect);
         const float v1SeScore = miniV1Se.Predict(synthetic, testRect);
@@ -646,7 +649,7 @@ int wmain(int argc, wchar_t* argv[]) {
             ? cameraDs.Initialize(1280, 720, options.cameraDevice)
             : cameraMf.Initialize(1280, 720, options.cameraDevice);
     };
-    const auto grabFrame = [&](dlib::matrix<dlib::rgb_pixel>& output) {
+    const auto grabFrame = [&](FrameImage& output) {
         return options.cameraBackend == L"ds"
             ? cameraDs.GrabFrame(output)
             : cameraMf.GrabFrame(output);
@@ -670,7 +673,7 @@ int wmain(int argc, wchar_t* argv[]) {
                << L"Output: " << options.output << L"\n"
                << L"Keep exactly one face in view. Starting warm-up...\n";
 
-    dlib::matrix<dlib::rgb_pixel> frame;
+    FrameImage frame;
     int warmed = 0;
     const auto warmupDeadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(std::min(options.maxSeconds, 30));
@@ -738,7 +741,7 @@ int wmain(int argc, wchar_t* argv[]) {
             continue;
         }
 
-        const dlib::rectangle rect(
+        const FaceRect rect(
             static_cast<long>(detection->x1), static_cast<long>(detection->y1),
             static_cast<long>(detection->x2), static_cast<long>(detection->y2));
         PadScores scores{pad.Predict(frame, rect), nan, nan, nan};

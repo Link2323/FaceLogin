@@ -474,7 +474,7 @@ void WebcamCaptureDS::Pause() {
     }
 }
 
-bool WebcamCaptureDS::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
+bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame) {
     if (!m_initialized) return false;
 
     EnterCriticalSection(&m_frameCs);
@@ -489,10 +489,10 @@ bool WebcamCaptureDS::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
 
     // DirectShow RGB24 is bottom-up (biHeight > 0 in VIDEOINFOHEADER
     // means the first scan line is the bottom of the image).
-    // dlib::matrix uses top-down indexing, so we flip vertically.
+    // FrameImage uses top-down indexing, so we flip vertically.
     //
     // DShow RGB24 byte order: B, G, R
-    // dlib rgb_pixel struct order: red, green, blue → mem layout = R, G, B
+    // RgbPixel struct order: red, green, blue → mem layout = R, G, B
     // → need to swap R↔B
 
     const BYTE* src = m_frameBuffer;
@@ -501,7 +501,7 @@ bool WebcamCaptureDS::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
         const BYTE* srcRowPtr = src + srcRow * stride;
         for (int col = 0; col < m_width; col++) {
             const BYTE* pixel = srcRowPtr + col * 3;
-            dlib::rgb_pixel& dst = outFrame(row, col);
+            RgbPixel& dst = outFrame(row, col);
             dst.red   = pixel[2];   // byte 2 of BGR = R
             dst.green = pixel[1];   // byte 1 of BGR = G
             dst.blue  = pixel[0];   // byte 0 of BGR = B

@@ -3,7 +3,7 @@
 #include "../common/ipc_protocol.h"
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
-#include "../common/image_utils.h"
+#include "../common/frame_image.h"
 #include "../common/sha256_util.h"
 #include <shlobj.h>
 #include <chrono>
@@ -786,7 +786,7 @@ bool FaceService::ProcessAuthRequest() {
     // applied in the match loop, leaving the liveness/verify stages to process
     // unrotated frames — with 90/270 rotation the face was sideways there and
     // detection/landmarks/EAR failed, blocking unlock.
-    auto grabFrame = [this](dlib::matrix<dlib::rgb_pixel>& f) -> bool {
+    auto grabFrame = [this](FrameImage& f) -> bool {
         bool ok = m_isServiceMode ? m_webcamDS->GrabFrame(f)
                                   : (m_webcamMF ? m_webcamMF->GrabFrame(f) : false);
         if (ok) RotateFrame(f, m_config.camera_rotation);
@@ -806,7 +806,7 @@ bool FaceService::ProcessAuthRequest() {
     // first kept frame); 5 frames × 50ms was over-conservative. 3 frames × 20ms
     // saves ~0.2s per auth with no accuracy regression (see
     // docs/performance-baseline.md experiment 3).
-    dlib::matrix<dlib::rgb_pixel> frame;
+    FrameImage frame;
     for (int i = 0; i < 3; i++) {
         grabFrame(frame);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -885,7 +885,7 @@ bool FaceService::ProcessAuthRequest() {
                     // bindings while staying inside the 8s window.
                     bool anchored = false;    // first anchor landed (identity locked)?
                     bool havePrevRect = false;
-                    dlib::rectangle prevRect; // last counted frame's face box
+                    FaceRect prevRect; // last counted frame's face box
                     int consensusCount = 0;   // anchor + mid + final = 3 bindings
                     while (m_running && totalChecked < totalChecks) {
                         if (m_pipeServer->IsClientDisconnected()) {
@@ -908,14 +908,14 @@ bool FaceService::ProcessAuthRequest() {
                         auto asElapsed = std::chrono::steady_clock::now() - asStart;
                         if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 8) break;
 
-                        dlib::matrix<dlib::rgb_pixel> asFrame;
+                        FrameImage asFrame;
                         if (!grabFrame(asFrame)) { if (!m_running) break; std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
 
                         // MiniFASNet consumes expanded crops around the SCRFD bbox.
                         auto asDet = m_onnxDetector->DetectLargestFace(asFrame);
                         if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
 
-                        const dlib::rectangle faceRect(
+                        const FaceRect faceRect(
                             static_cast<long>(asDet->x1), static_cast<long>(asDet->y1),
                             static_cast<long>(asDet->x2), static_cast<long>(asDet->y2));
 

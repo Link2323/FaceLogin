@@ -4,8 +4,6 @@ project(FaceLogin VERSION 1.4.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find dlib (used by face_service and enrollment_app, NOT by credential_provider)
-find_package(dlib CONFIG REQUIRED)
 find_package(onnxruntime CONFIG REQUIRED)
 
 # Global compile definitions

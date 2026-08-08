@@ -4,7 +4,6 @@
     "description": "Custom face recognition login for Windows 11",
     "homepage": "https://github.com/your-org/facelogin",
     "dependencies": [
-        "dlib",
         "onnxruntime"
     ]
 }

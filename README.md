@@ -165,15 +165,15 @@ FaceLogin/
 ### 前置条件
 
 - **Visual Studio 2022**（含 C++ 工作负载）
-- **vcpkg** — dlib（图像容器/缩放基础库）、onnxruntime
+- **vcpkg** — onnxruntime（v1.6 起 dlib 已完全移除，图像容器/缩放/裁剪为自研 `common/frame_image.h`）
 - **Go 1.21+** + **Wails v2**（仅安装程序）
 - **CMake 3.20+**
 
 ### C++ 组件
 
 ```powershell
-# vcpkg 依赖（dlib 仅作图像容器/缩放基础库；人脸检测/识别/活体全部用 ONNX）
-vcpkg install dlib[core] onnxruntime --triplet x64-windows
+# vcpkg 依赖（人脸检测/识别/活体全部用 ONNX；图像容器/缩放/裁剪见 common/frame_image.h）
+vcpkg install onnxruntime --triplet x64-windows
 
 # 构建（VS 2022）
 cmake -B build -S . -G "Visual Studio 17 2022" `
@@ -200,7 +200,8 @@ wails build -clean -platform windows/amd64
 | `MiniFASNetV2.onnx` | 静默反欺诈（2.7× 裁剪） | `assets/models/`；构建时复制到安装包 |
 | `MiniFASNetV1SE.onnx` | 静默反欺诈（4.0× 裁剪） | `assets/models/`；构建时复制到安装包 |
 
-> v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）；dlib 仅保留为图像容器/缩放基础库。
+> v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）。
+> v1.6 起 dlib 完全移除：图像容器/缩放/裁剪由 `common/frame_image.h` 自研实现（双线性缩放 + 高斯金字塔裁剪，与 dlib 算法逐像素等价），vcpkg 依赖仅剩 onnxruntime。
 > `installer/FaceLoginSetup/resources/models/` 为构建生成目录，不作为模型源维护。
 
 ---

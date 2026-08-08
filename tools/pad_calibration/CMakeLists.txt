@@ -7,7 +7,7 @@ add_executable(PadCalibration
 
 target_link_libraries(PadCalibration PRIVATE
     facelogin_common
-    dlib::dlib
+
     onnxruntime::onnxruntime
     mfplat
     mf
