@@ -6,6 +6,7 @@
 #include "../common/frame_image.h"
 #include "../common/sha256_util.h"
 #include "../common/data_path.h"
+#include "../common/secure_clear.h"
 #include <shlobj.h>
 #include <chrono>
 #include <thread>
@@ -51,16 +52,8 @@ static std::wstring Utf8ToWstr(const std::string& s) {
 }
 
 static void SecureClearMatchPassword(std::optional<CredentialStore::MatchResult>& match) {
-    if (match && !match->password.empty()) {
-        SecureZeroMemory(match->password.data(), match->password.size() * sizeof(wchar_t));
-        match->password.clear();
-    }
-}
-
-static void SecureClearWideString(std::wstring& value) {
-    if (!value.empty()) {
-        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
-        value.clear();
+    if (match) {
+        SecureClearWString(match->password);
     }
 }
 
@@ -1127,7 +1120,7 @@ bool FaceService::ProcessAuthRequest() {
                 domain, lockedMatch->username, lockedMatch->password);
             bool writeOk = m_pipeServer->WriteMessage(msg);
             FlushFileBuffers(m_pipeServer->GetHandle());
-            SecureClearWideString(msg);
+            SecureClearWString(msg);
             SecureClearMatchPassword(lockedMatch);
 
             if (!writeOk) {

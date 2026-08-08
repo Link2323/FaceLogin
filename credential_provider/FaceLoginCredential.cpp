@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
+#include "../common/secure_clear.h"
 #include <wincred.h>
 #include <ntstatus.h>
 #include <ntsecapi.h>
@@ -165,7 +166,7 @@ FaceLoginCredential::FaceLoginCredential() {
 
 FaceLoginCredential::~FaceLoginCredential() {
     // SENSITIVE: Zero the password from memory
-    SecureZeroMemory(m_password.data(), m_password.size() * sizeof(wchar_t));
+    facelogin::SecureClearWString(m_password);
 
     // Stop the background input-detection thread before tearing down any state
     // it touches. COM release order does not guarantee UnAdvise (which also
@@ -799,6 +800,14 @@ void FaceLoginCredential::StopInputDetectionThread() {
 HRESULT FaceLoginCredential::PackCredentials(
     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs) {
 
+    // RAII: guarantee m_password is zeroed on EVERY return path, including
+    // the three early-returns below (CredPack query failure / OOM / pack
+    // failure). Previously only the success path cleared it, so a packing
+    // failure left plaintext in the member wstring until the destructor —
+    // and LogonUI re-polls GetSerialization, so the password sat there for
+    // the credential's lifetime (security #9).
+    facelogin::SecureWStringGuard pwdGuard(m_password);
+
     FACELOGIN_INFO(L"Packing credentials for: %s\\%s (UPN=%s)",
                   m_domain.c_str(), m_username.c_str(),
                   m_upn.empty() ? L"<none>" : m_upn.c_str());
@@ -872,8 +881,8 @@ HRESULT FaceLoginCredential::PackCredentials(
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    // CRITICAL: Zero the password immediately after packing
-    SecureZeroMemory(pwzPassword, m_password.size() * sizeof(wchar_t));
+    // Password clearing is handled by pwdGuard on return (success path
+    // included) — no manual SecureZeroMemory needed here.
 
     pcpcs->rgbSerialization = pPackedCreds;
     pcpcs->cbSerialization = cbPackedCreds;
