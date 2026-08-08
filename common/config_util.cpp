@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
 
 namespace facelogin {
 
@@ -123,7 +124,6 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "  "; jsonWriteString(ss, "liveness_method"); ss << ": "; jsonWriteString(ss, LivenessMethodToString(cfg.liveness_method)); ss << ",\n";
     ss << "  "; jsonWriteString(ss, "match_threshold"); ss << ": " << cfg.match_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "anti_spoof_threshold"); ss << ": " << cfg.anti_spoof_threshold << ",\n";
-    ss << "  "; jsonWriteString(ss, "blink_glasses_mode"); ss << ": " << (cfg.blink_glasses_mode ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_rotation"); ss << ": " << cfg.camera_rotation << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << "\n";
@@ -139,9 +139,28 @@ AppConfig ConfigFromJson(const std::string& json) {
     if (!det.empty()) cfg.detector = det;
     auto live = jsonGetString(json, "liveness_method");
     if (!live.empty()) cfg.liveness_method = LivenessMethodFromString(live);
-    cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.30f);
-    cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.30f);
-    cfg.blink_glasses_mode = (jsonGetString(json, "blink_glasses_mode") == "true");
+    cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.80f);
+    // UI permits [0.70, 1.00] for 512-D (calibrated band; see
+    // docs/threshold-calibration.md). Enforce here too because config.json
+    // can be hand-edited. EmbeddingThresholdForDim re-clamps at match time,
+    // but bounding at load keeps the persisted value honest and the log clean.
+    if (!std::isfinite(cfg.match_threshold) ||
+        cfg.match_threshold < 0.70f || cfg.match_threshold > 1.00f) {
+        FACELOGIN_WARN(L"Unsafe match_threshold=%.3f; enforcing calibrated default 0.80",
+                       cfg.match_threshold);
+        cfg.match_threshold = 0.80f;
+    }
+    cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.281f);
+    // The UI only permits [0.281, 0.50]. Enforce the same range in the
+    // security boundary because config.json can also be edited by hand.
+    // In particular, a negative threshold would make Predict()'s -1 error
+    // sentinel pass the comparison and turn an inference failure into success.
+    if (!std::isfinite(cfg.anti_spoof_threshold) ||
+        cfg.anti_spoof_threshold < 0.281f || cfg.anti_spoof_threshold > 0.50f) {
+        FACELOGIN_WARN(L"Unsafe anti_spoof_threshold=%.3f; enforcing calibrated default 0.281",
+                       cfg.anti_spoof_threshold);
+        cfg.anti_spoof_threshold = 0.281f;
+    }
     cfg.low_light_enhance = (jsonGetString(json, "low_light_enhance") == "true");
     int rotation = jsonGetInt(json, "camera_rotation", 0);
     // Only accept 0/90/180/270; anything else silently does nothing in
@@ -173,7 +192,7 @@ AppConfig LoadConfig(const std::wstring& dataDir) {
         FACELOGIN_INFO(L"No config.json found, using defaults + registry");
         AppConfig cfg = DefaultConfig();
         // Fall back to registry match threshold if set
-        float regThresh = 0.30f;
+        float regThresh = 0.80f;
         HKEY hKey;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, FACELOGIN_REG_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             DWORD val = 0, size = sizeof(val);
@@ -224,13 +243,20 @@ std::string LivenessMethodToString(LivenessMethod m) {
         case LivenessMethod::AntiSpoof: return "antispoof";
         case LivenessMethod::None:      return "none";
     }
-    return "blink";
+    return "antispoof"; // unreachable — all enum values covered; kept consistent with the default
 }
 
 LivenessMethod LivenessMethodFromString(const std::string& s) {
+    if (s == "blink")     return LivenessMethod::Blink;      // legacy v1.4 value; callers map it to anti-spoof with a warning
     if (s == "antispoof") return LivenessMethod::AntiSpoof;
-    if (s == "none")      return LivenessMethod::None;
-    return LivenessMethod::Blink; // default
+    if (s == "none") {
+        // Production authentication is fail-closed.  Preserve compatibility
+        // with old configs by migrating the former opt-out to anti-spoof
+        // instead of silently allowing password release without liveness.
+        FACELOGIN_WARN(L"liveness_method=none is no longer permitted; using anti-spoof");
+        return LivenessMethod::AntiSpoof;
+    }
+    return LivenessMethod::AntiSpoof; // default for unknown/misspelled values (matches DefaultConfig; blink removed in v1.5)
 }
 
 } // namespace facelogin

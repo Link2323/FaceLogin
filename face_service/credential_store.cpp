@@ -82,15 +82,6 @@ std::wstring CredentialStore::GetDataDir() const {
     return L"C:\\ProgramData\\FaceLogin";
 }
 
-bool CredentialStore::EnsureDataDir() {
-    std::wstring dir = GetDataDir();
-    if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
-        return true;
-    }
-    FACELOGIN_ERROR(L"Failed to create data directory: %s", dir.c_str());
-    return false;
-}
-
 bool CredentialStore::LoadDatabase() {
     std::wstring path = GetDataDir() + L"\\data\\users.dat";
     m_users.clear();
@@ -385,9 +376,17 @@ bool CredentialStore::AddFace(const std::wstring& username,
                            username.c_str(), rec.faces.size(), kMaxFacesPerUser);
             return false;
         }
+        // Reuse the smallest free id so ids stay compact (1..N) after
+        // deletions — otherwise deleting #2 and re-adding leaves gaps like
+        // #1,#3,#4. (Multi-angle replace already restarts ids at 1 after
+        // ClearFacesForAccount, so "never reuse" was never a real invariant.)
         uint32_t newId = 1;
-        for (const auto& f : rec.faces) {
-            if (f.id >= newId) newId = f.id + 1;
+        bool taken = true;
+        while (taken) {
+            taken = false;
+            for (const auto& f : rec.faces) {
+                if (f.id == newId) { taken = true; newId++; break; }
+            }
         }
         FaceRecord face;
         face.id = newId;
@@ -406,6 +405,11 @@ bool CredentialStore::AddFace(const std::wstring& username,
     }
 
     // Account not found → create it with the given password and first face.
+    if (m_users.size() >= kMaxUsers) {
+        FACELOGIN_WARN(L"AddFace rejected: database has %zu users (max %zu)",
+                       m_users.size(), kMaxUsers);
+        return false;
+    }
     UserRecord rec;
     rec.username = username;
     rec.upn = upn;
@@ -421,14 +425,6 @@ bool CredentialStore::AddFace(const std::wstring& username,
     FACELOGIN_INFO(L"Created user %s with first face (SID=%s, emb=%zu-D)",
                    username.c_str(), sid.c_str(), embedding.size());
     return true;
-}
-
-bool CredentialStore::AddUser(const std::wstring& username,
-                               const std::wstring& upn,
-                               const std::wstring& sid,
-                               const std::vector<uint8_t>& encryptedPassword,
-                               const std::vector<float>& embedding) {
-    return AddFace(username, upn, sid, encryptedPassword, embedding);
 }
 
 bool CredentialStore::UpdateAccountIdentity(size_t idx,
@@ -503,6 +499,19 @@ bool CredentialStore::ClearAllFaces(const std::wstring& sid) {
     return DeleteUserBySid(sid);
 }
 
+bool CredentialStore::ClearFacesForAccount(const std::wstring& sid) {
+    size_t idx = FindUserIndex(sid, L"", L"");
+    if (idx >= m_users.size()) {
+        FACELOGIN_WARN(L"ClearFacesForAccount: account not found (SID=%s)", sid.c_str());
+        return false;
+    }
+    size_t removed = m_users[idx].faces.size();
+    m_users[idx].faces.clear();
+    FACELOGIN_INFO(L"Cleared %zu face(s) from %s (SID=%s), account identity preserved",
+                   removed, m_users[idx].username.c_str(), sid.c_str());
+    return true;
+}
+
 bool CredentialStore::DeleteUserBySid(const std::wstring& sid) {
     size_t idx = FindUserIndex(sid, L"", L"");
     if (idx >= m_users.size()) {
@@ -513,20 +522,6 @@ bool CredentialStore::DeleteUserBySid(const std::wstring& sid) {
     m_users.erase(m_users.begin() + static_cast<ptrdiff_t>(idx));
     FACELOGIN_INFO(L"Deleted user %s (SID=%s)", username.c_str(), sid.c_str());
     return true;
-}
-
-bool CredentialStore::DeleteUser(const std::wstring& username) {
-    auto it = std::remove_if(m_users.begin(), m_users.end(),
-        [&username](const UserRecord& r) { return r.username == username; });
-
-    if (it != m_users.end()) {
-        m_users.erase(it, m_users.end());
-        FACELOGIN_INFO(L"Deleted user: %s", username.c_str());
-        return true;
-    }
-
-    FACELOGIN_WARN(L"User not found for deletion: %s", username.c_str());
-    return false;
 }
 
 bool CredentialStore::RenameFace(const std::wstring& sid, uint32_t faceId,
@@ -564,13 +559,11 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     // the best/second-best ratio.
     float bestDist = 1e10f, secondBestDist = 1e10f;
     size_t bestIdx = m_users.size();
-    uint32_t bestFaceId = 0;
     size_t comparableAccounts = 0;
 
     for (size_t i = 0; i < m_users.size(); i++) {
         const auto& faces = m_users[i].faces;
         float accountBest = 1e10f;
-        uint32_t faceBestId = 0;
 
         for (const auto& face : faces) {
             // Skip stored embeddings that don't match the probe's dimensionality.
@@ -587,7 +580,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
 
             if (dist < accountBest) {
                 accountBest = dist;
-                faceBestId = face.id;
             }
         }
 
@@ -598,7 +590,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
             secondBestDist = bestDist;
             bestDist = accountBest;
             bestIdx = i;
-            bestFaceId = faceBestId;
         } else if (accountBest < secondBestDist) {
             secondBestDist = accountBest;
         }
@@ -613,10 +604,10 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
         return std::nullopt;
     }
 
-    // The base threshold is dlib-calibrated. For 512-D ONNX embeddings,
-    // EmbeddingThresholdForDim returns 0.80, measured to separate same-person
-    // (0.14–0.80) from other-person photos (0.94–0.99). For 128-D dlib it
-    // returns the base unchanged.
+    // The base threshold comes from config (default 0.80). For 512-D ONNX,
+    // EmbeddingThresholdForDim honors it inside the calibrated band [0.70,
+    // 1.00] and clamps outside values to that band — see credential_store.h.
+    // For 128-D dlib it returns the base unchanged.
     // (DEBUG level: this runs on every frame and would spam the log.)
     float effThreshold = EmbeddingThresholdForDim(threshold, probeDim);
     if (effThreshold != threshold) {
@@ -641,8 +632,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     if (bestDist < effThreshold) {
         MatchResult best;
         best.distance = bestDist;
-        best.matchedFaceId = bestFaceId;
-        best.accountFaceCount = m_users[bestIdx].faces.size();
         best.upn = m_users[bestIdx].upn;
         best.sid = m_users[bestIdx].sid;
         best.username = m_users[bestIdx].username;

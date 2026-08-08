@@ -89,6 +89,15 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	a.emit(0, "开始安装", "running", "")
 	installDir = filepath.Clean(installDir)
 
+	// Validate the complete, exact model set before stopping a working prior
+	// installation. This also detects a corrupted installer payload early.
+	a.emit(0, "校验安装资源", "running", "")
+	if err = internal.ValidateEmbeddedResources(); err != nil {
+		a.emit(0, "校验安装资源", "fail", err.Error())
+		return result(false, fmt.Sprintf("安装资源校验失败: %v", err))
+	}
+	a.emit(0, "校验安装资源", "done", "")
+
 	// Step 1: Stop and delete existing service
 	a.emit(0, "停止并删除已有服务", "running", "")
 	if err = internal.StopAndDeleteService(); err != nil {
@@ -103,22 +112,36 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	}
 	a.emit(25, "创建目标目录", "done", "")
 
+	// Protect the root before writing executable/model bytes into it. Files
+	// extracted below inherit only SYSTEM/Administrators write access, closing
+	// the replacement window that would exist if ACLs were applied afterwards.
+	a.emit(25, "设置数据目录权限", "running", "")
+	if err = internal.SetDirectoryACL(installDir); err != nil {
+		a.emit(25, "设置数据目录权限", "fail", err.Error())
+		return result(false, fmt.Sprintf("设置安装目录安全权限失败: %v", err))
+	}
+	a.emit(30, "设置数据目录权限", "done", "")
+
 	// Step 3: Write registry paths — DataPath is the install dir itself, C++ appends \models
-	a.emit(25, "配置注册表路径", "running", "")
+	a.emit(30, "配置注册表路径", "running", "")
 	if err = internal.WriteRegString(REGVAL_INSTALL_PATH, installDir); err != nil {
 		return result(false, fmt.Sprintf("写入安装路径失败: %v", err))
 	}
 	if err = internal.WriteRegString(REGVAL_DATA_PATH, installDir); err != nil {
 		return result(false, fmt.Sprintf("写入数据路径失败: %v", err))
 	}
-	a.emit(30, "配置注册表路径", "done", "")
+	a.emit(35, "配置注册表路径", "done", "")
 
 	// Step 4: Extract all embedded resources
-	a.emit(30, "复制文件", "running", "")
+	a.emit(35, "复制文件", "running", "")
 	if err = internal.ExtractAll(installDir, func(step, total int, name string) {
-		a.emit(30+step*30/total, "复制文件", "running", name)
+		a.emit(35+step*25/total, "复制文件", "running", name)
 	}); err != nil {
 		return result(false, fmt.Sprintf("复制文件失败: %v", err))
+	}
+	if err = internal.ValidateInstalledModels(installDir); err != nil {
+		a.emit(30, "校验已复制模型", "fail", err.Error())
+		return result(false, fmt.Sprintf("模型文件校验失败: %v", err))
 	}
 	// Step 4.5: Create data/ and log/ directories, ensure config.json defaults
 	dataDir := filepath.Join(installDir, "data")
@@ -137,13 +160,14 @@ func (a *App) Install(installDir string) map[string]interface{} {
 
 	a.emit(60, "复制文件", "done", "")
 
-	// Step 5: Set data directory ACL
-	a.emit(60, "设置数据目录权限", "running", "")
+	// Re-apply recursively as a postcondition in case an extracted resource
+	// carried or acquired an unexpected explicit ACL.
+	a.emit(60, "验证目录权限", "running", "")
 	if err = internal.SetDirectoryACL(installDir); err != nil {
-		a.emit(60, "设置数据目录权限", "warn", err.Error())
-	} else {
-		a.emit(67, "设置数据目录权限", "done", "")
+		a.emit(60, "验证目录权限", "fail", err.Error())
+		return result(false, fmt.Sprintf("设置安装目录安全权限失败: %v", err))
 	}
+	a.emit(67, "验证目录权限", "done", "")
 
 	// Step 6: Register COM DLL
 	a.emit(67, "注册登录组件", "running", "")
@@ -230,14 +254,34 @@ func (a *App) Uninstall() map[string]interface{} {
 		a.emit(70, "删除程序文件", "done", "")
 	}
 
-	// Step 4: Clean registry
-	a.emit(70, "清理注册表", "running", "")
-	_ = internal.DeleteRegValue(REGVAL_INSTALL_PATH)
-	_ = internal.DeleteRegValue(REGVAL_DATA_PATH)
-	a.emit(85, "清理注册表", "done", "")
+	// Step 4: Remove shared runtime data under %ProgramData%\FaceLogin
+	// (config.json, enrolled face database users.dat, logs, model cache). The
+	// installer points DataPath at the install dir, so this directory only
+	// exists when an older release used it as the default or the app ran
+	// standalone — but on such machines it holds real data that must not
+	// survive a full uninstall. Done before the registry key is deleted so the
+	// data path is still resolvable if this ever switches back to registry.
+	a.emit(70, "删除运行数据", "running", "")
+	removedData, dataErr := internal.RemoveProgramData()
+	if dataErr != nil {
+		a.emit(80, "删除运行数据", "warn",
+			"部分运行数据删除失败，将在重启后清除。")
+	} else if removedData {
+		a.emit(80, "删除运行数据", "done", "已删除运行数据目录。")
+	} else {
+		a.emit(80, "删除运行数据", "done", "无运行数据目录。")
+	}
 
-	// Step 5: Notify complete
-	a.emit(85, "完成", "running", "")
+	// Step 5: Clean registry — remove the whole HKLM\SOFTWARE\FaceLogin key.
+	// The service and credential provider write runtime values
+	// (ServiceStartUptime, UserLoggedIn) that the installer never created, so
+	// deleting only InstallPath/DataPath would leave the key behind.
+	a.emit(80, "清理注册表", "running", "")
+	_ = internal.DeleteRegKey()
+	a.emit(90, "清理注册表", "done", "")
+
+	// Step 6: Notify complete
+	a.emit(90, "完成", "running", "")
 	a.emit(100, "完成", "done",
 		"卸载完成，程序文件、人脸数据和日志已全部删除。")
 

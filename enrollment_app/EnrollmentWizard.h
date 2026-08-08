@@ -7,11 +7,11 @@
 #include <memory>
 #include <thread>
 #include <mutex>
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
+#include <atomic>
+#include <cstdint>
 
-#include "../face_service/face_detector.h"
-#include "../face_service/liveness_detector.h"
+#include "../common/frame_image.h"
+#include "../face_service/face_align.h"
 #include "../face_service/liveness_types.h"
 #include "../face_service/onnx_models.h"
 #include "../face_service/webcam_capture.h"
@@ -32,12 +32,23 @@ public:
 
     bool StartPreview();
     void StopPreview();
-    int  GetSampleCount() const { return m_samplesCollected; }
+    int  GetSampleCount() const { return m_samplesCollected.load(); }
     std::string GetUsername() const;
     std::string GetUserSid() const;
-    std::string GetUserUpn() const;
     std::string GetAccountType() const { return m_accountType; }
-    bool CaptureFaceSamples();          // blocking: captures 10 samples
+    // Blocking multi-angle capture for one head-yaw position:
+    //   0 = front (0°), 1 = left (+30°), 2 = right (−30°).
+    // Each call collects 5 yaw-gated frames (|yaw − target| ≤ 10°, face ≥ 60px,
+    // detection score ≥ 0.5); JS drives 0 → 1 → 2 in sequence. Angle 0 also
+    // runs the liveness check first. Frames accumulate across calls (flat
+    // m_embeddings, grouped in angle order), so SaveEnrollment can create one
+    // face record per angle without ever averaging across angles.
+    bool CaptureFaceSamples(int angleIndex);
+    // Capture progress for the JS UI:
+    // {"angle":0,"label":"正面","targetYaw":0,"collected":3,"target":5,
+    //  "yaw":12.3,"total":8,"livenessChecking":false,"livenessPassed":true,
+    //  "done":false}
+    std::string GetCaptureStatus();
     bool IsLivenessPassed() const { return m_livenessPassed; }
     bool IsLivenessChecking() const { return m_livenessChecking; }
     bool ValidatePassword(const std::wstring& password);
@@ -105,6 +116,23 @@ public:
     // non-empty password. Returns false unless the record is in state 1.
     bool ClearStaleAccountUpn();
 
+    // One-shot startup repair: if the current session is an MSA (per
+    // ResolveSessionUpn) but the stored record for THIS session's SID still
+    // has an empty UPN, write the resolved MSA email in place — preserving
+    // username, SID, faces and the stored (already DPAPI-encrypted) password.
+    //
+    // Scope is deliberately narrow: only the current session user's own
+    // record, and only when its UPN is empty. A non-empty but DIFFERENT UPN
+    // may be a genuine re-binding (a user who switched Microsoft accounts) and
+    // is left to RefreshAccountIdentity, which requires a password check.
+    //
+    // Without this, accounts enrolled while GetUserNameExW returned 1332
+    // (no UPN) carry an empty UPN forever: the lock-screen credential then
+    // packs with domain\username instead of routing through CloudAP, and
+    // GetAccountTypeChanged keeps flagging a phantom local→MSA conversion.
+    // Returns true iff a record was actually modified.
+    bool AutoRepairEmptyUpnOnStartup();
+
     // Configuration
     std::string GetConfig() const;
     bool SetConfig(const std::string& json);
@@ -127,11 +155,10 @@ public:
     std::string GetLatestFrameAndFaces();
 
     bool IsPreviewRunning() const { return m_previewRunning; }
-    std::wstring GetDataDir() const { return m_dataDir; }
 
 private:
-    std::string EncodeJPEGBase64(const dlib::matrix<dlib::rgb_pixel>& frame);
-    std::string FacesToJson(const std::vector<facelogin::FaceWithLandmarks>& faces);
+    std::string EncodeJPEGBase64(const FrameImage& frame);
+    std::string FacesToJson(const std::vector<facelogin::FaceWithKps>& faces);
 
     bool SaveEnrollmentImpl(const std::wstring& password, bool passwordless,
                             const std::wstring& label);
@@ -139,20 +166,19 @@ private:
 
     // Camera & face processing
     std::unique_ptr<WebcamCapture>  m_webcam;
-    std::unique_ptr<FaceDetector>   m_detector;       // 68-point shape predictor
-    std::unique_ptr<OnnxDetector>   m_onnxDetector;   // SCRFD detection
+    std::unique_ptr<OnnxDetector>   m_onnxDetector;   // SCRFD detection (+5 keypoints)
     std::unique_ptr<OnnxRecognizer> m_onnxRecognizer; // InsightFace recognition
     std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;
     CredentialStore m_store;
 
     // Configuration
     AppConfig m_config;
-    LivenessMethod m_livenessMethod = LivenessMethod::Blink;
-    float m_antiSpoofThreshold = 0.30f;
+    LivenessMethod m_livenessMethod = LivenessMethod::AntiSpoof;
+    float m_antiSpoofThreshold = 0.281f;
 
     // Frame-grab thread (runs off UI thread — GrabFrame + JPEG encode + detection)
     std::thread m_frameThread;
-    bool m_frameRunning = false;
+    std::atomic<bool> m_frameRunning{false};
 
     // WIC factory (created once)
     IWICImagingFactory* m_wicFactory = nullptr;
@@ -161,19 +187,28 @@ private:
     std::mutex  m_frameCacheMutex;
     std::string m_latestFrameB64;
     std::string m_latestFacesJson;
-    dlib::matrix<dlib::rgb_pixel> m_latestFrame;   // for capture to read
+    FrameImage m_latestFrame;                      // for capture to read
+    std::uint64_t m_latestFrameSequence = 0;       // guarded by m_frameCacheMutex
 
     // Preview state
     bool m_previewRunning = false;
 
     // Enrollment state
-    std::vector<dlib::matrix<float, 0, 1>> m_embeddings;
-    int m_samplesCollected = 0;
-    bool m_capturing = false;
-    bool m_livenessPassed = false;
-    bool m_livenessChecking = false;
+    std::vector<std::vector<float>> m_embeddings;
+    std::atomic<int> m_samplesCollected{0};
+    std::atomic<bool> m_capturing{false};
+    std::atomic<bool> m_livenessPassed{false};
+    std::atomic<bool> m_livenessChecking{false};
     std::thread m_captureThread;
-    static constexpr int TARGET_SAMPLES = 10;
+
+    // Multi-angle enrollment state (v1.5): per-angle sample counts (the flat
+    // m_embeddings vector is grouped in angle order), current angle, and the
+    // latest yaw estimate for the live UI readout.
+    std::atomic<int> m_angleSampleCounts[3] = {0, 0, 0};
+    std::atomic<int> m_captureAngle{0};
+    std::atomic<float> m_lastYaw{0.0f};
+    static constexpr int kAngleTargetFrames = 5;
+    static constexpr int kAngleTargets[3] = {0, 30, -30};  // 正面 / 左转 / 右转
 
     std::wstring m_username;
     std::wstring m_upn;       // UserPrincipalName (e.g. "john@outlook.com") or empty for local

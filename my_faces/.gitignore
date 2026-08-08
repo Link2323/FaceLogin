@@ -1,0 +1,4 @@
+# 人脸照片是私人生物特征数据，绝不提交仓库。
+# 这是标定用的本地数据目录，见 scripts/threshold_calibration/README.md。
+*
+!.gitignore

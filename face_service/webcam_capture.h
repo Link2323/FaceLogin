@@ -3,8 +3,7 @@
 #define WINVER 0x0602
 #define _WIN32_WINNT 0x0602
 
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
+#include "../common/frame_image.h"
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -21,7 +20,7 @@ namespace facelogin {
 constexpr int kMaxConsecutiveGrabFailures = 3;
 
 // Webcam capture using Media Foundation IMFSourceReader.
-// Captures frames in NV12 format and converts to RGB for dlib.
+// Captures frames in NV12 format and converts to RGB.
 // Falls back to native camera format if NV12 is not available.
 
 class WebcamCapture {
@@ -37,8 +36,7 @@ public:
     bool Initialize(int preferredWidth = 1280, int preferredHeight = 720,
                     const std::wstring& devicePath = L"");
     bool IsInitialized() const { return m_initialized; }
-    bool GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame);
-    bool IsFrameReady();
+    bool GrabFrame(FrameImage& outFrame);
     void Shutdown();
 
     static bool InitializeMF();
@@ -51,8 +49,8 @@ private:
     // Find the camera matching devicePath (fallback: first device).
     bool FindCamera(const std::wstring& devicePath, IMFMediaSource** ppSource);
     bool ConfigureReader(int width, int height);
-    bool ConvertNV12toRGB(IMFSample* pSample, dlib::matrix<dlib::rgb_pixel>& outFrame);
-    bool ConvertYUY2toRGB(IMFSample* pSample, dlib::matrix<dlib::rgb_pixel>& outFrame);
+    bool ConvertNV12toRGB(IMFSample* pSample, FrameImage& outFrame);
+    bool ConvertYUY2toRGB(IMFSample* pSample, FrameImage& outFrame);
 
     IMFMediaSource* m_pSource = nullptr;
     IMFSourceReader* m_pReader = nullptr;

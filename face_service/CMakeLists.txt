@@ -1,8 +1,6 @@
 add_executable(FaceLoginService
     main.cpp
     FaceService.cpp
-    face_detector.cpp
-    liveness_detector.cpp
     onnx_models.cpp
     webcam_capture.cpp
     webcam_capture_dshow.cpp
@@ -12,7 +10,7 @@ add_executable(FaceLoginService
 
 target_link_libraries(FaceLoginService PRIVATE
     facelogin_common
-    dlib::dlib
+
     onnxruntime::onnxruntime
     mfplat
     mf

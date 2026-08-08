@@ -1,16 +1,158 @@
 package internal
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
 // EmbeddedFS is set by the caller (main.go's //go:embed resources/*).
 // The caller must assign it before calling ExtractAll.
 var EmbeddedFS fs.FS
+
+type requiredModel struct {
+	embeddedPath string
+	fileName     string
+	size         int64
+	sha256       string
+}
+
+// These hashes identify the exact, normalized models the C++ pipeline was
+// calibrated against.  Presence alone is insufficient: a truncated ONNX file
+// or the unnormalized SCRFD export must stop installation before the existing
+// service is touched.
+var requiredModels = []requiredModel{
+	{
+		embeddedPath: "resources/models/det_10g_gnkps.onnx",
+		fileName:     "det_10g_gnkps.onnx",
+		size:         4257451,
+		sha256:       "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc",
+	},
+	{
+		embeddedPath: "resources/models/w600k_r50.onnx",
+		fileName:     "w600k_r50.onnx",
+		size:         43805153,
+		sha256:       "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185",
+	},
+	{
+		embeddedPath: "resources/models/MiniFASNetV2.onnx",
+		fileName:     "MiniFASNetV2.onnx",
+		size:         1743581,
+		sha256:       "b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907",
+	},
+	{
+		embeddedPath: "resources/models/MiniFASNetV1SE.onnx",
+		fileName:     "MiniFASNetV1SE.onnx",
+		size:         1742335,
+		sha256:       "ebab7f90c7833fbccd46d3a555410e78d969db5438e169b6524be444862b3676",
+	},
+}
+
+// Files deployed by earlier releases but intentionally absent from the current
+// manifest. Upgrade and uninstall remove only these exact legacy names.
+var legacyModelFiles = []string{
+	"OULU_Protocol_2_model_0_0.onnx",
+}
+
+// Runtime DLLs shipped by v1.5 and earlier (when the pipeline still depended on
+// dlib, which pulled in OpenBLAS/LAPACK via MinGW). v1.6 removed dlib and now
+// ships a different runtime set (onnxruntime/abseil/re2/protobuf), so these
+// older DLLs linger in the install dir of upgraded machines. Because they are
+// not in the current manifest, RemoveInstalledFiles would never touch them,
+// leaving RemoveInstalledDir to see a non-empty directory and (correctly)
+// refuse to delete it — so the whole install folder survived uninstall. Listed
+// here so they are swept away by name, exactly like legacyModelFiles.
+var legacyRuntimeFiles = []string{
+	"libgcc_s_seh-1.dll",
+	"libgfortran-5.dll",
+	"liblapack.dll",
+	"libquadmath-0.dll",
+	"libwinpthread-1.dll",
+	"openblas.dll",
+}
+
+func validateModelReader(label string, r io.Reader, actualSize int64, model requiredModel) error {
+	if actualSize != model.size {
+		return fmt.Errorf("%s has size %d, expected %d", label, actualSize, model.size)
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, r)
+	if err != nil {
+		return fmt.Errorf("hash %s: %w", label, err)
+	}
+	if n != model.size {
+		return fmt.Errorf("%s read %d bytes, expected %d", label, n, model.size)
+	}
+	actualHash := fmt.Sprintf("%x", h.Sum(nil))
+	if !strings.EqualFold(actualHash, model.sha256) {
+		return fmt.Errorf("%s SHA-256 %s, expected %s", label, actualHash, model.sha256)
+	}
+	return nil
+}
+
+// ValidateEmbeddedResources checks every security-critical model before the
+// installer stops an existing service or mutates the target installation.
+func ValidateEmbeddedResources() error {
+	if EmbeddedFS == nil {
+		return fmt.Errorf("embedded resource filesystem is not initialized")
+	}
+	for _, model := range requiredModels {
+		f, err := EmbeddedFS.Open(model.embeddedPath)
+		if err != nil {
+			return fmt.Errorf("required model missing (%s): %w", model.fileName, err)
+		}
+		info, statErr := f.Stat()
+		if statErr != nil {
+			f.Close()
+			return fmt.Errorf("stat embedded %s: %w", model.fileName, statErr)
+		}
+		if info.IsDir() {
+			f.Close()
+			return fmt.Errorf("required model is a directory: %s", model.fileName)
+		}
+		validateErr := validateModelReader(model.embeddedPath, f, info.Size(), model)
+		closeErr := f.Close()
+		if validateErr != nil {
+			return validateErr
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close embedded %s: %w", model.fileName, closeErr)
+		}
+	}
+	return nil
+}
+
+// ValidateInstalledModels verifies bytes on disk after extraction and before
+// registering COM or starting the SYSTEM service.
+func ValidateInstalledModels(destDir string) error {
+	for _, model := range requiredModels {
+		path := filepath.Join(destDir, "models", model.fileName)
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open installed %s: %w", model.fileName, err)
+		}
+		info, statErr := f.Stat()
+		if statErr != nil {
+			f.Close()
+			return fmt.Errorf("stat installed %s: %w", model.fileName, statErr)
+		}
+		validateErr := validateModelReader(path, f, info.Size(), model)
+		closeErr := f.Close()
+		if validateErr != nil {
+			return validateErr
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close installed %s: %w", model.fileName, closeErr)
+		}
+	}
+	return nil
+}
 
 // ExtractResource extracts a single embedded resource to a destination path.
 func ExtractResource(embeddedPath, destPath string) error {
@@ -42,7 +184,10 @@ func ExtractAll(destDir string, progressFn func(step, total int, name string)) e
 	if err != nil {
 		return fmt.Errorf("read embedded resources: %w", err)
 	}
-	modelEntries, _ := fs.ReadDir(EmbeddedFS, "resources/models")
+	modelEntries, err := fs.ReadDir(EmbeddedFS, "resources/models")
+	if err != nil {
+		return fmt.Errorf("read embedded models: %w", err)
+	}
 
 	total := len(entries) + len(modelEntries)
 	step := 0
@@ -88,6 +233,12 @@ func ExtractAll(destDir string, progressFn func(step, total int, name string)) e
 			return fmt.Errorf("extract %s: %w", name, err)
 		}
 	}
+	for _, name := range legacyModelFiles {
+		legacyPath := filepath.Join(modelsDir, name)
+		if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove legacy model %s: %w", name, err)
+		}
+	}
 	return nil
 }
 
@@ -101,6 +252,55 @@ func ExtractAll(destDir string, progressFn func(step, total int, name string)) e
 // removeUserData: when true, additionally deletes the data/ (config.json,
 // enrolled face database) and log/ (logs) subdirectories — i.e. a full purge.
 // When false, only program files are removed and user data is preserved.
+// removeAllOrScheduleReboot tries os.RemoveAll first. If it fails (typically
+// because a file is held open by a running process — e.g. LogonUI.exe still
+// has the credential provider DLL loaded and is writing credential_provider.log),
+// it walks the tree deleting what it can and marks the rest for deletion at the
+// next reboot via MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT). The caller can then
+// proceed: the directory is effectively "gone" from the user's perspective once
+// they reboot, and RemoveInstalledDir will tolerate the pending-delete state.
+func removeAllOrScheduleReboot(path string) error {
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+	// Walk and best-effort delete each entry; for entries that won't delete,
+	// schedule them for reboot deletion. Directories whose children are all
+	// deleted-or-scheduled become deletable too.
+	type pendingDir struct{ path string }
+	var dirs []pendingDir
+	err := filepath.Walk(path, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if info.IsDir() {
+			dirs = append(dirs, pendingDir{p})
+			return nil
+		}
+		if err := os.Remove(p); err != nil {
+			// Schedule for deletion at next reboot. Empty `to` means delete.
+			ptr, e := windows.UTF16PtrFromString(p)
+			if e == nil {
+				_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+			}
+		}
+		return nil
+	})
+	// Remove directories deepest-first (children before parents). For any that
+	// won't delete immediately (children still pending-delete), schedule them for
+	// reboot deletion too — Windows clears PendingFileRename top-down, and once
+	// the files are gone the directories become removable.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		dp := dirs[i].path
+		if err := os.Remove(dp); err != nil {
+			ptr, e := windows.UTF16PtrFromString(dp)
+			if e == nil {
+				_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+			}
+		}
+	}
+	return err
+}
+
 func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 	removed := 0
 	var firstErr error
@@ -122,6 +322,16 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 			"FaceLoginConsole.exe",
 		} {
 			p := filepath.Join(destDir, name)
+			if FileExists(p) {
+				if err := os.Remove(p); err != nil {
+					recordErr(err)
+				} else {
+					removed++
+				}
+			}
+		}
+		for _, name := range legacyModelFiles {
+			p := filepath.Join(modelsDir, name)
 			if FileExists(p) {
 				if err := os.Remove(p); err != nil {
 					recordErr(err)
@@ -166,15 +376,43 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 			}
 		}
 	}
+	for _, name := range legacyModelFiles {
+		dstPath := filepath.Join(modelsDir, name)
+		if FileExists(dstPath) {
+			if err := os.Remove(dstPath); err != nil {
+				recordErr(err)
+			} else {
+				removed++
+			}
+		}
+	}
+	// Sweep legacy runtime DLLs (dlib/OpenBLAS, v1.5 and earlier) from the
+	// install-dir root. Without this, leftover DLLs from an upgraded install
+	// keep the directory non-empty and RemoveInstalledDir refuses to remove it.
+	for _, name := range legacyRuntimeFiles {
+		dstPath := filepath.Join(destDir, name)
+		if FileExists(dstPath) {
+			if err := os.Remove(dstPath); err != nil {
+				recordErr(err)
+			} else {
+				removed++
+			}
+		}
+	}
 
 	// Full purge: also remove user data and logs (config.json, the enrolled
 	// face database in data/, and log/). Only invoked when the caller opted in
 	// (removeUserData); the default uninstall preserves these.
+	//
+	// log/ often holds credential_provider.log which LogonUI.exe keeps open
+	// (the credential provider DLL stays loaded in the lock-screen process).
+	// os.RemoveAll fails on that file; we fall back to scheduling it for reboot
+	// deletion so the directory still counts as removed for RemoveInstalledDir.
 	if removeUserData {
 		for _, sub := range []string{"data", "log"} {
 			dir := filepath.Join(destDir, sub)
 			if DirExists(dir) {
-				if err := os.RemoveAll(dir); err != nil {
+				if err := removeAllOrScheduleReboot(dir); err != nil {
 					recordErr(err)
 				} else {
 					removed++
@@ -222,5 +460,57 @@ func RemoveInstalledDir(destDir string) (bool, error) {
 			return true, nil
 		}
 	}
+	// Tolerate our own subdirectories (log/, models/) remaining — they may hold
+	// files scheduled for reboot deletion (e.g. credential_provider.log held by
+	// LogonUI). Best-effort purge them; if that empties the install dir, remove it.
+	ourSubdirsOnly := true
+	for _, e := range entries {
+		if !e.IsDir() || (!strings.EqualFold(e.Name(), "models") && !strings.EqualFold(e.Name(), "log") && !strings.EqualFold(e.Name(), "data")) {
+			ourSubdirsOnly = false
+			break
+		}
+	}
+	if ourSubdirsOnly {
+		for _, e := range entries {
+			_ = os.RemoveAll(filepath.Join(destDir, e.Name()))
+		}
+		if err := os.Remove(destDir); err == nil {
+			return true, nil
+		}
+	}
 	return false, nil // not empty — do NOT delete
+}
+
+// RemoveProgramData deletes the shared runtime-data directory
+// (%ProgramData%\FaceLogin: config.json, the enrolled face database users.dat,
+// logs, and the models cache). The installer points DataPath at the install
+// directory, so this directory is only populated when an older release used it
+// as the default or when the app was run standalone — but on such machines it
+// accumulates real data that should not survive a full uninstall.
+//
+// The path is resolved from %ProgramData% rather than the registry because the
+// uninstall flow deletes the registry key shortly after this call. A safety
+// guard mirrors IsSafeInstallDir: the resolved directory's base name must be
+// exactly "FaceLogin" (case-insensitive) before anything is removed, so a
+// maliciously empty or corrupted %ProgramData% can never turn this into a
+// recursive wipe of an arbitrary folder. Returns removed=true when the
+// directory existed and was purged (some entries may be pending reboot delete).
+func RemoveProgramData() (removed bool, err error) {
+	root := os.Getenv("ProgramData")
+	if root == "" {
+		return false, nil
+	}
+	dir := filepath.Join(root, "FaceLogin")
+	if !DirExists(dir) {
+		return false, nil
+	}
+	// Guard: base name must be exactly "FaceLogin". Belt-and-suspenders against
+	// a tampered %ProgramData% pointing somewhere unexpected.
+	if !strings.EqualFold(filepath.Base(filepath.Clean(dir)), "FaceLogin") {
+		return false, nil
+	}
+	if rerr := removeAllOrScheduleReboot(dir); rerr != nil {
+		return true, rerr
+	}
+	return true, nil
 }

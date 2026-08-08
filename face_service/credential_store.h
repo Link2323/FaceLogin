@@ -1,6 +1,5 @@
 #pragma once
 
-#include <dlib/matrix.h>
 #include <string>
 #include <vector>
 #include <optional>
@@ -17,13 +16,26 @@ namespace facelogin {
 // bounded by sqrt(2) ≈ 1.414 regardless of dimension, so sqrt(dim/128) scaling
 // is invalid.
 //
-// For 512-D ONNX we return a fixed 0.80, calibrated from measured data:
-//   same-person matches on this system: 0.14–0.80
-//   other-person photo match:           0.94–0.99
-// (0.80 cleanly separates them; 1.0 admitted a photo.)
-// Any other (legacy) dimension falls back to the base threshold.
+// For 512-D ONNX, clamp the configured threshold into the calibrated safety
+// band [0.70, 1.00]. Data (see docs/threshold-calibration.md, measured with
+// tools/threshold_calibration):
+//   same-person (same camera, multi-angle enrollment): min 0.40, worst 0.78
+//   other-person (two real people, same camera):       min 1.25
+//   other-person (LFW 58 identities pairwise nearest): min 1.25
+// Lower bound 0.70 keeps same-person unlock reliable (worst same-condition
+// frame 0.78); upper bound 1.00 keeps a 0.25 margin below the closest
+// other-person distance measured, so no real stranger can match. The best/
+// second-best ratio check in FindBestMatch is an independent second defense
+// and is unaffected by this threshold. Config values outside the band
+// (including the legacy 0.30 dlib default) snap to 0.80 — the previously
+// hardcoded behavior — so old config.json needs no migration.
 inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
-    if (dim >= 256) return 0.80f;             // ONNX 512-D: measured safe boundary
+    if (dim >= 256) {
+        if (!std::isfinite(baseThreshold)) return 0.80f;
+        if (baseThreshold < 0.70f) return 0.80f;   // unsafe-tight → safe default
+        if (baseThreshold > 1.00f) return 1.00f;   // unsafe-loose → band ceiling
+        return baseThreshold;                       // in band: honor config
+    }
     return baseThreshold;                     // dlib 128-D and unknown: caller base
 }
 
@@ -64,9 +76,15 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 // The file is protected by ACLs (SYSTEM + Administrators only).
 // Passwords are encrypted with DPAPI CRYPTPROTECT_LOCAL_MACHINE.
 
-// Maximum faces one account may enroll. Prevents abuse; AddFace rejects when
-// the account already has this many faces.
-inline constexpr size_t kMaxFacesPerUser = 5;
+// Maximum number of user accounts in the database. One Windows machine
+// typically has ≤5 local accounts; this cap keeps the lock-screen tile list
+// short and prevents abuse.
+inline constexpr size_t kMaxUsers = 5;
+
+// Maximum faces one account may enroll. Multi-angle enrollment uses up to 3
+// (正面/左转/右转), so this is also the natural per-account limit. AddFace
+// rejects when the account already has this many faces.
+inline constexpr size_t kMaxFacesPerUser = 3;
 
 // Passwordless account: the encryptedPassword field holds a single sentinel
 // byte instead of a DPAPI blob. (An empty vector is also treated as
@@ -78,9 +96,10 @@ inline bool IsPasswordlessRecord(const std::vector<uint8_t>& encryptedPassword) 
             encryptedPassword[0] == kPasswordlessSentinelByte);
 }
 
-// One enrolled face for a user account (V4). Each face carries a stable,
-// per-account id (never reused after deletion) and a user-given label
-// (defaults to L"脸N" where N = id).
+// One enrolled face for a user account (V4). Each face carries a per-account
+// id and a user-given label (defaults to L"脸N" where N = id). New ids reuse
+// the smallest free slot (deleting #2 then re-adding gives #2 again), keeping
+// the user-visible list compact.
 struct FaceRecord {
     uint32_t           id = 0;
     std::wstring       label;              // display name; "脸N" if user left blank
@@ -121,8 +140,9 @@ public:
 
     // Add a face to a user account (create-or-append):
     //   - Account not found: creates it with the given encrypted password and
-    //     the first face (id = 1).
-    //   - Account found: appends a new face (id = max(existing)+1) WITHOUT
+    //     the first face (id = 1). Rejects when the database already has
+    //     kMaxUsers accounts.
+    //   - Account found: appends a new face (id = smallest free slot) WITHOUT
     //     touching existing faces or the stored password. The passed
     //     encryptedPassword is ignored in this case.
     // Rejects (returns false) when the account already holds
@@ -135,15 +155,6 @@ public:
                  const std::vector<float>& embedding,
                  const std::wstring& label = L"",
                  uint32_t* outFaceId = nullptr);
-
-    // Add a user to the in-memory database (first-time full enrollment entry
-    // point). Same semantics as AddFace for the "account not found" case;
-    // kept for compatibility with existing call sites.
-    bool AddUser(const std::wstring& username,
-                 const std::wstring& upn,
-                 const std::wstring& sid,
-                 const std::vector<uint8_t>& encryptedPassword,
-                 const std::vector<float>& embedding);
 
     // Update the identity + stored password of an existing account IN PLACE,
     // preserving all enrolled faces (their ids/labels/embeddings are untouched).
@@ -168,12 +179,15 @@ public:
     // Call SaveDatabase() to persist.
     bool ClearAllFaces(const std::wstring& sid);
 
+    // Remove all faces from an account but keep the account identity
+    // (username/UPN/SID/password). Used when re-enrolling multi-angle: the old
+    // angle records are replaced, not accumulated.
+    // Returns false if the account is not found.
+    // Call SaveDatabase() to persist.
+    bool ClearFacesForAccount(const std::wstring& sid);
+
     // Remove an account by SID. Call SaveDatabase() to persist.
     bool DeleteUserBySid(const std::wstring& sid);
-
-    // Delete a user from the in-memory database (by username).
-    // Call SaveDatabase() to persist.
-    bool DeleteUser(const std::wstring& username);
 
     // Rename one face of an account (e.g. via the face management UI).
     // Returns false if the account or face id is unknown.
@@ -200,8 +214,6 @@ public:
         std::wstring password;  // Decrypted — zero after use!
         bool         passwordless = false;  // true: no password stored, must NOT submit LSA creds
         float distance;
-        uint32_t     matchedFaceId = 0;     // V4: id of the closest face in the matched account
-        size_t       accountFaceCount = 0;  // V4: total faces of the matched account
     };
     // probeDim is the number of floats in probeEmbedding (128 for dlib,
     // 512 for InsightFace ONNX). Only stored embeddings of the same
@@ -217,8 +229,6 @@ public:
     std::wstring GetDataDir() const;
 
 private:
-    bool EnsureDataDir();
-
     std::wstring m_dataDir;  // If empty, uses default
     std::vector<UserRecord> m_users;
 };

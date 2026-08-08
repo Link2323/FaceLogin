@@ -1,0 +1,3 @@
+# Downloaded dataset and extracted archive cache — too large to track.
+# calibrate.py writes reports to docs/ via --report, never here.
+data/

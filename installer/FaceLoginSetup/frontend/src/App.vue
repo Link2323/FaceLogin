@@ -27,15 +27,30 @@ const noticeLines = computed(() =>
 )
 
 onMounted(async () => {
-  const paths = await GetDefaultPaths()
-  installDir.value = paths.installDir
-  alreadyInstalled.value = await IsInstalled()
+  try {
+    const paths = await GetDefaultPaths()
+    installDir.value = paths.installDir
+    alreadyInstalled.value = await IsInstalled()
+  } catch (err: any) {
+    // Keep installDir non-empty so the install button isn't permanently disabled
+    // on a marshalling failure — surface the error as the result banner instead.
+    installDir.value = 'C:\\Program Files\\FaceLogin'
+    resultMessage.value = '初始化失败：' + (err?.message || String(err))
+    resultSuccess.value = false
+    showResult.value = true
+  }
 })
 
 async function doPickDirectory() {
-  const dir = await PickDirectory()
-  if (dir) {
-    installDir.value = dir
+  try {
+    const dir = await PickDirectory()
+    if (dir) {
+      installDir.value = dir
+    }
+  } catch (err: any) {
+    resultMessage.value = '选择目录失败：' + (err?.message || String(err))
+    resultSuccess.value = false
+    showResult.value = true
   }
 }
 
@@ -51,31 +66,39 @@ async function doInstall() {
   progressPercent.value = 0
   progressStatus.value = 'running'
 
+  // Clear any listener left over from a previous run that never reached 100%
+  // (e.g. a backend failure path returns before emitting the final event),
+  // then register a fresh one. Always torn down in the finally below.
+  EventsOff('setup:progress')
   EventsOn('setup:progress', (e: any) => {
     progressPercent.value = e.percent
     progressStep.value = e.step
     progressStatus.value = e.status
     progressDetail.value = e.detail || ''
-    if (e.percent >= 100) {
-      running.value = false
-      EventsOff('setup:progress')
-    }
   })
 
-  const result = await Install(installDir.value)
-  resultMessage.value = result.message
-  resultSuccess.value = result.success
-  showResult.value = true
-  running.value = false
+  try {
+    const result = await Install(installDir.value)
+    resultMessage.value = result.message
+    resultSuccess.value = result.success
+    showResult.value = true
 
-  // After a successful UPGRADE install, check for a per-release "what's new"
-  // announcement and show it as a popup. Fresh installs get none.
-  if (result.success && alreadyInstalled.value) {
-    const n = await GetUpgradeNotice()
-    if (n && n.title) {
-      notice.value = n
-      showNotice.value = true
+    // After a successful UPGRADE install, check for a per-release "what's new"
+    // announcement and show it as a popup. Fresh installs get none.
+    if (result.success && alreadyInstalled.value) {
+      const n = await GetUpgradeNotice()
+      if (n && n.title) {
+        notice.value = n
+        showNotice.value = true
+      }
     }
+  } catch (err: any) {
+    resultMessage.value = err?.message || String(err) || '安装失败'
+    resultSuccess.value = false
+    showResult.value = true
+  } finally {
+    running.value = false
+    EventsOff('setup:progress')
   }
 }
 
@@ -87,22 +110,27 @@ async function doUninstall() {
   progressPercent.value = 0
   progressStatus.value = 'running'
 
+  EventsOff('setup:progress')
   EventsOn('setup:progress', (e: any) => {
     progressPercent.value = e.percent
     progressStep.value = e.step
     progressStatus.value = e.status
     progressDetail.value = e.detail || ''
-    if (e.percent >= 100) {
-      running.value = false
-      EventsOff('setup:progress')
-    }
   })
 
-  const result = await Uninstall()
-  resultMessage.value = result.message
-  resultSuccess.value = result.success
-  showResult.value = true
-  running.value = false
+  try {
+    const result = await Uninstall()
+    resultMessage.value = result.message
+    resultSuccess.value = result.success
+    showResult.value = true
+  } catch (err: any) {
+    resultMessage.value = err?.message || String(err) || '卸载失败'
+    resultSuccess.value = false
+    showResult.value = true
+  } finally {
+    running.value = false
+    EventsOff('setup:progress')
+  }
 }
 </script>
 
@@ -153,7 +181,7 @@ async function doUninstall() {
             </svg>
           </button>
         </div>
-        <p class="mt-1 text-xs text-gray-400">模型文件（约 120 MB）将安装到该目录下的 models/ 子目录</p>
+        <p class="mt-1 text-xs text-gray-400">将安装到该目录：程序文件 + 模型文件（约 50 MB：检测 + 识别 + 双活体）放入 models/ 子目录</p>
 
         <button
           class="mt-6 w-full py-2.5 text-sm font-medium bg-gray-900 text-white

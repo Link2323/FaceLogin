@@ -167,57 +167,6 @@ static bool GetPin(IBaseFilter* pFilter, PIN_DIRECTION dir, IPin** ppPin) {
     return false;
 }
 
-// Enumerate all video capture devices via DirectShow. Reads the stable
-// symbolic link (DevicePath) and friendly name from each moniker.
-std::vector<CameraDeviceInfo> WebcamCaptureDS::ListCameras() {
-    std::vector<CameraDeviceInfo> devices;
-
-    ICreateDevEnum* pDevEnum = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&pDevEnum));
-    if (FAILED(hr)) {
-        FACELOGIN_ERROR(L"DS CoCreateInstance(SystemDeviceEnum) failed: 0x%08X", hr);
-        return devices;
-    }
-
-    IEnumMoniker* pEnum = nullptr;
-    hr = pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0);
-    pDevEnum->Release();
-
-    if (FAILED(hr) || pEnum == nullptr) {
-        FACELOGIN_WARN(L"DS: no video capture devices found (pEnum=%p, hr=0x%08X)",
-                       (void*)pEnum, hr);
-        return devices;
-    }
-
-    IMoniker* pMoniker = nullptr;
-    ULONG fetched = 0;
-    while (pEnum->Next(1, &pMoniker, &fetched) == S_OK && fetched == 1) {
-        CameraDeviceInfo info;
-        IPropertyBag* pBag = nullptr;
-        if (SUCCEEDED(pMoniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&pBag)))) {
-            VARIANT var; VariantInit(&var);
-            if (SUCCEEDED(pBag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
-                info.devicePath = var.bstrVal;
-            }
-            VariantClear(&var);
-            VariantInit(&var);
-            if (SUCCEEDED(pBag->Read(L"FriendlyName", &var, nullptr)) && var.vt == VT_BSTR) {
-                info.friendlyName = var.bstrVal;
-            }
-            VariantClear(&var);
-            pBag->Release();
-        }
-        devices.push_back(std::move(info));
-        pMoniker->Release();
-        fetched = 0;
-    }
-    pEnum->Release();
-
-    return devices;
-}
-
 bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
                                  IBaseFilter** ppFilter) {
     *ppFilter = nullptr;
@@ -514,11 +463,6 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
     return true;
 }
 
-bool WebcamCaptureDS::IsFrameReady() {
-    // Stub for API parity.  GrabFrame handles readiness internally.
-    return m_initialized;
-}
-
 void WebcamCaptureDS::Pause() {
     if (m_pControl && m_initialized) {
         m_pControl->Stop();
@@ -530,14 +474,7 @@ void WebcamCaptureDS::Pause() {
     }
 }
 
-void WebcamCaptureDS::Resume() {
-    if (m_pControl && m_initialized) {
-        m_pControl->Run();
-        FACELOGIN_INFO(L"DS: graph resumed (camera LED on)");
-    }
-}
-
-bool WebcamCaptureDS::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
+bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame) {
     if (!m_initialized) return false;
 
     EnterCriticalSection(&m_frameCs);
@@ -552,10 +489,10 @@ bool WebcamCaptureDS::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
 
     // DirectShow RGB24 is bottom-up (biHeight > 0 in VIDEOINFOHEADER
     // means the first scan line is the bottom of the image).
-    // dlib::matrix uses top-down indexing, so we flip vertically.
+    // FrameImage uses top-down indexing, so we flip vertically.
     //
     // DShow RGB24 byte order: B, G, R
-    // dlib rgb_pixel struct order: red, green, blue → mem layout = R, G, B
+    // RgbPixel struct order: red, green, blue → mem layout = R, G, B
     // → need to swap R↔B
 
     const BYTE* src = m_frameBuffer;
@@ -564,7 +501,7 @@ bool WebcamCaptureDS::GrabFrame(dlib::matrix<dlib::rgb_pixel>& outFrame) {
         const BYTE* srcRowPtr = src + srcRow * stride;
         for (int col = 0; col < m_width; col++) {
             const BYTE* pixel = srcRowPtr + col * 3;
-            dlib::rgb_pixel& dst = outFrame(row, col);
+            RgbPixel& dst = outFrame(row, col);
             dst.red   = pixel[2];   // byte 2 of BGR = R
             dst.green = pixel[1];   // byte 1 of BGR = G
             dst.blue  = pixel[0];   // byte 0 of BGR = B

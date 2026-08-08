@@ -2,7 +2,6 @@
 
 #include <windows.h>
 #include <credentialprovider.h>
-#include <string>
 
 // Forward declarations
 class FaceLoginCredential;
@@ -61,9 +60,6 @@ public:
         ICredentialProviderCredential** ppcpc) override;
 
     // Accessors for our credential
-    CREDENTIAL_PROVIDER_USAGE_SCENARIO GetUsageScenario() const { return m_cpus; }
-    ICredentialProviderEvents* GetEvents() const { return m_pEvents; }
-    UINT_PTR GetAdviseContext() const { return m_upAdviseContext; }
     bool IsColdBoot() const { return m_isColdBoot; }
     bool IsCredUI() const { return m_cpus == CPUS_CREDUI || m_cpus == CPUS_PLAP; }
 
@@ -80,7 +76,4 @@ private:
     // True = cold boot / first logon (no active user session)
     // False = unlock / switch user (existing user session)
     bool m_isColdBoot = true;
-
-    // Check if we're in a domain-joined environment
-    bool IsDomainJoined() const;
 };

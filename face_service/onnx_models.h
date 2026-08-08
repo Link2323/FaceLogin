@@ -1,9 +1,7 @@
 #pragma once
 
 #include <onnxruntime_cxx_api.h>
-#include <dlib/matrix.h>
-#include <dlib/pixel.h>
-#include <dlib/image_processing.h>
+#include "../common/frame_image.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -16,17 +14,15 @@ namespace facelogin {
 // luma below kLowLightMeanThreshold) and stretches brightness so the mean
 // lands at a reference level, clamped to [0,255]. No-op for chips at normal
 // brightness. Called on the RESIZED chip before the model's own normalization
-// loop, so both InsightFace (recognizer) and DeepPixBiS (anti-spoof) see
-// brightness-normalized input in dark scenes.
+// loop, so InsightFace sees brightness-normalized input in dark scenes.
 //
 // Safe by construction: only affects genuinely dark chips; a normal-brightness
 // chip is returned unchanged, so the match threshold and photo-rejection
 // boundary are untouched.
-void ApplyLowLightEnhance(dlib::matrix<dlib::rgb_pixel>& chip);
+void ApplyLowLightEnhance(FrameImage& chip);
 
-// ONNX-based face recognition using InsightFace buffalo_s (w600k_mbf).
-// Replaces dlib ResNet-34 with the more accurate MobileFaceNet @ WebFace600K.
-// Embedding dimension: 128 (compatible with existing users.dat storage).
+// ONNX-based face recognition using InsightFace (w600k_mbf / w600k_r50).
+// Embedding dimension: 512 (auto-detected from the model output).
 class OnnxRecognizer {
 public:
     OnnxRecognizer() = default;
@@ -34,19 +30,15 @@ public:
 
     bool Initialize(const std::wstring& modelPath);
 
-    // Compute 128-D embedding from a face chip (already aligned, 112x112 RGB).
+    // Compute 512-D embedding from a face chip (already aligned, 112x112 RGB).
     // Returns empty vector on failure.
-    std::vector<float> ComputeEmbedding(const dlib::matrix<dlib::rgb_pixel>& faceChip);
+    std::vector<float> ComputeEmbedding(const FrameImage& faceChip);
 
-    // Convenience: compute embedding from a full frame + landmarks.
-    // Handles alignment to 112x112 internally.
-    std::vector<float> ComputeEmbedding(
-        const dlib::matrix<dlib::rgb_pixel>& image,
-        const dlib::full_object_detection& landmarks);
-
-    // Euclidean distance between two embeddings.
-    static float Distance(const std::vector<float>& a, const std::vector<float>& b);
-    static float Distance(const std::vector<float>& a, const float* b);
+    // Convenience: compute embedding from a full frame + the 5 SCRFD
+    // keypoints (source-pixel coordinates). Aligns to 112×112 internally
+    // via a similarity transform (see face_align.h).
+    std::vector<float> ComputeEmbedding(const FrameImage& image,
+                                        const float kps[10]);
 
     bool IsInitialized() const { return m_initialized; }
 
@@ -81,10 +73,10 @@ public:
     };
 
     // Detect faces. Returns detections sorted by confidence (highest first).
-    std::vector<Detection> Detect(const dlib::matrix<dlib::rgb_pixel>& image);
+    std::vector<Detection> Detect(const FrameImage& image);
 
     // Detect the largest face (by area). Returns nullopt if none found.
-    std::optional<Detection> DetectLargestFace(const dlib::matrix<dlib::rgb_pixel>& image);
+    std::optional<Detection> DetectLargestFace(const FrameImage& image);
 
     bool IsInitialized() const { return m_initialized; }
 
@@ -103,49 +95,60 @@ private:
     // Because the resize DISTORTS non-square frames (e.g. 1280×720 → 640×640),
     // the x and y scales are DIFFERENT. scaleX/scaleY map 640-space back to
     // source pixels: srcX = detX * scaleX, srcY = detY * scaleY.
-    std::vector<float> Preprocess(const dlib::matrix<dlib::rgb_pixel>& image,
+    std::vector<float> Preprocess(const FrameImage& image,
                                    float& outScaleX, float& outScaleY);
 };
 
-// Silent anti-spoofing detection (MiniFASNetV2).
-// Distinguishes real faces from printed photos, screen replays, and 3D masks.
-// Input: aligned face chip (80x80 RGB)
-// Output: scalar score (higher = more likely real face)
-class OnnxAntiSpoof {
+// One MiniFASNet ONNX model. The reference implementation expands the SCRFD
+// face box, resizes it to the model input, feeds raw BGR NCHW values, and uses
+// softmax class 1 as the real-face probability.
+class MiniFasEvaluator {
 public:
-    OnnxAntiSpoof() = default;
-    ~OnnxAntiSpoof();
+    MiniFasEvaluator() = default;
+    ~MiniFasEvaluator();
 
-    bool Initialize(const std::wstring& modelPath);
+    MiniFasEvaluator(const MiniFasEvaluator&) = delete;
+    MiniFasEvaluator& operator=(const MiniFasEvaluator&) = delete;
 
-    // Predict liveness score for an aligned face chip.
-    // Returns score in [0.0, 1.0]; higher = more likely real.
-    // Returns -1.0f on error.
-    float Predict(const dlib::matrix<dlib::rgb_pixel>& faceChip);
-
-    // Convenience: align from landmarks + full image, then predict.
-    float Predict(const dlib::matrix<dlib::rgb_pixel>& image,
-                  const dlib::full_object_detection& landmarks);
-
-    // Thresholded convenience: returns true if face is judged real.
-    bool IsReal(const dlib::matrix<dlib::rgb_pixel>& faceChip, float threshold = 0.3f);
-
+    bool Initialize(const std::wstring& modelPath, float cropScale);
+    float Predict(const FrameImage& image,
+                  const FaceRect& faceRect);
     bool IsInitialized() const { return m_initialized; }
-
-    // Enable/disable low-light brightness normalization for dark face chips.
-    void SetLowLightEnhance(bool enable) { m_lowLightEnhance = enable; }
 
 private:
     std::unique_ptr<Ort::Env> m_env;
     std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
-    bool m_initialized = false;
-    bool m_lowLightEnhance = false;
-
     std::string m_inputName;
     std::string m_outputName;
-    std::vector<std::string> m_outputNames; // DeepPixBiS has 2 outputs
-    int m_inputSize = 224;
+    int m_inputHeight = 0;
+    int m_inputWidth = 0;
+    float m_cropScale = 0.0f;
+    bool m_initialized = false;
+};
+
+// Production PAD: MiniFASNetV2 (2.7x crop) and MiniFASNetV1SE (4.0x crop)
+// evaluated concurrently (each owns its own session/env), then fused with an
+// equal-weight arithmetic mean.  If either model fails, the fused prediction
+// fails closed.
+class OnnxAntiSpoof {
+public:
+    OnnxAntiSpoof() = default;
+    ~OnnxAntiSpoof();
+
+    bool Initialize(const std::wstring& miniFasV2Path,
+                    const std::wstring& miniFasV1SePath);
+
+    // Returns the 50/50 fused real-face probability, or -1 on any model error.
+    float Predict(const FrameImage& image,
+                  const FaceRect& rect);
+
+    bool IsInitialized() const { return m_initialized; }
+
+private:
+    std::unique_ptr<MiniFasEvaluator> m_miniFasV2;
+    std::unique_ptr<MiniFasEvaluator> m_miniFasV1Se;
+    bool m_initialized = false;
 };
 
 } // namespace facelogin

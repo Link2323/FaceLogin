@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="DEVELOPMENT.md"><img src="https://img.shields.io/badge/platform-Windows%2010%2B%20x64-blue" alt="Platform"></a>
   <a href="DEVELOPMENT.md"><img src="https://img.shields.io/badge/language-C%2B%2B20%20%7C%20Go-orange" alt="Language"></a>
-  <a href="https://github.com/EthanZer0/FaceLogin/releases"><img src="https://img.shields.io/badge/version-1.4.0-green" alt="Version"></a>
+  <a href="https://github.com/EthanZer0/FaceLogin/releases"><img src="https://img.shields.io/badge/version-1.6.0%20(dev)-green" alt="Version"></a>
 </p>
 
 ---
@@ -22,7 +22,7 @@
 
 | 锁屏人脸解锁 | 双重活体检测 | ONNX 识别 |
 |:---:|:---:|:---:|
-| Windows 原生锁屏集成<br>无需额外操作 | EAR 眨眼 + MiniFASNetV2<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 人脸识别 |
+| Windows 原生锁屏集成<br>无需额外操作 | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 人脸识别 |
 | **多账户支持** | **安全存储** | **热配置** |
 | 本地 SAM + 微软在线<br>账户全兼容，每账号可录多张人脸 | DPAPI 机器范围加密<br>管道 DACL 访问控制 | 运行时修改识别参数<br>无需重启服务 |
 
@@ -49,7 +49,7 @@ flowchart TB
 
     subgraph Storage["数据存储"]
         direction LR
-        UsersDB[("data/<br/>users.dat")] ~~~ Config[("data/<br/>config.json")] ~~~ Models[("models/<br/>ONNX + landmarks")] ~~~ Logs[("log/<br/>日志文件")]
+        UsersDB[("data/<br/>users.dat")] ~~~ Config[("data/<br/>config.json")] ~~~ Models[("models/<br/>ONNX 检测+识别+活体")] ~~~ Logs[("log/<br/>日志文件")]
     end
 
     LogonUI -->|"COM 接口"| CP
@@ -106,10 +106,11 @@ flowchart TB
 | 要求 | 详情 |
 |---|---|
 | 操作系统 | Windows 10 21H2+ / Windows 11 (x64) |
+| CPU | 桌面级 8 核+（Ryzen 7/9、Intel i7/i9 等，见下方性能说明） |
 | 摄像头 | USB 或内置，支持 1280×720 |
 | 运行时 | WebView2（Windows 11 内置，Win10 自动安装） |
 | 权限 | 管理员权限（安装和注册需要） |
-| 磁盘空间 | ~200 MB（含模型文件 ~28 MB） |
+| 磁盘空间 | ~110 MB（含四个 ONNX 模型约 52 MB：SCRFD INT8 ~4 MB + IResNet50 INT8 ~44 MB + 双 MiniFAS ~3.5 MB；运行库 DLL 及可执行文件约 47 MB） |
 
 ---
 
@@ -120,9 +121,24 @@ flowchart TB
 | 进程通信 | 命名管道 DACL：仅 SYSTEM + Administrators，拒绝远程 |
 | 凭据存储 | DPAPI `CRYPTPROTECT_LOCAL_MACHINE` 机器范围加密 |
 | 内存保护 | 密码使用后 `SecureZeroMemory` 即时擦除 |
-| 活体检测 | EAR 眨眼 + MiniFASNetV2 双重验证 |
+| 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 50/50 融合，固定 5/5 帧验证 |
 | 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重校验 |
+| 模型完整性 | 4 个 ONNX 模型启动时 SHA-256 校验，篡改/损坏即 fail-closed（拒绝认证） |
+| 日志脱敏 | AUTH_SUCCESS 凭据载荷不再写入日志 |
 | 编译加固 | ASLR、DEP、CFG、64位高熵地址随机化 |
+
+---
+
+## 性能说明
+
+解锁耗时主要取决于 CPU 性能与散热状况。一次认证需执行 3 次人脸嵌入（活体验证期间的 3 次身份绑定，防照片/换脸攻击的安全设计），实测参考：
+
+| 机器类型 | 端到端解锁（中位/范围） | 实测机型 |
+|---|---|---|
+| 高性能桌面 CPU（满频） | **~0.84s**（0.79–0.87s，σ 23ms） | Ryzen 9 7945HX（16C/32T） |
+| 笔记本（2GHz 热降频，P-core 绑定生效） | **~1.56s**（1.49–1.63s，σ 46ms） | i7-1360P（6P+8E，mask 0xFF） |
+
+> 实测于 2026-08-08，两台机器同代码版本（融合认证 + tail anchor，5/5 帧活体，3 次身份绑定）。端到端计时从 `Starting face authentication` 到 `Credentials sent`。CPU 频率是决定性变量——嵌入推理是耗时大头，散热良好可明显提升解锁速度；混合架构 CPU（P+E 核）服务已自动将推理线程绑定到性能核，无需手动配置。
 
 ---
 
@@ -150,21 +166,23 @@ FaceLogin/
 ### 前置条件
 
 - **Visual Studio 2022**（含 C++ 工作负载）
-- **vcpkg** — dlib（仅用于 68 点地标）、onnxruntime
+- **vcpkg** — onnxruntime（v1.6 起 dlib 已完全移除，图像容器/缩放/裁剪为自研 `common/frame_image.h`）
 - **Go 1.21+** + **Wails v2**（仅安装程序）
 - **CMake 3.20+**
 
 ### C++ 组件
 
 ```powershell
-# vcpkg 依赖（dlib 仅用于 shape predictor 地标，识别/检测用 ONNX）
-vcpkg install dlib[core] onnxruntime --triplet x64-windows
+# vcpkg 依赖（人脸检测/识别/活体全部用 ONNX；图像容器/缩放/裁剪见 common/frame_image.h）
+vcpkg install onnxruntime --triplet x64-windows
 
-# 构建
+# 构建（VS 2022）
 cmake -B build -S . -G "Visual Studio 17 2022" `
     -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build --config Release
 ```
+
+> 在 VS 2026（MSVC 19.5x）上构建时，必须加 `--parallel 1`（不要加 `/MP`）：根 `CMakeLists.txt` 为该工具集关闭了 MSBuild 文件跟踪与排队错误遥测，否则会出现零 CPU 的孤立 `cl.exe` 进程。VS 2022 保持其常规 `/MP` 增量构建行为，命令不变。
 
 ### Go 安装程序
 
@@ -178,10 +196,14 @@ wails build -clean -platform windows/amd64
 
 | 文件 | 用途 | 下载 |
 |---|---|---|
-| `shape_predictor_68_face_landmarks.dat` | 面部地标提取 | `scripts/download_models.ps1` |
-| `det_500m.onnx` | SCRFD 人脸检测 | [InsightFace](https://github.com/deepinsight/insightface) |
-| `w600k_mbf.onnx` | InsightFace 人脸识别 | [InsightFace](https://github.com/deepinsight/insightface) |
-| `OULU_Protocol_2_model_0_0.onnx` | 静默反欺诈 | [MiniFASNet](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing) |
+| `det_10g_gnkps.onnx` | SCRFD 检测 + 5 关键点（gnkps 变体，10g 档 ~3.4× 快于 34g；INT8 量化，~4 MB） | `assets/models/`；由 `scripts/download_models.ps1` 准备 |
+| `w600k_r50.onnx` | InsightFace ResNet50 512 维嵌入（INT8 量化，~44 MB，1.68× 加速，见性能说明） | `assets/models/`；由 `scripts/download_models.ps1` 下载 FP32 源并量化 |
+| `MiniFASNetV2.onnx` | 静默反欺诈（2.7× 裁剪） | `assets/models/`；构建时复制到安装包 |
+| `MiniFASNetV1SE.onnx` | 静默反欺诈（4.0× 裁剪） | `assets/models/`；构建时复制到安装包 |
+
+> v1.5 起不再使用 dlib 68 点形状预测器（由 SCRFD 自带 5 关键点 + 相似变换对齐替代）。
+> v1.6 起 dlib 完全移除：图像容器/缩放/裁剪由 `common/frame_image.h` 自研实现（双线性缩放 + 高斯金字塔裁剪，与 dlib 算法逐像素等价），vcpkg 依赖仅剩 onnxruntime。
+> `installer/FaceLoginSetup/resources/models/` 为构建生成目录，不作为模型源维护。
 
 ---
 
