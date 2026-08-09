@@ -88,8 +88,8 @@ func main() {
 	// B) Upgrade notice — per-release announcement shown only on UPGRADE.
 	// =========================================================================
 	internal.NoticeEnabled = true
-	internal.NoticeVersion = "1.6.0"
-	internal.NoticeTitle = "FaceLogin 1.6.0 更新说明"
+	internal.NoticeVersion = "1.6.0-multi-angle"
+	internal.NoticeTitle = "FaceLogin 1.6.0-multi-angle 更新说明（Link2323 fork）"
 	internal.NoticeBody = "功能：\n" +
 		"- 多角度人脸录入：正面、左转 30°、右转 30° 三角度，侧脸识别更稳定\n" +
 		"- 匹配阈值滑块生效：基于真实标定数据放开，限定在安全区间，可按需调节严格度\n" +
@@ -101,7 +101,9 @@ func main() {
 		"安全：\n" +
 		"- 注册表数据目录重定向防护（运行时路径校验 + 注册表权限锁定）\n" +
 		"- 密码内存清零加固，认证失败路径不再残留明文\n" +
-		"- 运行时模型完整性校验，阻止替换活体模型绕过防御\n\n" +
+		"- 运行时模型完整性校验，阻止替换活体模型绕过防御\n" +
+		"- 活体模型被篡改/损坏时，锁屏显示明确的完整性校验失败提示（此前仅在日志中可见）\n" +
+		"- 安装器引导选择受系统级 ACL 保护的安装目录，防止程序文件被篡改\n\n" +
 		"修复：\n" +
 		"- 修复锁屏空场景误报「检测到攻击」，失败提示文案更准确\n" +
 		"- 修复账号身份切换误报、录入撞槽位等问题\n\n" +
