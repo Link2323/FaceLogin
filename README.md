@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="DEVELOPMENT.md"><img src="https://img.shields.io/badge/platform-Windows%2010%2B%20x64-blue" alt="Platform"></a>
   <a href="DEVELOPMENT.md"><img src="https://img.shields.io/badge/language-C%2B%2B20%20%7C%20Go-orange" alt="Language"></a>
-  <a href="https://github.com/EthanZer0/FaceLogin/releases"><img src="https://img.shields.io/badge/version-1.6.0%20(dev)-green" alt="Version"></a>
+  <a href="https://github.com/Link2323/FaceLogin/releases"><img src="https://img.shields.io/badge/version-1.6.0--multi--angle%20(Link2323%20fork)-green" alt="Version"></a>
 </p>
 
 ---
@@ -23,8 +23,10 @@
 | 锁屏人脸解锁 | 双重活体检测 | ONNX 识别 |
 |:---:|:---:|:---:|
 | Windows 原生锁屏集成<br>无需额外操作 | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 人脸识别 |
-| **多账户支持** | **安全存储** | **热配置** |
-| 本地 SAM + 微软在线<br>账户全兼容，每账号可录多张人脸 | DPAPI 机器范围加密<br>管道 DACL 访问控制 | 运行时修改识别参数<br>无需重启服务 |
+| **多角度录入** | **多账户支持** | **安全存储** |
+| 正面/左转 30°/右转 30° 三角度<br>侧脸识别更稳定 | 本地 SAM + 微软在线<br>账户全兼容，每账号可录多张人脸 | DPAPI 机器范围加密<br>管道 DACL 访问控制 |
+| **热配置** | **模型完整性校验** | **内存安全** |
+| 运行时修改识别参数<br>无需重启服务 | 4 个模型启动 SHA-256 校验<br>篡改即 fail-closed 拒绝认证 | 密码使用后即时擦除<br>RAII 全路径清零 |
 
 </div>
 
@@ -85,11 +87,13 @@ flowchart TB
 
 ### 第一步：安装
 
-从 [Releases](https://github.com/EthanZer0/FaceLogin/releases) 下载 `FaceLoginSetup.exe`，运行后选择安装目录，点击 **安装**。
+从 [Releases](https://github.com/Link2323/FaceLogin/releases) 下载 `FaceLoginSetup.exe`，运行后选择安装目录（建议保留默认的 `C:\Program Files\` 以获得系统级 ACL 保护），点击 **安装**。
 
 ### 第二步：录入人脸
 
 以管理员身份运行 `FaceLoginConsole.exe`，按提示完成活体检测，输入密码，点击 **保存并录入**。
+
+> **支持多角度录入**（本 fork 核心特性）：除正面外，可继续录入「左转 30°」「右转 30°」两个侧脸角度（每用户最多 3 个角度槽位），显著提升侧脸/偏头场景下的识别稳定性。每个角度独立录制 5 帧并通过活体检测，角度间互不平均。已录入的正脸数据兼容，无需重新录入。
 
 ### 第三步：解锁
 
