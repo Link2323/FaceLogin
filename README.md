@@ -20,17 +20,17 @@
 
 <div align="center">
 
-| 🎯 多角度识别（核心） | 🔒 双重活体检测 | ⚡ ONNX 高性能 |
+| 🎯 多角度识别 | 🔒 双重活体检测 | ⚡ ONNX 高性能 |
 |:---:|:---:|:---:|
-| 正面 + 左右 30° 三角度录入<br>**大范围侧脸/偏头稳定识别** | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>桌面级 CPU 亚秒级解锁 |
+| 正面 + 左右 30° 三角度录入<br>**大范围侧脸/偏头稳定识别** | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 全流程本地推理 |
 
 | Windows 原生锁屏集成 | 多账户支持 | 安全存储 |
 |:---:|:---:|:---:|
-| 看一眼即可解锁<br>无需额外操作 | 本地 + 微软在线账户<br>每账号多张人脸 | DPAPI 加密 + 管道 DACL |
+| 坐在电脑前即可解锁<br>无需额外操作 | 本地 + 微软在线账户<br>每账号多张人脸 | DPAPI 加密 + 管道 DACL |
 
 </div>
 
-> **关于多角度识别**：本 fork 的核心增强。传统单正脸录入在用户偏头、侧对摄像头时极易误拒；本版本支持录入正面、左转 30°、右转 30° 三个角度（每用户最多 3 个槽位，每角度独立活体检测 5 帧），认证时三角度模板协同匹配，**显著扩展了可识别的头部姿态范围**，侧脸场景下的解锁成功率大幅提升。已录入的正脸数据完全兼容，无需重新录入。
+> **关于多角度识别**：本 fork 的核心增强。传统单正脸录入在用户偏头、侧对摄像头时极易误拒；本版本支持录入正面、左转 30°、右转 30° 三个角度，认证时三角度模板协同匹配，**显著扩展了可识别的头部姿态范围**，侧脸场景下的解锁成功率大幅提升。
 
 ---
 
@@ -69,20 +69,6 @@ flowchart TB
     style Storage fill:#fdf2f8,stroke:#ec4899
 ```
 
-> 所有跨进程通信通过命名管道 `\\.\pipe\FaceLoginPipe`（DACL 保护）。
-
----
-
-## Star History
-
-<p align="center">
-  <a href="https://github.com/EthanZer0/FaceLogin/stargazers">
-    <img alt="Star History Chart" src="https://raw.githubusercontent.com/EthanZer0/StarHistory/main/svg/EthanZer0-FaceLogin.svg" width="80%">
-  </a>
-</p>
-
-> 图表由独立项目 [StarHistory](https://github.com/EthanZer0/StarHistory) 的 GitHub Actions 每日自动更新，数据与渲染完全自托管，不依赖第三方服务。
-
 ---
 
 ## 快速开始
@@ -93,7 +79,7 @@ flowchart TB
 
 ### 第二步：录入人脸
 
-以管理员身份运行 `FaceLoginConsole.exe`，按提示完成活体检测，输入密码，点击 **保存并录入**。除正脸外，可继续录入左右 30° 侧脸角度以获得更稳定的识别（详见上方「多角度识别」说明）。
+以管理员身份运行 `FaceLoginConsole.exe`，按提示完成活体检测，输入密码，点击 **保存并录入**。除正脸外，可继续录入左右 30° 侧脸角度以获得更稳定的识别。
 
 ### 第三步：解锁
 
@@ -114,7 +100,7 @@ flowchart TB
 | 摄像头 | USB 或内置，支持 1280×720 |
 | 运行时 | WebView2（Windows 11 内置，Win10 自动安装） |
 | 权限 | 管理员权限（安装和注册需要） |
-| 磁盘空间 | ~110 MB |
+| 磁盘空间 | ~80 MB |
 
 ---
 
@@ -142,7 +128,7 @@ flowchart TB
 | 高性能桌面 CPU | **~0.8s** | Ryzen 9 7945HX（16C/32T） |
 | 笔记本（热降频时） | **~1.6s** | i7-1360P（6P+8E） |
 
-> 混合架构 CPU（P+E 核）服务自动将推理线程绑定到性能核，无需手动配置；散热良好可明显提升解锁速度。详细基准见 [docs/performance-baseline.md](docs/performance-baseline.md)。
+> 混合架构 CPU（P+E 核）服务自动将推理线程绑定到性能核，无需手动配置；散热良好可明显提升解锁速度。
 
 ---
 
