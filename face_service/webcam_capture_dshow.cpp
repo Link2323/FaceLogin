@@ -252,7 +252,9 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
         return false;
     }
 
-    FACELOGIN_INFO(L"DS: found video capture device");
+    // Graph-build step detail — DEBUG; the final "DirectShow webcam
+    // initialized" line at the end of Initialize() is the INFO-level summary.
+    FACELOGIN_DEBUG(L"DS: found video capture device");
     return true;
 }
 
@@ -356,7 +358,7 @@ bool WebcamCaptureDS::BuildGraph(IBaseFilter* pCapture, int width, int height) {
                         pVih->bmiHeader.biSizeImage = width * height * 3;
                         hr = pConfig->SetFormat(pmt);
                         if (SUCCEEDED(hr))
-                            FACELOGIN_INFO(L"DS: set capture format %dx%d", width, height);
+                            FACELOGIN_DEBUG(L"DS: set capture format %dx%d", width, height);
                         else
                             FACELOGIN_WARN(L"DS SetFormat failed: 0x%08X, using default", hr);
                     }
@@ -408,7 +410,7 @@ bool WebcamCaptureDS::BuildGraph(IBaseFilter* pCapture, int width, int height) {
         pGrabberOut->Release();
         pNullIn->Release();
 
-        FACELOGIN_INFO(L"DS: graph connected capture→grabber→null");
+        FACELOGIN_DEBUG(L"DS: graph connected capture→grabber→null");
     }
 
     // 8. Query IMediaControl

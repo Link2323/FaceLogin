@@ -273,7 +273,8 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
                 // boot via the UserLoggedIn=0 fallback).
                 WriteRegQword(REGVAL_SERVICE_START_UPTIME, 0);
             } else {
-                FACELOGIN_INFO(L"Session change ignored: eventType=%lu", eventType);
+                // Lock/unlock/connect/disconnect — not actionable, quiet in prod.
+                FACELOGIN_DEBUG(L"Session change ignored: eventType=%lu", eventType);
             }
         }
         return NO_ERROR;
@@ -1123,7 +1124,9 @@ bool FaceService::ProcessAuthRequest() {
                             // exceed 2s before early-exiting.
                             noPassStart = std::chrono::steady_clock::now();
                         }
-                        FACELOGIN_INFO(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
+                        // Per-frame tally — DEBUG; the per-auth summary
+                        // (Liveness passed / fail-closed) stays at INFO.
+                        FACELOGIN_DEBUG(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
 
                         // Inter-frame pacing for temporal diversity (distinct
                         // frames resist video-replay attacks). 60ms keeps the

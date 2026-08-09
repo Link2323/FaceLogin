@@ -79,7 +79,9 @@ PSECURITY_DESCRIPTOR PipeServer::CreateSecurityDescriptor() {
         ea[2].Trustee.TrusteeType = TRUSTEE_IS_USER;
         ea[2].Trustee.ptstrName = qualifiedName;
         entryCount = 3;
-        FACELOGIN_INFO(L"Pipe ACL: added current user %s", qualifiedName);
+        // ACL composition detail — DEBUG; fires on every reconnect (once per
+        // auth). The "Named pipe created" line is the INFO-level marker.
+        FACELOGIN_DEBUG(L"Pipe ACL: added current user %s", qualifiedName);
     }
 
     DWORD dwErr = SetEntriesInAclW(entryCount, ea, nullptr, &pACL);
@@ -143,7 +145,10 @@ bool PipeServer::WaitForClient(DWORD timeoutMs) {
         return false;
     }
 
-    FACELOGIN_INFO(L"Named pipe created, waiting for client...");
+        // Per-reconnect marker — DEBUG; fires once per auth. The request
+        // dispatch ("Received request: ...") logged in FaceService::Run is the
+        // INFO-level signal that a client arrived.
+        FACELOGIN_DEBUG(L"Named pipe created, waiting for client...");
 
     // Blocking wait for client connection.
     // The handle is closed by Close() in the Stop() path, which unblocks this.
@@ -152,7 +157,8 @@ bool PipeServer::WaitForClient(DWORD timeoutMs) {
 
     if (connected) {
         m_connected = true;
-        FACELOGIN_INFO(L"Client connected synchronously");
+        // Per-auth connect detail — DEBUG; redundant with the request dispatch.
+        FACELOGIN_DEBUG(L"Client connected synchronously");
         return true;
     }
 
