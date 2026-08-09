@@ -48,26 +48,24 @@ static std::wstring MfPathToDsPath(const std::wstring& mfPath) {
 
 bool   WebcamCaptureDS::s_comInitialized = false;
 int    WebcamCaptureDS::s_comRefCount    = 0;
-CRITICAL_SECTION WebcamCaptureDS::s_comCs;
+std::mutex WebcamCaptureDS::s_comMutex;
 
 bool WebcamCaptureDS::InitializeCOM() {
-    EnterCriticalSection(&s_comCs);
+    std::lock_guard<std::mutex> lock(s_comMutex);
     if (!s_comInitialized) {
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (FAILED(hr)) {
-            LeaveCriticalSection(&s_comCs);
             FACELOGIN_ERROR(L"DS CoInitializeEx(COINIT_MULTITHREADED) failed: 0x%08X", hr);
             return false;
         }
         s_comInitialized = true;
     }
     s_comRefCount++;
-    LeaveCriticalSection(&s_comCs);
     return true;
 }
 
 void WebcamCaptureDS::ShutdownCOM() {
-    EnterCriticalSection(&s_comCs);
+    std::lock_guard<std::mutex> lock(s_comMutex);
     if (s_comRefCount > 0) {
         s_comRefCount--;
         if (s_comRefCount == 0 && s_comInitialized) {
@@ -75,7 +73,6 @@ void WebcamCaptureDS::ShutdownCOM() {
             s_comInitialized = false;
         }
     }
-    LeaveCriticalSection(&s_comCs);
 }
 
 // ============================================================================
@@ -86,13 +83,11 @@ WebcamCaptureDS::WebcamCaptureDS()
     : m_callback(this)
 {
     InitializeCriticalSection(&m_frameCs);
-    InitializeCriticalSection(&s_comCs);
 }
 
 WebcamCaptureDS::~WebcamCaptureDS() {
     Shutdown();
     DeleteCriticalSection(&m_frameCs);
-    // s_comCs is intentionally leaked (process-lifetime singleton)
 }
 
 // ============================================================================
@@ -522,8 +517,11 @@ void WebcamCaptureDS::Shutdown() {
         m_pControl = nullptr;
     }
 
-    // Release grabber before the graph
+    // Break the callback reference before releasing the graph. Relying on the
+    // filter's final destruction to detach it retained callback/filter state on
+    // some camera drivers across repeated auth cycles.
     if (m_pGrabber) {
+        m_pGrabber->SetCallback(nullptr, 1);
         m_pGrabber->Release();
         m_pGrabber = nullptr;
     }
@@ -531,8 +529,6 @@ void WebcamCaptureDS::Shutdown() {
         m_pNullRenderer->Release();
         m_pNullRenderer = nullptr;
     }
-    // m_pCapture is owned by the graph, no need to Release separately
-    // unless Shutdown is called before BuildGraph finished
     if (m_pCapture) {
         m_pCapture->Release();
         m_pCapture = nullptr;

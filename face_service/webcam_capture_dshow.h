@@ -16,6 +16,7 @@
 #include <dshow.h>
 #include <strmif.h>
 #include <uuids.h>
+#include <mutex>
 
 #include "camera_types.h"
 
@@ -98,7 +99,7 @@ public:
 private:
     static bool   s_comInitialized;
     static int    s_comRefCount;
-    static CRITICAL_SECTION s_comCs;
+    static std::mutex s_comMutex;
 
     // ISampleGrabberCB nested implementation
     class GrabberCB : public ISampleGrabberCB {
