@@ -50,23 +50,51 @@ public:
     static bool Uninstall();
 
 private:
+    struct InferenceModels {
+        std::unique_ptr<OnnxDetector> detector;
+        std::unique_ptr<OnnxRecognizer> recognizer;
+        std::unique_ptr<OnnxAntiSpoof> antiSpoof;
+    };
+
+    enum class ModelState {
+        Unloaded,
+        Loading,
+        Ready,
+        Failed,
+        Stopping,
+    };
+
+    class ModelUseGuard {
+    public:
+        explicit ModelUseGuard(FaceService& service) : m_service(service) {
+            m_service.BeginModelUse();
+        }
+        ~ModelUseGuard() { m_service.EndModelUse(); }
+        ModelUseGuard(const ModelUseGuard&) = delete;
+        ModelUseGuard& operator=(const ModelUseGuard&) = delete;
+    private:
+        FaceService& m_service;
+    };
+
     void Run();          // Main service loop
     void Stop();
-    bool Initialize();   // Load DB, config, lightweight SCRFD; queue heavy models
+    bool Initialize();   // Load DB/config and start the model lifecycle worker
     bool ProcessAuthRequest();  // Handle one auth session
 
-    // Lazy model loading (cold-boot acceleration). The heavy ONNX sessions
-    // (w600k_r50 recognizer 174MB + dual MiniFAS) take seconds to construct;
-    // loading them synchronously in Initialize() delayed the pipe listener by
-    // that much, so the credential provider (which connects the moment the
-    // lock screen shows) had to wait. SCRFD (15.5MB) loads synchronously
-    // because the pipe must be up ASAP and SCRFD is needed for the first frame
-    // of auth. The heavy models load in a background thread; if a request
-    // arrives before they finish, EnsureModelsLoaded() blocks until ready.
-    void StartBackgroundModelLoad();   // spawn the async loader thread
-    bool EnsureModelsLoaded();         // block until heavy models are ready
-    bool LoadHeavyModels(bool lowLightEnhance);  // recognizer + anti-spoof
-    void AbortModelLoadWait();         // release anyone blocked in EnsureModelsLoaded
+    // Model residency follows the interactive session: preload all inference
+    // sessions when Windows locks, retain them across failed auth retries, and
+    // release them after unlock. AUTH_REQUEST always requests + waits as a
+    // fallback in case a session notification was missed. A long-lived worker
+    // owns construction/destruction so HandlerEx never performs heavy work.
+    bool StartModelWorker();
+    void ModelWorkerLoop();
+    void StopModelWorker();
+    void RequestModelLoad(const wchar_t* reason);
+    void RequestModelUnload(const wchar_t* reason);
+    std::shared_ptr<InferenceModels> AcquireModelsForAuth();
+    std::shared_ptr<InferenceModels> LoadInferenceModels(bool& padIntegrityFailed);
+    void BeginModelUse();
+    void EndModelUse();
 
     // Service state
     SERVICE_STATUS_HANDLE m_hStatus = nullptr;
@@ -76,9 +104,6 @@ private:
 
     // Components
     std::unique_ptr<PipeServer> m_pipeServer;
-    std::unique_ptr<OnnxDetector> m_onnxDetector;       // SCRFD (face detection)
-    std::unique_ptr<OnnxRecognizer> m_onnxRecognizer;   // InsightFace (recognition)
-    std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;        // V2 + V1SE (mandatory)
     std::unique_ptr<WebcamCapture>   m_webcamMF;   // Media Foundation (standalone)
     std::unique_ptr<WebcamCaptureDS> m_webcamDS;   // DirectShow (service mode)
     std::unique_ptr<CredentialStore> m_store;
@@ -102,27 +127,25 @@ private:
     float m_matchThreshold = 0.30f;
     int m_authTimeoutSeconds = 15;
 
-    // --- Lazy model loading (cold-boot acceleration) ---
-    // The w600k_r50 recognizer (174MB) + dual MiniFAS sessions take seconds to
-    // construct. Loading them synchronously in Initialize() delayed the pipe
-    // listener by that much, so the credential provider (which connects the
-    // moment the lock screen shows) had to wait. Now the service starts with
-    // only SCRFD loaded and immediately begins listening; the heavy models
-    // load in a background thread. If a request arrives before they finish,
-    // EnsureModelsLoaded() blocks until ready.
-    std::atomic<bool> m_modelsReady{false};      // heavy models loaded OK
-    std::atomic<bool> m_modelsFailed{false};     // heavy models failed to load
+    // --- Session-aware model residency ---
+    std::shared_ptr<InferenceModels> m_models;
+    ModelState m_modelState = ModelState::Unloaded;
+    bool m_modelsWanted = false;
+    bool m_modelLoadRequested = false;
+    bool m_modelStopRequested = false;
+    bool m_modelLowLightEnhance = false;
+    unsigned int m_activeModelUsers = 0;
+
     // True only when the mandatory anti-spoof (PAD) model failed an integrity
     // (SHA-256) check — i.e. the file was tampered/corrupted, not merely a load
     // error. Lets ProcessAuthRequest tell the user "可能被篡改" instead of the
     // generic "模块不可用" so a tamper is visible on the lock screen, not just
-    // in the log. Cleared on a successful CONFIG_RELOAD recovery.
+    // in the log. Cleared when a complete bundle loads successfully or is
+    // intentionally returned to the unlocked idle state.
     std::atomic<bool> m_padIntegrityFailed{false};
-    std::atomic<bool> m_modelsLoading{false};    // loader in flight (or done)
-    std::atomic<bool> m_modelsAbort{false};      // service stopping — release waiters
-    std::thread m_modelLoadThread;
-    std::mutex m_modelMutex;                     // guards the model pointers
-    std::condition_variable m_modelCv;           // signaled when ready/failed/abort
+    std::thread m_modelWorkerThread;
+    std::mutex m_modelMutex;
+    std::condition_variable m_modelCv;
 };
 
 } // namespace facelogin

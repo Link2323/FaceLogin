@@ -31,6 +31,35 @@ static int OnnxThreadCount() {
     return n;
 }
 
+// ONNX Runtime documents Ort::Env as the process-level runtime environment and
+// provides global thread pools for sessions that are repeatedly constructed.
+// A shared Env alone is insufficient: the default SessionOptions still creates
+// an 8-thread pool for every detector/recognizer session, and the Windows thread
+// handles remained after teardown (~17 handles per lock cycle in production).
+// Keep the pools process-long and unload only sessions/model weights.
+static std::unique_ptr<Ort::Env> CreateProcessOrtEnv(int intraOpThreads,
+                                                      const char* logId) {
+    Ort::ThreadingOptions threadingOptions;
+    threadingOptions.SetGlobalIntraOpNumThreads(intraOpThreads);
+    threadingOptions.SetGlobalInterOpNumThreads(1);
+    return std::make_unique<Ort::Env>(threadingOptions,
+                                      ORT_LOGGING_LEVEL_WARNING, logId);
+}
+
+static Ort::Env& ProcessOrtEnv() {
+    static auto env = CreateProcessOrtEnv(OnnxThreadCount(), "FaceLogin");
+    return *env;
+}
+
+// MiniFAS was calibrated with one intra-op thread per model. It runs two
+// sessions concurrently on their caller threads, so use a separate one-thread
+// global pool rather than letting both small graphs contend for the 8-thread
+// detector/recognizer pool.
+static Ort::Env& ProcessMiniFasOrtEnv() {
+    static auto env = CreateProcessOrtEnv(1, "FaceLoginMiniFAS");
+    return *env;
+}
+
 // ============================================================================
 // Low-light enhancement (recognizer)
 // ============================================================================
@@ -77,14 +106,12 @@ OnnxRecognizer::~OnnxRecognizer() = default;
 
 bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
     try {
-        m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLogin");
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(OnnxThreadCount());
-        opts.SetInterOpNumThreads(1);
+        opts.DisablePerSessionThreads();
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         std::wstring wpath(modelPath.begin(), modelPath.end());
-        m_session = std::make_unique<Ort::Session>(*m_env, wpath.c_str(), opts);
+        m_session = std::make_unique<Ort::Session>(ProcessOrtEnv(), wpath.c_str(), opts);
 
         m_memoryInfo = std::make_unique<Ort::MemoryInfo>(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
@@ -101,7 +128,7 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
         // wrong in Session 0 or masked by power policies, and threads can land
         // on E-cores. Knowing the actual value distinguishes "few threads"
         // from "threads present but slow" in one log line.
-        FACELOGIN_INFO(L"  ONNX intra-op threads: %d (hardware_concurrency=%zu)",
+        FACELOGIN_INFO(L"  ONNX global intra-op threads: %d (hardware_concurrency=%zu)",
                        OnnxThreadCount(),
                        static_cast<size_t>(std::thread::hardware_concurrency()));
 
@@ -192,14 +219,12 @@ OnnxDetector::~OnnxDetector() = default;
 
 bool OnnxDetector::Initialize(const std::wstring& modelPath) {
     try {
-        m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLogin");
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(OnnxThreadCount());
-        opts.SetInterOpNumThreads(1);
+        opts.DisablePerSessionThreads();
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         std::wstring wpath(modelPath.begin(), modelPath.end());
-        m_session = std::make_unique<Ort::Session>(*m_env, wpath.c_str(), opts);
+        m_session = std::make_unique<Ort::Session>(ProcessOrtEnv(), wpath.c_str(), opts);
 
         m_memoryInfo = std::make_unique<Ort::MemoryInfo>(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
@@ -472,14 +497,13 @@ bool MiniFasEvaluator::Initialize(const std::wstring& modelPath, float cropScale
     }
 
     try {
-        m_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "FaceLoginMiniFAS");
         Ort::SessionOptions options;
-        // These small models benchmark fastest and most consistently with one
-        // thread; service-level work remains sequential and deterministic.
-        options.SetIntraOpNumThreads(1);
-        options.SetInterOpNumThreads(1);
+        // These small models benchmark fastest and most consistently with the
+        // separate one-thread process pool above.
+        options.DisablePerSessionThreads();
         options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        m_session = std::make_unique<Ort::Session>(*m_env, modelPath.c_str(), options);
+        m_session = std::make_unique<Ort::Session>(ProcessMiniFasOrtEnv(),
+                                                   modelPath.c_str(), options);
         m_memoryInfo = std::make_unique<Ort::MemoryInfo>(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 

@@ -46,7 +46,6 @@ public:
     void SetLowLightEnhance(bool enable) { m_lowLightEnhance = enable; }
 
 private:
-    std::unique_ptr<Ort::Env> m_env;
     std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
     bool m_initialized = false;
@@ -81,7 +80,6 @@ public:
     bool IsInitialized() const { return m_initialized; }
 
 private:
-    std::unique_ptr<Ort::Env> m_env;
     std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
     bool m_initialized = false;
@@ -116,7 +114,6 @@ public:
     bool IsInitialized() const { return m_initialized; }
 
 private:
-    std::unique_ptr<Ort::Env> m_env;
     std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
     std::string m_inputName;
@@ -128,9 +125,9 @@ private:
 };
 
 // Production PAD: MiniFASNetV2 (2.7x crop) and MiniFASNetV1SE (4.0x crop)
-// evaluated concurrently (each owns its own session/env), then fused with an
-// equal-weight arithmetic mean.  If either model fails, the fused prediction
-// fails closed.
+// evaluated concurrently (each owns its own session; all sessions share the
+// process-lifetime ONNX environment), then fused with an equal-weight
+// arithmetic mean. If either model fails, the fused prediction fails closed.
 class OnnxAntiSpoof {
 public:
     OnnxAntiSpoof() = default;
