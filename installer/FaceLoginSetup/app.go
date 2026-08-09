@@ -210,6 +210,8 @@ func (a *App) Install(installDir string) map[string]interface{} {
 // Uninstall runs the full uninstallation.
 func (a *App) Uninstall() map[string]interface{} {
 	var err error
+	cleanupFailed := false
+	rebootRequired := false
 
 	a.emit(0, "开始卸载", "running", "")
 
@@ -224,9 +226,19 @@ func (a *App) Uninstall() map[string]interface{} {
 	// Step 2: Unregister COM DLL
 	a.emit(30, "注销登录组件", "running", "")
 	installDir := internal.ReadRegString(REGVAL_INSTALL_PATH, "")
+	if installDir == "" {
+		// A previous uninstall may have removed the registry key while a
+		// locked file was deferred until reboot. Recover the default install
+		// directory so a second uninstall can finish the cleanup.
+		defaultDir := internal.GetDefaultInstallDir()
+		if internal.IsSafeInstallDir(defaultDir) {
+			installDir = defaultDir
+		}
+	}
 	if installDir != "" {
 		dllPath := filepath.Join(installDir, "FaceLoginCredentialProvider.dll")
 		if err = internal.UnregisterCOMDLL(dllPath); err != nil {
+			cleanupFailed = true
 			a.emit(30, "注销登录组件", "warn", err.Error())
 		} else {
 			a.emit(50, "注销登录组件", "done", "")
@@ -245,22 +257,50 @@ func (a *App) Uninstall() map[string]interface{} {
 	// never gets silently wiped.
 	a.emit(50, "删除程序文件", "running", "")
 	if installDir != "" && internal.DirExists(installDir) {
-		removed, rmErr := internal.RemoveInstalledFiles(installDir, true)
-		if rmErr != nil {
-			a.emit(50, "删除程序文件", "warn",
-				fmt.Sprintf("已删除 %d 个文件，部分文件删除失败。", removed))
+		if !internal.IsSafeInstallDir(installDir) {
+			cleanupFailed = true
+			a.emit(50, "删除程序文件", "warn", "安装目录校验失败，已保留该目录。")
 		} else {
-			a.emit(70, "删除程序文件", "done",
-				fmt.Sprintf("已删除 %d 个程序文件及用户数据。", removed))
-		}
-
-		// Remove the (now empty) install directory — guarded so it only
-		// happens when nothing remains.
-		if internal.DirExists(installDir) {
-			if _, err := internal.RemoveInstalledDir(installDir); err != nil {
+			removed, filesPending, rmErr := internal.RemoveInstalledFiles(installDir, true)
+			installPending := filesPending
+			if rmErr != nil {
+				cleanupFailed = true
 				a.emit(70, "删除程序文件", "warn",
-					fmt.Sprintf("安装目录非空，已保留（%v）。", err))
+					fmt.Sprintf("已删除 %d 个文件，部分文件删除失败：%v", removed, rmErr))
+			} else if filesPending {
+				a.emit(70, "删除程序文件", "warn",
+					fmt.Sprintf("已删除 %d 个文件，其余占用文件已安排在重启后删除。", removed))
+			} else {
+				a.emit(70, "删除程序文件", "done",
+					fmt.Sprintf("已删除 %d 个程序文件及用户数据。", removed))
 			}
+
+			// Remove the (now empty) install directory — guarded so it only
+			// happens when nothing remains.
+			if internal.DirExists(installDir) {
+				removedDir, dirPending, dirErr := internal.RemoveInstalledDir(installDir)
+				installPending = installPending || dirPending
+				if dirErr != nil {
+					cleanupFailed = true
+					a.emit(70, "删除程序文件", "warn",
+						fmt.Sprintf("安装目录删除失败：%v", dirErr))
+				} else if dirPending {
+					a.emit(70, "删除程序文件", "warn",
+						"安装目录已验证安排在重启后删除。")
+				} else if removedDir {
+					// A transient lock may have cleared during finalization. The
+					// install tree is gone now, so stale pending-delete entries do
+					// not require a reboot.
+					installPending = false
+				} else if !removedDir {
+					cleanupFailed = true
+					a.emit(70, "删除程序文件", "warn",
+						"安装目录仍有残留文件，且未能安排重启删除。")
+				}
+			} else {
+				installPending = false
+			}
+			rebootRequired = rebootRequired || installPending
 		}
 	} else {
 		a.emit(70, "删除程序文件", "done", "")
@@ -274,10 +314,14 @@ func (a *App) Uninstall() map[string]interface{} {
 	// survive a full uninstall. Done before the registry key is deleted so the
 	// data path is still resolvable if this ever switches back to registry.
 	a.emit(70, "删除运行数据", "running", "")
-	removedData, dataErr := internal.RemoveProgramData()
+	removedData, dataPending, dataErr := internal.RemoveProgramData()
+	rebootRequired = rebootRequired || dataPending
 	if dataErr != nil {
+		cleanupFailed = true
 		a.emit(80, "删除运行数据", "warn",
-			"部分运行数据删除失败，将在重启后清除。")
+			fmt.Sprintf("运行数据删除失败：%v", dataErr))
+	} else if dataPending {
+		a.emit(80, "删除运行数据", "warn", "运行数据已安排在重启后删除。")
 	} else if removedData {
 		a.emit(80, "删除运行数据", "done", "已删除运行数据目录。")
 	} else {
@@ -289,15 +333,38 @@ func (a *App) Uninstall() map[string]interface{} {
 	// (ServiceStartUptime, UserLoggedIn) that the installer never created, so
 	// deleting only InstallPath/DataPath would leave the key behind.
 	a.emit(80, "清理注册表", "running", "")
-	_ = internal.DeleteRegKey()
-	a.emit(90, "清理注册表", "done", "")
+	if cleanupFailed {
+		// Keep InstallPath so a custom install location can be found and
+		// cleaned again after the failure is resolved. A default path is only
+		// a fallback.
+		a.emit(80, "清理注册表", "warn", "保留安装路径，修复问题后可再次运行卸载。")
+	} else {
+		if regErr := internal.DeleteRegKey(); regErr != nil {
+			cleanupFailed = true
+			a.emit(80, "清理注册表", "warn", regErr.Error())
+		} else {
+			a.emit(90, "清理注册表", "done", "")
+		}
+	}
 
 	// Step 6: Notify complete
 	a.emit(90, "完成", "running", "")
-	a.emit(100, "完成", "done",
-		"卸载完成，程序文件、人脸数据和日志已全部删除。")
+	message := "卸载完成，登录界面已恢复为默认密码登录。程序文件、人脸数据和日志已全部删除。"
+	status := "done"
+	success := true
+	if cleanupFailed {
+		message = "卸载未完全完成：存在未删除且未能安排重启删除的项目。安装路径已保留，请查看上方错误后重试。"
+		status = "fail"
+		success = false
+	} else if rebootRequired {
+		message = "卸载操作已完成；部分被占用文件和目录已验证安排在重启 Windows 后删除。"
+		status = "warn"
+	}
+	a.emit(100, "完成", status, message)
 
-	return result(true, "卸载完成，登录界面已恢复为默认密码登录。程序文件、人脸数据和日志已全部删除。")
+	response := result(success, message)
+	response["rebootRequired"] = rebootRequired
+	return response
 }
 
 func result(success bool, message string) map[string]interface{} {

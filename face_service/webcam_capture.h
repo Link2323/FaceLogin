@@ -9,6 +9,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mfobjects.h>
+#include <mutex>
 
 #include "camera_types.h"
 
@@ -37,6 +38,9 @@ public:
                     const std::wstring& devicePath = L"");
     bool IsInitialized() const { return m_initialized; }
     bool GrabFrame(FrameImage& outFrame);
+    // Interrupt a synchronous ReadSample without releasing COM objects.
+    // The caller must join the frame thread before calling Shutdown().
+    void RequestShutdown();
     void Shutdown();
 
     static bool InitializeMF();
@@ -62,6 +66,10 @@ private:
     // (low-power recovery), ReadSample keeps failing on a stale SourceReader;
     // after kMaxConsecutiveFailures we self-shutdown so the caller re-inits.
     int m_consecutiveFailures = 0;
+    // Serializes Initialize/RequestShutdown/Shutdown. GrabFrame deliberately
+    // does not hold this lock while blocked in ReadSample; RequestShutdown()
+    // only calls IMFMediaSource::Shutdown and leaves releases to Shutdown().
+    std::mutex m_lifecycleMutex;
     static bool s_mfInitialized;
     static int s_mfRefCount;
 };

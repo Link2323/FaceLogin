@@ -8,8 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
+)
+
+const (
+	cleanupRetryAttempts = 10
+	cleanupRetryDelay    = 200 * time.Millisecond
 )
 
 // EmbeddedFS is set by the caller (main.go's //go:embed resources/*).
@@ -54,6 +60,20 @@ var requiredModels = []requiredModel{
 	},
 }
 
+// Root-level payload in the current installer. Keep this aligned with the
+// allow-list in docs/BUILD.md; it is also the fallback removal manifest if the
+// embedded filesystem cannot be enumerated during uninstall.
+var currentRootPayloadFiles = []string{
+	"FaceLoginService.exe",
+	"FaceLoginCredentialProvider.dll",
+	"FaceLoginConsole.exe",
+	"abseil_dll.dll",
+	"libprotobuf-lite.dll",
+	"libprotobuf.dll",
+	"onnxruntime.dll",
+	"re2.dll",
+}
+
 // Files deployed by earlier releases but intentionally absent from the current
 // manifest. Upgrade and uninstall remove only these exact legacy names.
 var legacyModelFiles = []string{
@@ -75,6 +95,16 @@ var legacyRuntimeFiles = []string{
 	"libquadmath-0.dll",
 	"libwinpthread-1.dll",
 	"openblas.dll",
+}
+
+// Diagnostic executables were accidentally present in some older install
+// directories. They are development-only tools and are never part of the
+// current installer payload, but uninstall should remove them when upgrading
+// from one of those releases.
+var legacyToolFiles = []string{
+	"PadCalibration.exe",
+	"EmbeddingTest.exe",
+	"CameraLifecycleTest.exe",
 }
 
 func validateModelReader(label string, r io.Reader, actualSize int64, model requiredModel) error {
@@ -242,67 +272,59 @@ func ExtractAll(destDir string, progressFn func(step, total int, name string)) e
 	return nil
 }
 
-// RemoveInstalledFiles deletes exactly the files this installer deployed, in
-// the same layout ExtractAll wrote them. It NEVER removes the install directory
-// or any user data (data/, log/). Uninstall uses this instead of os.RemoveAll
-// so a corrupted/malicious InstallPath registry value can never wipe an
-// arbitrary directory. Returns the number of files removed and the first error
-// (if any) — callers can continue and report a summary.
-//
-// removeUserData: when true, additionally deletes the data/ (config.json,
-// enrolled face database) and log/ (logs) subdirectories — i.e. a full purge.
-// When false, only program files are removed and user data is preserved.
-// removeAllOrScheduleReboot tries os.RemoveAll first. If it fails (typically
-// because a file is held open by a running process — e.g. LogonUI.exe still
-// has the credential provider DLL loaded and is writing credential_provider.log),
-// it walks the tree deleting what it can and marks the rest for deletion at the
-// next reboot via MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT). The caller can then
-// proceed: the directory is effectively "gone" from the user's perspective once
-// they reboot, and RemoveInstalledDir will tolerate the pending-delete state.
-func removeAllOrScheduleReboot(path string) error {
-	if err := os.RemoveAll(path); err == nil {
-		return nil
+// scheduleDeleteOnReboot marks one file or directory for verified deletion at
+// the next boot. Callers must propagate this error: treating a failed
+// MoveFileEx as success is what previously made uninstall report a clean purge
+// while files remained on disk.
+func scheduleDeleteOnReboot(path string) error {
+	ptr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return fmt.Errorf("encode pending-delete path %s: %w", path, err)
 	}
-	// Walk and best-effort delete each entry; for entries that won't delete,
-	// schedule them for reboot deletion. Directories whose children are all
-	// deleted-or-scheduled become deletable too.
-	type pendingDir struct{ path string }
-	var dirs []pendingDir
-	err := filepath.Walk(path, func(p string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if info.IsDir() {
-			dirs = append(dirs, pendingDir{p})
-			return nil
-		}
-		if err := os.Remove(p); err != nil {
-			// Schedule for deletion at next reboot. Empty `to` means delete.
-			ptr, e := windows.UTF16PtrFromString(p)
-			if e == nil {
-				_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
-			}
-		}
-		return nil
-	})
-	// Remove directories deepest-first (children before parents). For any that
-	// won't delete immediately (children still pending-delete), schedule them for
-	// reboot deletion too — Windows clears PendingFileRename top-down, and once
-	// the files are gone the directories become removable.
-	for i := len(dirs) - 1; i >= 0; i-- {
-		dp := dirs[i].path
-		if err := os.Remove(dp); err != nil {
-			ptr, e := windows.UTF16PtrFromString(dp)
-			if e == nil {
-				_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
-			}
-		}
+	if err := windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT); err != nil {
+		return fmt.Errorf("schedule pending delete %s: %w", path, err)
 	}
-	return err
+	return nil
 }
 
-func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
-	removed := 0
+// removeFileOrScheduleReboot removes one file immediately, or verifies that it
+// was scheduled for deletion after reboot. A successful schedule is distinct
+// from an immediate removal; a failed schedule is a real error.
+func removeFileOrScheduleReboot(path string) (removed, rebootRequired bool, err error) {
+	var removeErr error
+	for attempt := 0; attempt < cleanupRetryAttempts; attempt++ {
+		removeErr = os.Remove(path)
+		if removeErr == nil {
+			return true, false, nil
+		}
+		if os.IsNotExist(removeErr) {
+			return false, false, nil
+		}
+		if attempt+1 < cleanupRetryAttempts {
+			time.Sleep(cleanupRetryDelay)
+		}
+	}
+	if scheduleErr := scheduleDeleteOnReboot(path); scheduleErr != nil {
+		return false, false, fmt.Errorf("remove %s: %v; %w", path, removeErr, scheduleErr)
+	}
+	return false, true, nil
+}
+
+// removeAllOrScheduleReboot first attempts an immediate recursive removal. If
+// Windows refuses an entry (normally because LogonUI still has it open), every
+// remaining entry is either removed or explicitly scheduled. Traversal and
+// scheduling failures are returned instead of being silently discarded.
+func removeAllOrScheduleReboot(path string) (rebootRequired bool, err error) {
+	for attempt := 0; attempt < cleanupRetryAttempts; attempt++ {
+		if err := os.RemoveAll(path); err == nil {
+			return false, nil
+		}
+		if attempt+1 < cleanupRetryAttempts {
+			time.Sleep(cleanupRetryDelay)
+		}
+	}
+
+	var dirs []string
 	var firstErr error
 	recordErr := func(err error) {
 		if err != nil && firstErr == nil {
@@ -310,175 +332,194 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (int, error) {
 		}
 	}
 
-	modelsDir := filepath.Join(destDir, "models")
-
-	entries, err := fs.ReadDir(EmbeddedFS, "resources")
-	if err != nil {
-		// If embedded resources can't be enumerated, fall back to the known
-		// top-level binary names so uninstall still removes the executables.
-		for _, name := range []string{
-			"FaceLoginService.exe",
-			"FaceLoginCredentialProvider.dll",
-			"FaceLoginConsole.exe",
-		} {
-			p := filepath.Join(destDir, name)
-			if FileExists(p) {
-				if err := os.Remove(p); err != nil {
-					recordErr(err)
-				} else {
-					removed++
-				}
-			}
+	walkErr := filepath.Walk(path, func(p string, info os.FileInfo, entryErr error) error {
+		if entryErr != nil {
+			recordErr(fmt.Errorf("walk %s: %w", p, entryErr))
+			return nil
 		}
-		for _, name := range legacyModelFiles {
-			p := filepath.Join(modelsDir, name)
-			if FileExists(p) {
-				if err := os.Remove(p); err != nil {
-					recordErr(err)
-				} else {
-					removed++
-				}
-			}
+		if info.IsDir() {
+			dirs = append(dirs, p)
+			return nil
 		}
-		return removed, firstErr
-	}
-	modelEntries, _ := fs.ReadDir(EmbeddedFS, "resources/models")
+		_, pending, removeErr := removeFileOrScheduleReboot(p)
+		if pending {
+			rebootRequired = true
+		}
+		recordErr(removeErr)
+		return nil
+	})
+	recordErr(walkErr)
 
-	for _, entry := range entries {
-		if entry.IsDir() {
+	// Children were scheduled before these directories, so PendingFileRename
+	// operations execute in an order that leaves each directory empty first.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		dir := dirs[i]
+		removeErr := os.Remove(dir)
+		if removeErr == nil || os.IsNotExist(removeErr) {
 			continue
 		}
-		name := entry.Name()
-		var dstPath string
-		if filepath.Ext(name) == ".dat" {
-			dstPath = filepath.Join(modelsDir, name)
+		if scheduleErr := scheduleDeleteOnReboot(dir); scheduleErr != nil {
+			recordErr(fmt.Errorf("remove directory %s: %v; %w", dir, removeErr, scheduleErr))
 		} else {
-			dstPath = filepath.Join(destDir, name)
-		}
-		if FileExists(dstPath) {
-			if err := os.Remove(dstPath); err != nil {
-				recordErr(err)
-			} else {
-				removed++
-			}
+			rebootRequired = true
 		}
 	}
-	for _, entry := range modelEntries {
-		if entry.IsDir() {
-			continue
+	return rebootRequired, firstErr
+}
+
+// RemoveInstalledFiles removes the current payload plus explicitly known
+// legacy files. It reports immediate removals separately from verified
+// pending-reboot removals, and never suppresses a real deletion error.
+func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, rebootRequired bool, err error) {
+	var firstErr error
+	recordErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
-		dstPath := filepath.Join(modelsDir, entry.Name())
-		if FileExists(dstPath) {
-			if err := os.Remove(dstPath); err != nil {
-				recordErr(err)
-			} else {
-				removed++
+	}
+	removeKnownFile := func(path string) {
+		if !FileExists(path) {
+			return
+		}
+		removedNow, pending, removeErr := removeFileOrScheduleReboot(path)
+		if removedNow {
+			removed++
+		}
+		if pending {
+			rebootRequired = true
+		}
+		recordErr(removeErr)
+	}
+
+	modelsDir := filepath.Join(destDir, "models")
+	var entries []fs.DirEntry
+	var readErr error
+	if EmbeddedFS == nil {
+		readErr = fmt.Errorf("embedded resource filesystem is not initialized")
+	} else {
+		entries, readErr = fs.ReadDir(EmbeddedFS, "resources")
+	}
+	if readErr != nil {
+		for _, name := range currentRootPayloadFiles {
+			removeKnownFile(filepath.Join(destDir, name))
+		}
+	} else {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
 			}
+			name := entry.Name()
+			dstPath := filepath.Join(destDir, name)
+			if filepath.Ext(name) == ".dat" {
+				dstPath = filepath.Join(modelsDir, name)
+			}
+			removeKnownFile(dstPath)
 		}
+	}
+
+	// Production and legacy model names are static security manifests; do not
+	// depend on a second embedded-filesystem enumeration that could fail silently.
+	for _, model := range requiredModels {
+		removeKnownFile(filepath.Join(modelsDir, model.fileName))
 	}
 	for _, name := range legacyModelFiles {
-		dstPath := filepath.Join(modelsDir, name)
-		if FileExists(dstPath) {
-			if err := os.Remove(dstPath); err != nil {
-				recordErr(err)
-			} else {
-				removed++
-			}
-		}
+		removeKnownFile(filepath.Join(modelsDir, name))
 	}
-	// Sweep legacy runtime DLLs (dlib/OpenBLAS, v1.5 and earlier) from the
-	// install-dir root. Without this, leftover DLLs from an upgraded install
-	// keep the directory non-empty and RemoveInstalledDir refuses to remove it.
 	for _, name := range legacyRuntimeFiles {
-		dstPath := filepath.Join(destDir, name)
-		if FileExists(dstPath) {
-			if err := os.Remove(dstPath); err != nil {
-				recordErr(err)
-			} else {
-				removed++
-			}
-		}
+		removeKnownFile(filepath.Join(destDir, name))
+	}
+	for _, name := range legacyToolFiles {
+		removeKnownFile(filepath.Join(destDir, name))
 	}
 
-	// Full purge: also remove user data and logs (config.json, the enrolled
-	// face database in data/, and log/). Only invoked when the caller opted in
-	// (removeUserData); the default uninstall preserves these.
-	//
-	// log/ often holds credential_provider.log which LogonUI.exe keeps open
-	// (the credential provider DLL stays loaded in the lock-screen process).
-	// os.RemoveAll fails on that file; we fall back to scheduling it for reboot
-	// deletion so the directory still counts as removed for RemoveInstalledDir.
 	if removeUserData {
 		for _, sub := range []string{"data", "log"} {
 			dir := filepath.Join(destDir, sub)
-			if DirExists(dir) {
-				if err := removeAllOrScheduleReboot(dir); err != nil {
-					recordErr(err)
-				} else {
-					removed++
-				}
+			if !DirExists(dir) {
+				continue
+			}
+			pending, removeErr := removeAllOrScheduleReboot(dir)
+			if pending {
+				rebootRequired = true
+			}
+			if removeErr != nil {
+				recordErr(removeErr)
+			} else if !pending {
+				removed++
 			}
 		}
 	}
 
-	return removed, firstErr
+	return removed, rebootRequired, firstErr
 }
 
-// RemoveInstalledDir removes the install directory itself, but ONLY if it is
-// empty after the files above were deleted. This is the anti-misdeletion guard:
-// a real FaceLogin install dir that held unexpected/unknown files (not deployed
-// by us) will still contain them here, so the directory is left in place and
-// false is returned — never silently wiping an arbitrary directory. Returns
-// true when the directory was removed.
-func RemoveInstalledDir(destDir string) (bool, error) {
+func isKnownRootPayload(name string) bool {
+	for _, names := range [][]string{currentRootPayloadFiles, legacyRuntimeFiles, legacyToolFiles} {
+		for _, known := range names {
+			if strings.EqualFold(name, known) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RemoveInstalledDir finalizes the verified FaceLogin install directory. Only
+// known root payload files and installer-owned subdirectories are touched;
+// unknown entries produce an explicit error. If any child is pending deletion,
+// the root directory is also verified as pending so no empty shell is left
+// after reboot.
+func RemoveInstalledDir(destDir string) (removed, rebootRequired bool, err error) {
 	if !DirExists(destDir) {
-		return true, nil // already gone
+		return true, false, nil
 	}
 	entries, err := os.ReadDir(destDir)
 	if err != nil {
-		return false, err
+		return false, false, fmt.Errorf("read install directory %s: %w", destDir, err)
 	}
-	// Also tolerate the models/ subdir being left empty (it's ours) — but only
-	// if it contains nothing. Anything else means the dir is NOT empty.
-	if len(entries) == 0 {
-		if err := os.Remove(destDir); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	// If only an empty models/ remains, remove it then retry.
-	onlyModels := len(entries) == 1 && entries[0].IsDir() && strings.EqualFold(entries[0].Name(), "models")
-	if onlyModels {
-		mEntries, _ := os.ReadDir(filepath.Join(destDir, "models"))
-		if len(mEntries) == 0 {
-			if err := os.Remove(filepath.Join(destDir, "models")); err != nil {
-				return false, err
+
+	for _, entry := range entries {
+		entryPath := filepath.Join(destDir, entry.Name())
+		if entry.IsDir() {
+			owned := strings.EqualFold(entry.Name(), "models") ||
+				strings.EqualFold(entry.Name(), "data") ||
+				strings.EqualFold(entry.Name(), "log")
+			if !owned {
+				return false, rebootRequired, fmt.Errorf("install directory contains unknown subdirectory: %s", entry.Name())
 			}
-			if err := os.Remove(destDir); err != nil {
-				return false, err
+			pending, removeErr := removeAllOrScheduleReboot(entryPath)
+			if removeErr != nil {
+				return false, rebootRequired || pending, removeErr
 			}
-			return true, nil
+			if pending {
+				rebootRequired = true
+			}
+			continue
+		}
+
+		if !isKnownRootPayload(entry.Name()) {
+			return false, rebootRequired, fmt.Errorf("install directory contains unknown file: %s", entry.Name())
+		}
+		_, pending, removeErr := removeFileOrScheduleReboot(entryPath)
+		if removeErr != nil {
+			return false, rebootRequired || pending, removeErr
+		}
+		if pending {
+			rebootRequired = true
 		}
 	}
-	// Tolerate our own subdirectories (log/, models/) remaining — they may hold
-	// files scheduled for reboot deletion (e.g. credential_provider.log held by
-	// LogonUI). Best-effort purge them; if that empties the install dir, remove it.
-	ourSubdirsOnly := true
-	for _, e := range entries {
-		if !e.IsDir() || (!strings.EqualFold(e.Name(), "models") && !strings.EqualFold(e.Name(), "log") && !strings.EqualFold(e.Name(), "data")) {
-			ourSubdirsOnly = false
-			break
-		}
+
+	removeErr := os.Remove(destDir)
+	if removeErr == nil || os.IsNotExist(removeErr) {
+		return true, rebootRequired, nil
 	}
-	if ourSubdirsOnly {
-		for _, e := range entries {
-			_ = os.RemoveAll(filepath.Join(destDir, e.Name()))
-		}
-		if err := os.Remove(destDir); err == nil {
-			return true, nil
-		}
+	if !rebootRequired {
+		return false, false, fmt.Errorf("remove install directory %s: %w", destDir, removeErr)
 	}
-	return false, nil // not empty — do NOT delete
+	if scheduleErr := scheduleDeleteOnReboot(destDir); scheduleErr != nil {
+		return false, true, fmt.Errorf("remove install directory %s: %v; %w", destDir, removeErr, scheduleErr)
+	}
+	return false, true, nil
 }
 
 // RemoveProgramData deletes the shared runtime-data directory
@@ -494,23 +535,25 @@ func RemoveInstalledDir(destDir string) (bool, error) {
 // exactly "FaceLogin" (case-insensitive) before anything is removed, so a
 // maliciously empty or corrupted %ProgramData% can never turn this into a
 // recursive wipe of an arbitrary folder. Returns removed=true when the
-// directory existed and was purged (some entries may be pending reboot delete).
-func RemoveProgramData() (removed bool, err error) {
+// directory was removed immediately; rebootRequired is true only when every
+// remaining entry was successfully scheduled for deletion.
+func RemoveProgramData() (removed, rebootRequired bool, err error) {
 	root := os.Getenv("ProgramData")
 	if root == "" {
-		return false, nil
+		return false, false, nil
 	}
 	dir := filepath.Join(root, "FaceLogin")
 	if !DirExists(dir) {
-		return false, nil
+		return false, false, nil
 	}
 	// Guard: base name must be exactly "FaceLogin". Belt-and-suspenders against
 	// a tampered %ProgramData% pointing somewhere unexpected.
 	if !strings.EqualFold(filepath.Base(filepath.Clean(dir)), "FaceLogin") {
-		return false, nil
+		return false, false, fmt.Errorf("unsafe ProgramData cleanup path: %s", dir)
 	}
-	if rerr := removeAllOrScheduleReboot(dir); rerr != nil {
-		return true, rerr
+	pending, removeErr := removeAllOrScheduleReboot(dir)
+	if removeErr != nil {
+		return false, pending, removeErr
 	}
-	return true, nil
+	return !pending, pending, nil
 }

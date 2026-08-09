@@ -300,7 +300,20 @@ EnrollmentWizard::~EnrollmentWizard() {
 bool EnrollmentWizard::StartPreview() {
     if (m_previewRunning) return true;
 
-    if (!m_webcam->Initialize(1280, 720, Utf8ToWstr(m_config.camera_device))) {
+    // The service/credential provider may still be releasing the camera just
+    // after unlock. Absorb that short hand-off window instead of reporting a
+    // spurious preview failure to the UI.
+    constexpr int kInitRetries = 5;
+    bool webcamOk = false;
+    for (int attempt = 0; attempt < kInitRetries && !webcamOk; ++attempt) {
+        webcamOk = m_webcam->Initialize(1280, 720,
+                                        Utf8ToWstr(m_config.camera_device));
+        if (!webcamOk && attempt + 1 < kInitRetries) {
+            FACELOGIN_WARN(L"Webcam init attempt %d failed — retrying", attempt + 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+    if (!webcamOk) {
         FACELOGIN_ERROR(L"Failed to initialize webcam%s",
                         m_config.camera_device.empty() ? L"" : L" (configured device)");
         return false;
@@ -363,12 +376,35 @@ bool EnrollmentWizard::StartPreview() {
     // Single background thread: GrabFrame → JPEG encode → detect → update caches.
     // The UI thread stays completely free; JS polls the caches via GetLatest*().
     m_frameThread = std::thread([this]() {
+        int reinitAttempts = 0;
         while (m_frameRunning) {
             FrameImage frame;
             if (!m_webcam->GrabFrame(frame)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                // GrabFrame self-shuts down after repeated failures, which is
+                // common when a camera is taken over during lock/resume.
+                // Rebuild it here with a bounded retry budget so the preview
+                // recovers without spinning forever on a dead SourceReader.
+                if (!m_webcam->IsInitialized() && m_frameRunning) {
+                    if (++reinitAttempts > 3) {
+                        FACELOGIN_ERROR(L"Preview camera re-init exceeded limit");
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    if (!m_frameRunning) break;
+                    if (m_webcam->Initialize(1280, 720,
+                                             Utf8ToWstr(m_config.camera_device))) {
+                        FACELOGIN_INFO(L"Preview camera re-initialized (%d/3)",
+                                       reinitAttempts);
+                        reinitAttempts = 0;
+                    } else {
+                        FACELOGIN_WARN(L"Preview camera re-init %d/3 failed",
+                                       reinitAttempts);
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }
+            reinitAttempts = 0;
 
             RotateFrame(frame, m_config.camera_rotation);
 
@@ -408,7 +444,13 @@ void EnrollmentWizard::StopPreview() {
     m_frameRunning = false;
     m_capturing = false;
 
-    // Join background threads before shutting down camera
+    // Interrupt a blocked ReadSample first, but keep COM references alive until
+    // the worker threads have exited. Releasing the reader before join would
+    // race with GrabFrame; waiting for join before requesting shutdown can
+    // hang the UI when the camera was taken over by LogonUI.
+    if (m_webcam)
+        m_webcam->RequestShutdown();
+
     if (m_captureThread.joinable())
         m_captureThread.join();
     if (m_frameThread.joinable())

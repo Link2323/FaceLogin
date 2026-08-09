@@ -47,8 +47,20 @@ void WebcamCapture::ShutdownMF() {
     }
 }
 
+void WebcamCapture::RequestShutdown() {
+    std::lock_guard<std::mutex> lock(m_lifecycleMutex);
+    // IMFMediaSource::Shutdown makes an in-flight SourceReader::ReadSample
+    // return MF_E_SHUTDOWN. Keep the reader/source references alive until the
+    // owning frame thread has joined; releasing them here would race with the
+    // blocked GrabFrame call.
+    if (m_pSource) {
+        m_pSource->Shutdown();
+    }
+}
+
 bool WebcamCapture::Initialize(int preferredWidth, int preferredHeight,
                                const std::wstring& devicePath) {
+    std::lock_guard<std::mutex> lock(m_lifecycleMutex);
     if (m_initialized) return true;
 
     m_width = preferredWidth;
@@ -444,6 +456,12 @@ bool WebcamCapture::ConvertYUY2toRGB(IMFSample* pSample,
 }
 
 void WebcamCapture::Shutdown() {
+    std::lock_guard<std::mutex> lock(m_lifecycleMutex);
+    if (m_pSource) {
+        // Idempotent after RequestShutdown(); this also covers callers that
+        // shut down an idle camera without a preceding request.
+        m_pSource->Shutdown();
+    }
     if (m_pReader) {
         m_pReader->Release();
         m_pReader = nullptr;

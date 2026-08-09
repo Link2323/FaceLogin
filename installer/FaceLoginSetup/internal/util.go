@@ -46,12 +46,61 @@ func DeleteRegValue(valueName string) error {
 	return k.DeleteValue(valueName)
 }
 
-// DeleteRegKey removes the entire HKLM\SOFTWARE\FaceLogin key (the key itself,
-// not just one value). Use on uninstall: the service and credential provider
-// write runtime values (ServiceStartUptime, UserLoggedIn, ...) that the installer
-// never created, so deleting only InstallPath/DataPath would leave the key behind.
+// deleteRegKeyTree recursively removes a registry key's subkeys and values.
+// RegDeleteKey cannot remove a key that still has subkeys, and runtime
+// components may create children below the FaceLogin key, so uninstall must
+// delete depth-first.
+func deleteRegKeyTree(parent registry.Key, subpath string) error {
+	k, err := registry.OpenKey(parent, subpath,
+		registry.ENUMERATE_SUB_KEYS|registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		if err == registry.ErrNotExist {
+			return nil
+		}
+		return err
+	}
+
+	subs, err := k.ReadSubKeyNames(-1)
+	if err != nil {
+		k.Close()
+		return err
+	}
+	for _, sub := range subs {
+		if err := deleteRegKeyTree(k, sub); err != nil {
+			k.Close()
+			return err
+		}
+	}
+
+	values, err := k.ReadValueNames(-1)
+	if err != nil {
+		k.Close()
+		return err
+	}
+	for _, value := range values {
+		if err := k.DeleteValue(value); err != nil && err != registry.ErrNotExist {
+			k.Close()
+			return err
+		}
+	}
+
+	// Close before deleting the key itself so no child handle remains open.
+	if err := k.Close(); err != nil {
+		return err
+	}
+	return registry.DeleteKey(parent, subpath)
+}
+
+// DeleteRegKey removes the entire HKLM\SOFTWARE\FaceLogin key tree. Use on
+// uninstall: the service and credential provider write runtime values
+// (ServiceStartUptime, UserLoggedIn, ...) that the installer never created,
+// and future versions may write subkeys as well.
 func DeleteRegKey() error {
-	return registry.DeleteKey(registry.LOCAL_MACHINE, `SOFTWARE\FaceLogin`)
+	err := deleteRegKeyTree(registry.LOCAL_MACHINE, `SOFTWARE\FaceLogin`)
+	if err != nil && err != registry.ErrNotExist {
+		return fmt.Errorf("delete registry key tree SOFTWARE\\FaceLogin: %w", err)
+	}
+	return nil
 }
 
 // Path helpers
@@ -75,7 +124,8 @@ func DirExists(path string) bool {
 
 // IsSafeInstallDir returns true only when path looks like a real FaceLogin
 // install directory, i.e. the directory name contains "FaceLogin" (case-
-// insensitive) AND the directory holds FaceLoginService.exe. Used before an
+// insensitive) and it holds the service executable or another known install
+// marker. Used before an
 // uninstall deletes the tree: without this guard, a corrupted/malicious
 // InstallPath registry value (e.g. "C:\" or "C:\Users\<user>") would make
 // os.RemoveAll recursively delete an arbitrary directory — catastrophic data
@@ -91,15 +141,29 @@ func IsSafeInstallDir(path string) bool {
 		return false
 	}
 
-	// 2) The directory must contain the service executable — the strongest
-	//    signal that this is really an install dir, not just a folder whose
-	//    name happens to contain "FaceLogin".
+	// 2) A current install contains the service executable. An older uninstall
+	//    may already have removed that file while leaving a known payload or
+	//    runtime-data directory behind, so accept those explicit markers too.
 	svcPath := filepath.Join(path, "FaceLoginService.exe")
-	if !FileExists(svcPath) {
-		return false
+	if FileExists(svcPath) {
+		return true
 	}
-
-	return true
+	for _, marker := range []string{
+		"FaceLoginConsole.exe",
+		"FaceLoginCredentialProvider.dll",
+		"PadCalibration.exe",
+		"EmbeddingTest.exe",
+		"CameraLifecycleTest.exe",
+		"models",
+		"data",
+		"log",
+	} {
+		markerPath := filepath.Join(path, marker)
+		if FileExists(markerPath) || DirExists(markerPath) {
+			return true
+		}
+	}
+	return false
 }
 
 // CopyFile copies a file from src to dst. Parent directories of dst must exist.
