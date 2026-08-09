@@ -1,41 +1,16 @@
 # FaceLogin 技术开发文档
 
-## 一、项目概述
+本文件是 **AI 编码 agent 与开发者的代码导航索引**——"要改 X → 去哪个文件 → 这个文件长什么样"。逐文件索引 + 协议规格集中在此。
 
-### 1.1 项目简介
-
-FaceLogin 是一个 Windows 人脸识别登录系统，允许用户通过摄像头人脸识别解锁 Windows 桌面。项目基于 Windows Credential Provider 框架实现锁屏/登录界面集成，使用 ONNX Runtime 进行人脸检测（SCRFD）、识别（InsightFace w600k_r50）与活体检测（双 MiniFAS 融合）；图像容器/缩放/裁剪为自研 `common/frame_image.h`（v1.6 起 dlib 完全移除）。
-
-### 1.2 技术栈
-
-| 层面 | 技术 |
-|---|---|
-| 编程语言 | C++20, Go (安装程序) |
-| 构建系统 | CMake 3.20+ |
-| 包管理 | vcpkg |
-| 人脸检测 | SCRFD 10g gnkps ONNX（dlib HOG 已移除） |
-| 关键点 | SCRFD 自带 5 关键点（gnkps 变体），相似变换对齐（dlib 68 点 Shape Predictor 已移除） |
-| 人脸识别 | InsightFace buffalo_l w600k_r50 ONNX（512 维，IResNet-50；dlib ResNet 已移除） |
-| 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 50/50 融合静默反欺诈 |
-| 相机采集 | Media Foundation / DirectShow |
-| 凭据提供 | Windows Credential Provider COM (ICredentialProvider) |
-| 进程通信 | 命名管道 (Named Pipe), UTF-16LE 编码 |
-| 凭据加密 | DPAPI (CRYPTPROTECT_LOCAL_MACHINE) |
-| 安装程序 | Go Wails v2 + Vue 3 |
-| 控制台UI | WebView2 + HTML/CSS/JS (嵌入式资源) |
-| 编译器 | MSVC 2022 (Visual Studio 2022) |
-
-### 1.3 系统要求
-
-- Windows 10 21H2+ / Windows 11
-- x64 处理器
-- USB 摄像头（或内置摄像头），支持 1280×720 分辨率
-- 管理员权限（用于安装、注册COM组件、服务管理）
-- WebView2 运行时（Windows 11 内置，Windows 10 自动安装）
+人类向内容已按职责拆分到 `docs/`：
+- [`docs/design/overview.md`](docs/design/overview.md) —— 项目简介、技术栈、安全设计、账户兼容性
+- [`docs/design/development.md`](docs/design/development.md) —— 本地开发流程、编码规范
+- [`docs/operations/operations.md`](docs/operations/operations.md) —— 系统要求、故障排查
+- [`docs/BUILD.md`](docs/BUILD.md) —— 构建/重编/打包流程
 
 ---
 
-## 二、项目结构
+## 一、项目结构
 
 ```
 FaceLogin/
@@ -101,9 +76,9 @@ FaceLogin/
 
 ---
 
-## 三、模块架构
+## 二、模块架构
 
-### 3.1 整体架构图
+### 2.1 整体架构图
 
 ```mermaid
 graph TB
@@ -156,7 +131,7 @@ graph TB
     style Storage fill:#fdf2f8,stroke:#db2777
 ```
 
-### 3.2 数据流
+### 2.2 数据流
 
 #### 认证流程 (Login / Unlock)
 
@@ -179,9 +154,9 @@ sequenceDiagram
     CP->>Pipe: AUTH_REQUEST
     Pipe->>Svc: 转发请求
     Svc->>Svc: 初始化摄像头
-    loop 每帧 (~30fps, 最长15s)
+    loop 每帧 (认证超时时限内)
         Svc->>Svc: 抓帧 → SCRFD 检测 (bbox+5关键点) → 5点相似变换对齐
-        Svc->>Svc: 活体检测 (双 MiniFAS 50/50 融合, 5/5 帧)
+        Svc->>Svc: 活体检测 (双 MiniFAS 50/50 融合, 全部计帧通过)
         Svc->>Svc: 计算512维嵌入 (w600k_r50)
         Svc->>DB: 匹配嵌入向量 (欧氏距离)
         alt 匹配成功
@@ -218,15 +193,15 @@ sequenceDiagram
     User->>App: 以管理员运行
     App->>App: 获取用户身份<br/>(GetUserNameW + IdentityStore)
     App->>Cam: StartPreview()
-    loop 渲染循环 (~30fps)
+    loop 渲染循环
         App->>Cam: GrabFrame()
         App->>Detector: SCRFD 检测 (bbox+5关键点) + 偏航角估计
         App-->>User: Canvas 实时预览 + 人脸框 + 角度指示
     end
     User->>App: 点击 "开始采集"
-    loop 多角度 (正面/左转30°/右转30°)
-        App->>Detector: yaw 门控 (±10°) + 逐帧 PAD (双 MiniFAS)
-        loop 采集 5 帧 (该角度)
+    loop 多角度 (正面/左转/右转)
+        App->>Detector: yaw 门控 (容差见代码) + 逐帧 PAD (双 MiniFAS)
+        loop 采集 (该角度, 帧数见 kAngleTargetFrames)
             App->>Cam: GrabFrame()
             App->>Detector: 计算512维嵌入 (w600k_r50)
             App->>App: 保存嵌入向量
@@ -247,9 +222,10 @@ sequenceDiagram
 
 ---
 
-## 四、公共库 — `common/`
+## 三、公共库 — `common/`
 
-### 4.1 日志系统 (`logger.h/cpp`)
+<a id="sec-logger"></a>
+### 3.1 日志系统 (`logger.h/cpp`)
 
 单例模式日志系统，线程安全（CRITICAL_SECTION）。
 
@@ -280,7 +256,23 @@ FACELOGIN_ERROR(L"...");
 - 线程安全写入
 - 每个进程独立日志文件 (service.log / credential_provider.log / enrollment.log)
 
-### 4.2 IPC 协议 (`ipc_protocol.h/cpp`)
+**日志目录决策**（Logger 自身不决定目录，由三个调用方各自解析后传 `SetLogFile`）：
+
+| 组件 | 路径解析 | 位置 |
+|------|----------|------|
+| credential_provider DLL（锁屏） | `DataPath` → `%ProgramData%\FaceLogin` → 硬编码 `C:\ProgramData\FaceLogin` | dllmain.cpp:98-109 |
+| EnrollmentWizard | 同上（DataPath → ProgramData → 硬编码） | EnrollmentWizard.cpp:165-179 |
+| face_service（service 模式） | `ResolveSecureDataDir()`，白名单校验失败 **fail-closed 拒绝启动**，不回退 | FaceService.cpp:297-324 |
+| face_service（standalone 开发） | `ResolveSecureDataDir()` → 失败回退 EXE 目录 → 兜底 `.`（cwd） | FaceService.cpp:189-216 |
+
+> **关键事实：生产部署下三个日志都写在 `C:\Program Files\FaceLogin\log\`**，不在 ProgramData。因为安装器把 `DataPath` 写成安装目录本身（见 §7.6 提示）。ProgramData 只是 DataPath 为空时的回退。
+>
+> **三组件不一致（隐蔽坑）**：`data_path.h` 注释描述的"生产态白名单只信 EXE 目录、ProgramData 被拒"**只对 face_service 生效**。credential_provider DLL 和 EnrollmentWizard **直接读 DataPath，不做白名单校验**——只是因为默认 DataPath = 安装目录，结果才一致。改日志/数据路径相关逻辑时，三个调用方都要看，不要只看 `data_path.cpp`。
+>
+> **写失败静默丢弃**：`SetLogFile` 里 `CreateFileW` 若返回 INVALID_HANDLE_VALUE（路径不可写/无权限），`WriteToFile` 静默丢弃日志，不报错（logger.cpp:133-150）。排查"日志没生成"时先查目标目录的 ACL 与 DataPath 实际值，不要只看有没有异常。
+
+<a id="sec-ipc"></a>
+### 3.2 IPC 协议 (`ipc_protocol.h/cpp`)
 
 传输层基于 Windows 命名管道 `\\.\pipe\FaceLoginPipe`。
 
@@ -289,7 +281,7 @@ FACELOGIN_ERROR(L"...");
 | `AUTH_REQUEST` | 纯文本 | 凭据提供方发起认证请求 |
 | `AUTH_SUCCESS:SID:UPN:DOMAIN\USER:PASSWORD` | 冒号分隔 (≥3个) | 认证成功，返回凭据（V4格式含SID/UPN/人脸ID） |
 | `AUTH_SUCCESS:DOMAIN\USER:PASSWORD` | 冒号分隔 (1个) | 旧格式（V1向后兼容） |
-| `AUTH_TIMEOUT` | 纯文本 | 15秒内未检测到匹配人脸 |
+| `AUTH_TIMEOUT` | 纯文本 | 认证超时（超时时限见代码），未检测到匹配人脸 |
 | `AUTH_NO_FACE` | 纯文本 | 检测超时无匹配 |
 | `AUTH_ERROR:message` | 前缀+消息 | 错误状态 |
 | `AUTH_CANCELLED` | 纯文本 | 用户取消 |
@@ -302,8 +294,8 @@ FACELOGIN_ERROR(L"...");
 **安全措施**：
 - DACL: 仅 SYSTEM + Administrators 可连接
 - `PIPE_REJECT_REMOTE_CLIENTS`: 拒绝远程客户端
-- 缓冲区大小: 4096 字节
-- 超时: 30 秒
+- 缓冲区大小: 见代码常量
+- 超时: 见代码常量
 - 密码传输后立即 `SecureZeroMemory` 擦除
 
 **AuthResult 结构**:
@@ -320,7 +312,7 @@ struct AuthResult {
 };
 ```
 
-### 4.3 DPAPI 加密 (`dpapi_util.h/cpp`)
+### 3.3 DPAPI 加密 (`dpapi_util.h/cpp`)
 
 使用 Windows Data Protection API。
 
@@ -328,14 +320,15 @@ struct AuthResult {
 - **Unprotect()**: 解密已保护的数据
 - 加密后数据以二进制格式存入 `users.dat`
 
-### 4.4 配置系统 (`config_util.h/cpp`)
+<a id="sec-config"></a>
+### 3.4 配置系统 (`config_util.h/cpp`)
 
 ```cpp
 struct AppConfig {
     std::string    recognition_model      = "onnx";      // 保留兼容（dlib 识别器已移除，仅 onnx 有效）
     std::string    detector               = "scrfd";     // 保留兼容（dlib HOG 检测器已移除，仅 scrfd 有效）
     LivenessMethod liveness_method        = LivenessMethod::AntiSpoof;
-    float          match_threshold        = 0.80f;      // 512-D 欧氏距离阈值（默认 0.80，可配置，EmbeddingThresholdForDim 钳到 [0.70, 1.00]）
+    float          match_threshold        = 0.80f;      // 512-D 欧氏距离阈值（可配置，EmbeddingThresholdForDim 钳制）
     float          anti_spoof_threshold   = 0.281f;      // 校准后的 50/50 双 MiniFAS 融合阈值
     bool           low_light_enhance      = false;       // 暗光增强（仅作用于识别嵌入，不影响 PAD）
     std::string    camera_device          = "";          // 设备符号链接；空 = 首个摄像头
@@ -353,9 +346,9 @@ enum class LivenessMethod {
 
 ---
 
-## 五、人脸识别服务 — `face_service/`
+## 四、人脸识别服务 — `face_service/`
 
-### 5.1 服务入口 (`main.cpp`)
+### 4.1 服务入口 (`main.cpp`)
 
 ```
 用法:
@@ -367,7 +360,7 @@ enum class LivenessMethod {
 
 **单实例保护**: 全局命名互斥体 `Global\FaceLoginService_SingleInstance`
 
-### 5.2 服务核心 (`FaceService.h/cpp`)
+### 4.2 服务核心 (`FaceService.h/cpp`)
 
 **生命周期**:
 
@@ -396,17 +389,17 @@ ServiceMain()
 1. 检查注册用户数 > 0
 2. 活体方法强制为 antispoof（dlib 识别器/HOG 检测器已移除，系统为纯 ONNX）
 3. 延时初始化摄像头 (仅在收到认证请求时打开，避免摄像头占用)
-4. 丢弃前3帧 (自动曝光调整)
+4. 丢弃若干帧用于自动曝光调整（帧数见代码）
 5. 重置活体检测器
-6. 融合循环 (最长时间 m_authTimeoutSeconds = 15秒全局；PAD 另有 8 秒窗口)，共 5 个计数帧、要求 5/5 通过：
+6. 融合循环 (全局超时 `m_authTimeoutSeconds`；PAD 另有独立时间窗口)，要求所有计帧全部通过：
    a. 抓取一帧
    b. SCRFD gnkps 检测 (bbox + 5 关键点)；检测最大人脸
    c. 5 点相似变换对齐到 112×112（无独立地标模型）
-   d. 活体检测 (双 MiniFAS 50/50 融合，60ms 帧间间隔)
-   e. 身份绑定：**仅在第 1/3/5 个计数帧**计算 512 维嵌入向量 (InsightFace w600k_r50) → 数据库匹配。首帧锚定 SID；第 3 帧与末帧必须返回同一 SID，否则 fail-closed（换脸拒绝）。末帧即最终身份门（无独立 post-liveness 验证，已删除）
-   f. 第 2/4 帧用 bbox IoU 连续性校验 (阈值 0.35)；未匹配的绑定帧滑出计数不增 totalChecked
-   g. 匹配成功 (欧氏距离 < 阈值[默认 0.80，可配置，钳到 0.70–1.00] + 最佳/次佳比 < 0.75) → 构建 AUTH_SUCCESS → 发送凭据 → 退出
-   h. 每**次成功认证恰好 3 次 r50 嵌入**（6→4→3 优化轨迹见 `docs/performance-baseline.md` 实验 7）
+   d. 活体检测 (双 MiniFAS 50/50 融合，帧间间隔见代码)
+   e. 身份绑定：**仅在部分绑定帧**计算 512 维嵌入向量 (InsightFace w600k_r50) → 数据库匹配。首帧锚定 SID；后续绑定帧必须返回同一 SID，否则 fail-closed（换脸拒绝）。末帧即最终身份门（无独立 post-liveness 验证，已删除）
+   f. 非绑定帧用 bbox IoU 连续性校验；未匹配的绑定帧滑出计数不增 totalChecked
+   g. 匹配成功 (欧氏距离 < 阈值[可配置，钳制区间见代码] + 最佳/次佳比门控) → 构建 AUTH_SUCCESS → 发送凭据 → 退出
+   h. 嵌入次数与优化轨迹见 `docs/performance-baseline.md`
 7. 超时 → 发送 AUTH_TIMEOUT
 8. 完成后关闭摄像头，释放资源
 ```
@@ -419,22 +412,11 @@ ServiceMain()
 | COM线程模型 | MTA | COINIT_MULTITHREADED |
 | 颜色格式 | NV12 → RGB | RGB24 |
 | Session 0 支持 | ❌ | ✅ |
-| 分辨率 | 1280×720 | 1280×720 |
+| 分辨率 | 见代码默认配置 | 见代码默认配置 |
 
-**配置项** (通过 config.json + `CONFIG_RELOAD` 热加载):
+**配置项**: 见 §3.4 `AppConfig` 结构（通过 config.json + `CONFIG_RELOAD` 热加载）。
 
-| 配置项 | 默认值 | 说明 |
-|---|---|---|
-| `recognition_model` | `"onnx"` | 保留兼容 (仅 onnx 支持) |
-| `detector` | `"scrfd"` | 保留兼容 (仅 scrfd 支持) |
-| `liveness_method` | `"antispoof"` | 活体方法: antispoof / none (blink 已随 dlib 68点移除, 配置兼容映射到 antispoof) |
-| `match_threshold` | 0.80 | 512-D 欧氏距离阈值（默认 0.80；可配置，`EmbeddingThresholdForDim` 钳到 [0.70, 1.00]，越界回退 0.80） |
-| `anti_spoof_threshold` | 0.281 | 双 MiniFAS 融合阈值 (越高越严格) |
-| `low_light_enhance` | `false` | 暗光增强：对暗光人脸 chip 做亮度归一化后再识别。**仅作用于识别嵌入，不影响 PAD**（PAD 保持标定时的原始预处理） |
-| `camera_device` | `""` | 摄像头设备符号链接；空 = 自动选第一个摄像头，可指定多摄中的某一个 |
-| `camera_rotation` | `0` | 摄像头画面顺时针旋转角度，合法值 0/90/180/270；非法值回退 0 并告警。用于物理安装方向非标的摄像头（如竖装 PC 摄像头） |
-
-### 5.3 人脸对齐 (`face_align.h`)
+### 4.3 人脸对齐 (`face_align.h`)
 
 v1.5 起不再使用 dlib 68 点形状预测器。SCRFD (gnkps 变体) 直接输出 5 关键点（左右眼/鼻/左右嘴角），对齐由纯几何完成:
 
@@ -446,7 +428,7 @@ float EstimateYawDeg(const float kps[10]);   // 偏航角估计 (弱透视模型
 
 **原理**: 5 点 → InsightFace 标准参考框 (112×112) 的最小二乘相似变换（旋转+等比缩放+平移，无剪切），双线性逆映射采样。偏航角 = atan(k·鼻尖水平偏移/视眼距)（k = 眼距/鼻突 ≈ 65/35mm ≈ 1.86，`kYawCalibration`），符号约定：头转向自己左侧为正。
 
-### 5.4 人脸识别 (`onnx_models.h/cpp`)
+### 4.4 人脸识别 (`onnx_models.h/cpp`)
 
 ```cpp
 class OnnxRecognizer {
@@ -458,25 +440,26 @@ class OnnxRecognizer {
 
 **嵌入计算**: 输入对齐后的 112×112 帧 → 输出 512 维浮点向量 (L2 归一化)
 
-**匹配**: 欧氏距离比对，512-D 用 0.80（实测同人边界 0.14-0.80，见 credential_store.h）。同时检查最佳匹配 / 次佳匹配比 < 0.75（防误匹配）。
+**匹配**: 欧氏距离比对（阈值见 `match_threshold`，实测同人边界见 credential_store.h）。同时检查最佳匹配 / 次佳匹配比门控（防误匹配）。
 
-### 5.5 活体检测
+### 4.5 活体检测
 
-v1.5 起 blink (EAR) 活体随 dlib 68 点移除。当前使用 MiniFASNetV2 与 MiniFASNetV1SE 的 50/50 融合分数，阈值 0.281，并要求 5/5 帧全部通过。配置 `liveness_method: "blink"` 会自动映射到 antispoof 并记录警告。
+双 MiniFAS (V2+V1SE) 50/50 融合，要求**所有计帧全部通过**（fail-closed）。方法枚举与 `blink→antispoof` 映射见 §3.4 `LivenessMethod`；阈值见 `anti_spoof_threshold`。
 
-### 5.6 ONNX 模型 (`onnx_models.h/cpp`)
+### 4.6 ONNX 模型 (`onnx_models.h/cpp`)
 
 封装三个 ONNX 推理引擎:
 
 | 类 | 模型 | 输入 | 输出 | 用途 |
 |---|---|---|---|---|
-| `OnnxDetector` | SCRFD gnkps (`det_10g_gnkps.onnx`) | 512×512 直接拉伸（动态维度图；原 640→512 已实测 60/60 IoU 0.96 无损） | 检测框+5点关键点 | 人脸检测 |
+| `OnnxDetector` | SCRFD gnkps (`det_10g_gnkps.onnx`) | 512×512 直接拉伸（动态维度图） | 检测框+5点关键点 | 人脸检测 |
 | `OnnxRecognizer` | InsightFace buffalo_l (`w600k_r50.onnx`) | 112×112 对齐人脸 | 512维嵌入 | 人脸识别 |
 | `OnnxAntiSpoof` | `MiniFASNetV2.onnx` + `MiniFASNetV1SE.onnx` | bbox 扩展裁剪（2.7× / 4.0×） | 50/50 融合活体分数 [0,1] | 静默反欺诈 |
 
 所有 ONNX 模型放置在 `%PROGRAMDATA%\FaceLogin\models\` 下。
 
-### 5.7 凭据存储 (`credential_store.h/cpp`)
+<a id="sec-credential-store"></a>
+### 4.7 凭据存储 (`face_service/credential_store.h/cpp`)
 
 **V4 二进制文件格式** (`users.dat`):
 
@@ -495,7 +478,7 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除。当前使用 MiniFASNetV2 与
   sid:            wchar_t[sidLen]         (V2+, e.g. "S-1-5-21-...")
   passwordLen:    uint32_t
   encryptedPass:  uint8_t[passwordLen]    (DPAPI 加密，或 0/1 字节 passwordless 哨兵)
-  faceCount:      uint32_t                (V4, ≥1, ≤ kMaxFacesPerUser=3)
+  faceCount:      uint32_t                (V4, ≥1, ≤ kMaxFacesPerUser)
   [faces] × faceCount:
     faceId:       uint32_t                (V4, 账号内唯一，≥1，新脸复用最小空位，保持紧凑)
     labelLen:     uint32_t                (V4, 0 = 空)
@@ -506,15 +489,35 @@ v1.5 起 blink (EAR) 活体随 dlib 68 点移除。当前使用 MiniFASNetV2 与
 
 **V1/V2/V3 向后兼容**: V1 加载时用 `LookupAccountNameW` + IdentityStore 注册表自动补 SID/UPN；V1/V2 固定 128-D embedding，V3 长度前缀 embedding。**加载时在内存中把单条 embedding 包装成单元素 `faces`（id=1，label="脸1"）升级为 V4 结构，但不写回磁盘**——文件保持旧版本直到下一次 `SaveDatabase()`（录入/删除时）才写为 V4。这保证旧版安装的磁贴仍可读取 header。
 
-**每账号多人脸**: `UserRecord.faces` 为 `vector<FaceRecord>`（`FaceRecord = {id, label, embedding}`）。`AddFace` 是 create-or-append：账号不存在则创建（首脸 id=1），存在则追加新脸（id=最小空位，删除后补录保持紧凑）且**不动已存密码**；全局 `kMaxUsers`（5）账号上限、每账号 `kMaxFacesPerUser`（3）脸数上限，超限拒绝。`DeleteFace` 删某张脸，删后无脸则连带移除整个账号（0 脸账号永不落盘）。`ClearFacesForAccount` 清空某账号全部脸但保留身份/密码（多角度重录入替换用）。匹配为账号级聚合：账号内取各脸最小距离作为账号距离，账号间比较 best/second-best，避免同账号多脸互相竞争抬高 ratio。
+**每账号多人脸**: `UserRecord.faces` 为 `vector<FaceRecord>`（`FaceRecord = {id, label, embedding}`）。`AddFace` 是 create-or-append：账号不存在则创建（首脸 id=1），存在则追加新脸（id=最小空位，删除后补录保持紧凑）且**不动已存密码**；全局 `kMaxUsers` 账号上限、每账号 `kMaxFacesPerUser` 脸数上限（具体数值见代码常量），超限拒绝。`DeleteFace` 删某张脸，删后无脸则连带移除整个账号（0 脸账号永不落盘）。`ClearFacesForAccount` 清空某账号全部脸但保留身份/密码（多角度重录入替换用）；`ClearAllFaces`/`DeleteUserBySid` 等同删整个账号；`UpdateAccountIdentity` 原地更新身份+密码但**保留全部已录人脸**（MSA→local 切换清 UPN 用）；`RenameFace` 改脸标签（人脸管理 UI 用）。所有写操作改后须显式调 `SaveDatabase()` 落盘。匹配为账号级聚合：账号内取各脸最小距离作为账号距离，账号间比较 best/second-best，避免同账号多脸互相竞争抬高 ratio（单账号场景总通过）。
+
+**阈值钳制**: `EmbeddingThresholdForDim`（credential_store.h 顶部）对 512-D ONNX 把配置阈值钳制到安全带，越界回退默认值（含 legacy dlib 默认）；128-D dlib / 未知维度原样返回。具体区间/回退值与标定依据见代码及 `docs/threshold-calibration.md`。
+
+**认证流水线默认阈值速查**: 以下为代码实测值（非推测），改认证/活体逻辑时直接对这张表。标定方法与依据见 `docs/threshold-calibration.md`。
+
+| 参数 | 默认值 | 钳制/约束 | 可配置 | 标识符（位置） |
+|------|--------|-----------|--------|----------------|
+| 人脸匹配欧氏距离阈值 | `0.80` | 加载时 `[0.70, 1.00]`，越界**回退 0.80**（不钳到边界）；匹配时 `EmbeddingThresholdForDim` 再次收口 | 是（config.json `match_threshold`，注册表 `MatchThreshold` DWORD/100） | `AppConfig::match_threshold`（config_util.h:15）；钳制 config_util.cpp:147-152 + credential_store.h:32-40 |
+| 活体（PAD）阈值 | `0.281` | 无（越界不校正，但融合分数 fail-closed 校验 [0,1]） | 是（config.json `anti_spoof_threshold`） | `AppConfig::anti_spoof_threshold`（config_util.h:16） |
+| 最佳/次佳比门控 | `0.75`（`bestDist/secondBestDist >= 0.75` → **拒绝**） | 仅 `comparableAccounts > 1` 时启用 | 否（硬编码） | 局部 `ratio`，credential_store.cpp:624-625 |
+| 双 MiniFAS 融合权重 | `0.5 / 0.5`（算术平均） | 单分数非 [0,1] 或非有限 → fail-closed 返回 `-1.0` | 否 | `fusedScore = (v2+v1se)*0.5f`，onnx_models.cpp:673 |
+| SCRFD 检测分数阈值 | `0.5` | — | 否（constexpr） | `kScoreThreshold`，onnx_models.cpp:321 |
+| SCRFD NMS IoU | `0.5` | — | 否（constexpr） | `kNmsIoU`，onnx_models.cpp:389 |
+| PAD 帧数要求 | 5 帧须全过（5/5） | 全计帧必须通过 | 否 | `AntiSpoofCheckCount`/`AntiSpoofPassRequired`，liveness_types.h:13-19 |
+| 全局认证超时 | `15 s`（挂钟，从 `startTime` 起） | 在融合活体+一致性循环内检查 | 否（成员默认） | `m_authTimeoutSeconds`，FaceService.h:103 / .cpp:936 |
+| PAD 独立时间窗 | `8 s`（与注册端 EnrollmentWizard 对齐） | 超 8s 即便未到全局超时也退出 PAD 循环 | 否（字面量） | FaceService.cpp:946 |
+| 快速失败：全程无人脸 | `2.5 s` | — | 否（字面量） | FaceService.cpp:959 |
+| 快速失败：持续 PAD 拒绝（有人脸但 passCount==0） | `2.0 s` | — | 否（字面量） | FaceService.cpp:987 |
+
+> 提示：`FaceService.h` 中 `m_matchThreshold` 的成员初始化器写的是 `0.30f`，但这是**死代码**——`Initialize`/reload 时立即被 `m_config.match_threshold`(0.80) 覆盖，运行时实际阈值永远是后者。读代码时不要被 0.30 误导。
 
 **线程安全**: 所有操作在调用者持有锁的前提下执行。服务端在主循环中串行处理请求，无并发写入场景；唯一写者是录入控制台（单写者）。
 
-**MatchResult**: 匹配时返回 `username / upn / sid / password(解密后) / passwordless / distance / matchedFaceId / accountFaceCount`，密码使用后立即 `SecureZeroMemory` 擦除。
+**MatchResult**: 匹配时返回 `username / upn / sid / password(解密后) / passwordless / distance`，密码使用后立即 `SecureZeroMemory` 擦除；`passwordless=true` 时**不得提交 LSA 凭据**。仅比较同维度 embedding，异维度跳过。
 
 **CP 兼容**: `FaceLoginProvider::ReadUserCountFromDatabase` 只读 header（magic/version/count），接受 v1..v4。若旧版（≤1.2.0）CP 读到 v4 文件会拒绝显示磁贴（version>3 → 视为无用户），密码登录不受影响——安全回退。
 
-### 5.8 命名管道服务端 (`pipe_server.h/cpp`)
+### 4.8 命名管道服务端 (`pipe_server.h/cpp`)
 
 ```cpp
 class PipeServer {
@@ -530,13 +533,13 @@ class PipeServer {
 - `SECURITY_ATTRIBUTES` 带自定义 DACL：仅 SYSTEM + Administrators
 - `PIPE_REJECT_REMOTE_CLIENTS`
 - 管道实例: 1（单客户端模型，串行服务）
-- 缓冲区: 4096 字节
+- 缓冲区: 见代码常量
 
 ---
 
-## 六、凭据提供方 — `credential_provider/`
+## 五、凭据提供方 — `credential_provider/`
 
-### 6.1 COM 注册 (`dllmain.cpp`)
+### 5.1 COM 注册 (`dllmain.cpp`)
 
 **CLSID**: `{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`
 
@@ -549,7 +552,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
 
 **导出函数**: `DllGetClassObject`, `DllCanUnloadNow`, `DllRegisterServer`, `DllUnregisterServer`
 
-### 6.2 凭据提供方 (`FaceLoginProvider.h/cpp`)
+### 5.2 凭据提供方 (`FaceLoginProvider.h/cpp`)
 
 实现 `ICredentialProvider` 接口。
 
@@ -568,7 +571,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
 
 **用户检测**: `ReadUserCountFromDatabase()` 读取 `users.dat` (支持 V1..V4)，无注册用户时返回 `E_NOTIMPL` 隐藏磁贴。
 
-### 6.3 凭据磁贴 (`FaceLoginCredential.h/cpp`)
+### 5.3 凭据磁贴 (`FaceLoginCredential.h/cpp`)
 
 实现 `ICredentialProviderCredential` 接口，核心状态机:
 
@@ -592,7 +595,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
 - 主线程: LogonUI 调用 COM 接口方法
 - 后台线程: 阻塞式 `ReadFile` 等待管道响应
 - 同步: `CRITICAL_SECTION` 保护状态变量, `HANDLE m_hCredsReady` 事件通知
-- 超时: 20 秒硬超时，防止阻塞 LogonUI
+- 超时: 硬超时防止阻塞 LogonUI（时限见代码）
 
 **状态文本** (中文):
 
@@ -604,7 +607,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\
 | Failed | 未识别到人脸，请重试或使用密码登录 |
 | Error | 人脸登录服务不可用 |
 
-### 6.4 管道客户端 (`pipe_client.h/cpp`)
+### 5.4 管道客户端 (`pipe_client.h/cpp`)
 
 ```cpp
 class PipeClient {
@@ -618,9 +621,9 @@ class PipeClient {
 
 ---
 
-## 七、注册控制台 — `enrollment_app/`
+## 六、注册控制台 — `enrollment_app/`
 
-### 7.1 程序入口 (`main.cpp`)
+### 6.1 程序入口 (`main.cpp`)
 
 Win32 GUI 应用程序。
 
@@ -628,7 +631,7 @@ Win32 GUI 应用程序。
 - 非管理员时自动通过 `ShellExecuteEx(runas)` 提权重启
 - 检查模型文件是否存在（缺失时弹出提示）
 
-### 7.2 注册向导 (`EnrollmentWizard.h/cpp`)
+### 6.2 注册向导 (`EnrollmentWizard.h/cpp`)
 
 **身份获取** (构造函数):
 
@@ -643,11 +646,11 @@ Win32 GUI 应用程序。
 
 **页面一：人脸采集**
 
-- 摄像头 MF 采集，30fps 回调
+- 摄像头 MF 采集，帧回调
 - 实时 SCRFD gnkps 检测 (bbox + 5 关键点) + 偏航角估计 + 角度指示叠加（无 68 点地标模型）
-- 多角度采集流程（正面/左转 30°/右转 30°，逐角度进行）：
-  1. 该角度 yaw 门控（|yaw − 目标| ≤ 10°，无回退）+ 逐帧 PAD（双 MiniFAS 50/50 融合）
-  2. 采集 5 帧 512 维嵌入向量（每角度 `kAngleTargetFrames = 5`）
+- 多角度采集流程（正面/左转/右转，逐角度进行；目标偏航角与门控容差见代码）：
+  1. 该角度 yaw 门控（无回退）+ 逐帧 PAD（双 MiniFAS 50/50 融合）
+  2. 采集 512 维嵌入向量（每角度 `kAngleTargetFrames` 帧）
   3. 嵌入一致性检查（最大最小距离 < 阈值）
   4. 每角度独立 `AddFace`（V4），跨角度绝不平均
 
@@ -696,7 +699,7 @@ Win32 GUI 应用程序。
 | 32 | GetCaptureStatus | 获取采集状态 |
 | 33 | ClearStaleAccountUpn | 清理过期账号 UPN |
 
-### 7.3 WebView2 宿主 (`WebviewHost.h/cpp`)
+### 6.3 WebView2 宿主 (`WebviewHost.h/cpp`)
 
 - 创建 `ICoreWebView2Environment` + `ICoreWebView2Controller`
 - 从嵌入资源加载 `index.html`
@@ -704,7 +707,7 @@ Win32 GUI 应用程序。
 - 处理 `WM_WTSSESSION_CHANGE`: 锁屏时释放摄像头，解锁时恢复
 - 禁用右键菜单和开发者工具
 
-### 7.4 前端界面 (`index.html`)
+### 6.4 前端界面 (`index.html`)
 
 嵌入式单页应用，三个标签页:
 
@@ -716,9 +719,9 @@ Win32 GUI 应用程序。
 
 ---
 
-## 八、安装程序 — `installer/`
+## 七、安装程序 — `installer/`
 
-### 8.1 技术架构
+### 7.1 技术架构
 
 基于 **Go Wails v2** 构建，前端使用 **Vue 3** 单文件组件。
 
@@ -727,15 +730,16 @@ Win32 GUI 应用程序。
 | 后端 | Go + Wails v2 Runtime |
 | 前端 | Vue 3 + Tailwind CSS + TypeScript |
 | 打包 | Wails 构建 (Go 编译 + WebView2 嵌入) |
-| 资源 | Go embed.FS 嵌入所有部署文件 (~122 MB；INT8 量化后，原 FP32 ~252 MB) |
+| 资源 | Go embed.FS 嵌入所有部署文件 (INT8 量化，体积随模型版本变化) |
 
-### 8.2 命令行用法
+### 7.2 命令行用法
 
 ```
 FaceLoginSetup.exe          交互模式 (GUI)
 ```
 
-### 8.3 安装流程
+<a id="sec-installer"></a>
+### 7.3 安装流程
 
 `App.Install`（`installer/FaceLoginSetup/app.go`）按序执行，模型校验与 ACL 保护分布在关键节点两侧：
 
@@ -746,7 +750,7 @@ FaceLoginSetup.exe          交互模式 (GUI)
 | 2 | 创建目标目录 | 12-25% | `os.MkdirAll` |
 | 2.5 | 设置安装目录 ACL（预保护） | 25-30% | `internal.SetDirectoryACL`；在写入可执行文件/模型前锁定，使后续解压文件继承仅 SYSTEM/管理员写权限 |
 | 3 | 写入注册表路径 (InstallPath, DataPath) | 30-35% | DataPath = 安装目录本身，C++ 端追加 `\models` |
-| 4 | 提取所有嵌入文件 (~122MB) | 35-60% | `internal.ExtractAll` |
+| 4 | 提取所有嵌入文件 | 35-60% | `internal.ExtractAll` |
 | 4.1 | 校验已复制模型（大小 + SHA-256） | — | `internal.ValidateInstalledModels`；与步骤 0 相同的固定哈希 |
 | 4.5 | 写入默认 config.json（选择性强制本版调整的默认参数） | 60% | `internal.EnsureConfigDefaults` |
 | 5 | 验证目录权限（递归后置 ACL） | 60-67% | `internal.SetDirectoryACL` 递归再校一次，防止解压文件携带意外显式 ACL |
@@ -754,7 +758,7 @@ FaceLoginSetup.exe          交互模式 (GUI)
 | 7 | 安装并启动 Windows 服务 | 75-90% | `internal.InstallService` |
 | 8 | 最终化（补充解压 FaceLoginConsole.exe） | 90-100% | — |
 
-### 8.4 卸载流程
+### 7.4 卸载流程
 
 卸载为**完全清除**：程序文件、`data/`（含 `users.dat` 已录入人脸、`config.json`）与 `log/` 一并删除，仅当安装目录变空时才移除目录本身（未知文件会保留目录）。前端在卸载前会向用户提示此后果。
 
@@ -766,16 +770,16 @@ FaceLoginSetup.exe          交互模式 (GUI)
 | 4 | 清理注册表键值 (InstallPath, DataPath) | 70-85% |
 | 5 | 完成（目录为空则移除） | 85-100% |
 
-### 8.5 特殊功能
+### 7.5 特殊功能
 
 - **文件夹选择器**: 通过 `runtime.OpenDirectoryDialog` 调用原生文件夹选择器
 - **安装检测**: 检查注册表 `InstallPath` 值 + 目录存在性，已安装时标签显示"更新"
 - **进度推送**: 通过 Wails Events 实时推送安装进度到 Vue 前端
 
-### 8.6 目录结构
+### 7.6 目录结构
 
 ```
-C:\Program Files\FaceLogin\               # 安装目录 (用户可选)
+C:\Program Files\FaceLogin\               # 安装目录 (= DataPath，用户可选)
 ├── FaceLoginService.exe
 ├── FaceLoginCredentialProvider.dll
 ├── FaceLoginConsole.exe
@@ -791,36 +795,32 @@ C:\Program Files\FaceLogin\               # 安装目录 (用户可选)
 ├── libgcc_s_seh-1.dll
 ├── libwinpthread-1.dll
 ├── data/
-│   ├── config.json
-│   └── users.dat
-├── log/
+│   ├── config.json                        # 热配置（CONFIG_RELOAD）
+│   └── users.dat                          # V4 加密凭据数据库
+├── log/                                   # ← 生产部署下三组件日志全部落在这里
 │   ├── service.log
 │   ├── credential_provider.log
 │   └── enrollment.log
 └── models/
-    ├── det_10g_gnkps.onnx                           (~15.5 MB)
+    ├── det_10g_gnkps.onnx                           (~4.3 MB, INT8)
     ├── w600k_r50.onnx                               (~44 MB, INT8)
     ├── MiniFASNetV2.onnx                             (~1.74 MB)
     └── MiniFASNetV1SE.onnx                           (~1.74 MB)
-
-C:\ProgramData\FaceLogin\                   # 数据目录
-├── data/
-│   ├── config.json                        # 热配置
-│   └── users.dat                          # 加密凭据数据库
-└── log/
-    ├── service.log
-    ├── enrollment.log
-    └── credential_provider.log
 ```
+
+> **注意：数据/日志默认在 Program Files 下，不在 ProgramData。** 安装器把 `HKLM\SOFTWARE\FaceLogin\DataPath` 写成安装目录本身（`app.go:125-133`，注释 "DataPath is the install dir itself"），并给该目录授 SYSTEM 完全控制（`com.go` 的 `SetDirectoryACL`），服务以 LocalSystem 运行故可写。三个组件的数据与日志都解析到 `DataPath`，因此生产部署下 `data/`、`log/`、`models/` 全部位于 `C:\Program Files\FaceLogin\` 下。
+>
+> `C:\ProgramData\FaceLogin\` 仅在 **DataPath 注册表值为空时**作为回退使用（dllmain / EnrollmentWizard 的第 2/3 回退；face_service 经 `ResolveSecureDataDir` 的开发态白名单）。**默认部署不会触发**，不要期待在那里找到数据或日志。完整路径决策见 §3.1。
 
 ---
 
-## 九、模型文件
+<a id="sec-models"></a>
+## 八、模型文件
 
 | 文件 | 大小 | 用途 | 来源 |
 |---|---|---|---|
-| `det_10g_gnkps.onnx` | ~4.3 MB (INT8) | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档 ~3.4× 快于 34g；INT8 量化，原 FP32 ~15.5 MB） | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
-| `w600k_r50.onnx` | ~44 MB (INT8) | buffalo_l IResNet-50 512维嵌入，静态 QDQ 量化版（标定：同角度 p50 0.694，1.68× 加速） | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
+| `det_10g_gnkps.onnx` | ~4.3 MB (INT8) | SCRFD 检测 + 5 关键点（gnkps 组归一化变体，10g 档；INT8 量化） | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
+| `w600k_r50.onnx` | ~44 MB (INT8) | buffalo_l IResNet-50 512维嵌入，静态 QDQ 量化版 | 本地量化自 FP32 源（`scripts/download_models.ps1`） |
 | `MiniFASNetV2.onnx` | ~1.74 MB | 双模型静默反欺诈（2.7× 裁剪） | Silent-Face-Anti-Spoofing |
 | `MiniFASNetV1SE.onnx` | ~1.74 MB | 双模型静默反欺诈（4.0× 裁剪） | Silent-Face-Anti-Spoofing |
 
@@ -829,170 +829,7 @@ v1.5 起不再使用 dlib 68 点形状预测器：SCRFD 直接输出 5 关键点
 
 ---
 
-## 十、构建与部署
-
-### 10.1 依赖
-
-**vcpkg**:
-```
-onnxruntime
-```
-
-**系统库**:
-- Media Foundation: `mfplat`, `mf`, `mfreadwrite`, `mfuuid`
-- DirectShow: `strmiids`, `strmif`
-- COM: `ole32`, `oleaut32`
-- 凭据: `credui`
-- 安全: `advapi32`, `crypt32`
-- LSA: `secur32`
-- 图形: `gdi32`, `comctl32`, `windowscodecs`
-- IPC: `kernel32`
-- Shell: `shell32`, `shlwapi`, `shlobj`
-- Network: `netapi32`
-
-**Go 依赖** (安装程序):
-- Wails v2 (`github.com/wailsapp/wails/v2`)
-- `golang.org/x/sys/windows`
-
-### 10.2 构建
-
-```powershell
-# === C++ 组件 ===
-
-# 配置（VS 2022；VS 2026 用 "Visual Studio 18 2026"，且必须删除旧 build/ 重新配置）
-cmake -B build -S . -G "Visual Studio 17 2022" `
-    -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-
-# 编译所有目标
-cmake --build build --config Release
-
-# === Go 安装程序 ===
-
-# 进入安装程序目录
-cd installer\FaceLoginSetup
-
-# 确保资源文件就位 (将构建产物 + 模型文件放入 resources\)
-# 然后构建
-wails build -clean -platform windows/amd64
-```
-
-> **VS 2026 / MSVC 19.5x 构建约束**：在该工具集上必须加 `--parallel 1`（不要加 `/MP`）。根 `CMakeLists.txt` 为该工具集关闭了 MSBuild 文件跟踪与排队错误遥测，否则会出现零 CPU 的孤立 `cl.exe` 进程。VS 2022 保持常规 `/MP` 增量构建行为，命令不变。
-
-### 10.3 构建产物
-
-| 目标 | 输出路径 | 平台 |
-|---|---|---|
-| `FaceLoginService.exe` | `build/face_service/Release/` | C++ MSVC x64 |
-| `FaceLoginCredentialProvider.dll` | `build/credential_provider/Release/` | C++ MSVC x64 |
-| `FaceLoginConsole.exe` | `build/enrollment_app/Release/` | C++ MSVC x64 |
-| `FaceLoginSetup.exe` | `installer/FaceLoginSetup/bin/` | Go Wails x64 |
-
-### 10.4 部署
-
-将所有构建产物和模型文件放入 `installer/FaceLoginSetup/resources/`，然后构建安装程序。
-
-运行 `FaceLoginSetup.exe`，选择安装目录，点击安装即可。
-
----
-
-## 十一、安全设计
-
-| 层面 | 措施 |
-|---|---|
-| 进程通信 | 命名管道 DACL 限制 SYSTEM + Administrators |
-| 凭据存储 | DPAPI 机器范围加密 (`CRYPTPROTECT_LOCAL_MACHINE`) |
-| 管道安全 | `PIPE_REJECT_REMOTE_CLIENTS` 拒绝远程连接 |
-| 单实例 | 全局互斥体防止多个服务实例 |
-| DLL 安全 | `/DYNAMICBASE` (ASLR), `/NXCOMPAT` (DEP), `/GUARD:CF` (CFG), `/HIGHENTROPYVA` (64位) |
-| 密码验证 | `LogonUserW(LOGON32_LOGON_NETWORK)` 轻量验证，不缓存凭据 |
-| 活体检测 | MiniFASNetV2 + MiniFASNetV1SE 融合反欺诈，防止照片/视频攻击 |
-| 匹配安全 | 欧氏距离阈值 + 最佳/次佳匹配比双重验证 |
-
----
-
-## 十二、账户兼容性
-
-### 12.1 支持的账户类型
-
-| 账户类型 | 登录 | 注册 | 说明 |
-|---|---|---|---|
-| 本地 SAM 账户 | ✅ | ✅ | `COMPUTERNAME\Username` 格式 |
-| 微软在线账户 (MSA) | ✅ | ✅ | `user@outlook.com` UPN 格式 |
-| 域账户 (Active Directory) | 理论支持 | 理论支持 | 使用 Kerberos 认证 |
-
-### 12.2 MSA 实现细节
-
-**身份获取**: `GetUserNameExW(NameUserPrincipal)` 在 MSA 关联机器上返回 `ERROR_NO_SUCH_USER` (1332)，因此增加了注册表回退方案：
-- 读取 `HKLM\SOFTWARE\Microsoft\IdentityStore\LogonCache\D7F9888F-E3FC-49b0-9EA6-A85B5F392A4F\Name2Sid\{hash}` 中的 `IdentityName` 值
-- 该值为 MSA 邮箱地址 (UPN 格式)
-
-**凭据打包**: 本地账户使用 `Domain\Username` 格式，MSA 账户使用 UPN `user@domain.com` 格式。均使用 `MICROSOFT_AUTHENTICATION_PACKAGE_V1_0` 认证包。
-
-**数据存储**: V4 数据库同时存储 username、UPN 和 SID，按 SID 优先匹配；每账号可存多张人脸。
-
----
-
-## 十三、故障处理
-
-### 13.1 日志文件
-
-所有日志位于 `%ProgramData%\FaceLogin\log\`:
-
-| 日志文件 | 来源 |
-|---|---|
-| `service.log` | 人脸识别服务 |
-| `credential_provider.log` | 登录界面组件 |
-| `enrollment.log` | 注册控制台 |
-
-### 13.2 常见问题
-
-| 问题 | 可能原因 | 解决方法 |
-|---|---|---|
-| 服务启动超时 | 模型加载慢 (~30s) | 正常现象，后台继续启动 |
-| 服务启动失败 | 缺少运行时 DLL | 安装时确保 DLL 与 EXE 同目录 |
-| 锁屏不显示磁贴 | 未注册或已禁用 / 无注册用户 | 检查注册表 Disabled 键值，确认已录入人脸 |
-| 识别率低 | 光照不足 / 嵌入质量差 | 重新注册人脸，确保光线均匀 |
-| 摄像头不工作 | Session 0 权限 | 服务模式使用 DirectShow |
-| 人脸登录后用户名密码错误 | MSA 账户凭据格式不对 | 确认 V4 数据库含正确 UPN |
-| 注册时显示空白 UPN | MSA 账户 GetUserNameExW 失败 | 已通过 IdentityStore 回退解决 |
-
----
-
-## 十四、开发指南
-
-### 14.1 本地开发模式
-
-```cmd
-REM 1. 下载模型
-powershell -File scripts\download_models.ps1
-
-REM 1.1 为本机服务运行时准备模型
-mkdir C:\ProgramData\FaceLogin\models
-copy assets\models\*.onnx C:\ProgramData\FaceLogin\models\
-
-REM 2. 停止已有服务
-sc stop FaceLoginService
-
-REM 3. 以 standalone 模式运行服务 (前台 + Debug 输出)
-FaceLoginService.exe -standalone
-
-REM 4. 部署 DLL 并注册
-regsvr32 build\credential_provider\Release\FaceLoginCredentialProvider.dll
-
-REM 5. Win+L 锁屏测试
-```
-
-### 14.2 编码规范
-
-- C++20 标准, `/W4 /WX-` 警告级别
-- CRITICAL_SECTION 用于线程同步
-- `FACELOGIN_*` 宏用于日志
-- 中文字符串需要 MSVC `/utf-8` 编译选项
-- 错误处理: 返回 `bool`，通过日志记录详细错误
-- Go 代码遵循标准 Go 风格
-
----
-
+<a id="appendix-ipc"></a>
 ## 附录A：IPC 消息格式详解
 
 ```
@@ -1045,6 +882,7 @@ PONG
 | `CLSID_FaceLoginProvider` | `{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}` |
 | IdentityStore MSA Provider | `{D7F9888F-E3FC-49b0-9EA6-A85B5F392A4F}` |
 
+<a id="appendix-registry"></a>
 ## 附录C：注册表键值
 
 | 路径 | 值名 | 用途 |
