@@ -182,6 +182,7 @@ async function doUninstall() {
           </button>
         </div>
         <p class="mt-1 text-xs text-gray-400">将安装到该目录：程序文件 + 模型文件（约 50 MB：检测 + 识别 + 双活体）放入 models/ 子目录</p>
+        <p class="mt-1 text-xs text-gray-400">建议保留默认目录：FaceLogin 运行于登录认证链路，<code class="text-gray-500">C:\Program Files\</code> 受系统级 ACL 保护，可防止程序文件被篡改。</p>
 
         <button
           class="mt-6 w-full py-2.5 text-sm font-medium bg-gray-900 text-white

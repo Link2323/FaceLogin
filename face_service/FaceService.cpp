@@ -466,6 +466,7 @@ bool FaceService::LoadHeavyModels(bool lowLightEnhance) {
             // m_antiSpoof null, and let ProcessAuthRequest reject everything.
             FACELOGIN_ERROR(L"Anti-spoof model integrity check failed — authentication "
                             L"will remain disabled (fail-closed)");
+            m_padIntegrityFailed.store(true);
             std::lock_guard<std::mutex> lock(m_modelMutex);
             m_antiSpoof.reset();
         } else if (!antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
@@ -619,12 +620,15 @@ void FaceService::Run() {
                     if (!VerifyModelIntegrity(miniFasV2Path, kMiniFasV2Sha256, L"CONFIG_RELOAD MiniFASNetV2 (PAD)") ||
                         !VerifyModelIntegrity(miniFasV1SePath, kMiniFasV1SeSha256, L"CONFIG_RELOAD MiniFASNetV1SE (PAD)")) {
                         m_antiSpoof.reset();
+                        m_padIntegrityFailed.store(true);
                         FACELOGIN_ERROR(L"CONFIG_RELOAD: anti-spoof integrity check failed — authentication remains fail-closed");
                     } else if (antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
                         m_antiSpoof = std::move(antiSpoof);
+                        m_padIntegrityFailed.store(false);
                         FACELOGIN_INFO(L"CONFIG_RELOAD: dual MiniFAS PAD loaded successfully");
                     } else {
                         m_antiSpoof.reset();
+                        m_padIntegrityFailed.store(false);
                         FACELOGIN_ERROR(L"CONFIG_RELOAD: anti-spoof unavailable — authentication remains fail-closed");
                     }
                 }
@@ -779,8 +783,12 @@ bool FaceService::ProcessAuthRequest() {
     if (m_livenessMethod != LivenessMethod::AntiSpoof ||
         !m_antiSpoof || !m_antiSpoof->IsInitialized()) {
         FACELOGIN_ERROR(L"Authentication refused: anti-spoof model is unavailable");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            L"活体检测模块不可用，请使用密码登录并检查模型文件"));
+        // Distinguish an integrity (tamper) failure from a generic load failure
+        // so the cause is visible on the lock screen, not just in the log.
+        const wchar_t* msg = m_padIntegrityFailed.load()
+            ? L"活体模型完整性校验失败，文件可能被篡改或损坏，请使用密码登录并重新安装 FaceLogin"
+            : L"活体检测模块不可用，请使用密码登录并检查模型文件";
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(msg));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
         return false;

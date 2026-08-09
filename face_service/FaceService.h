@@ -112,6 +112,12 @@ private:
     // EnsureModelsLoaded() blocks until ready.
     std::atomic<bool> m_modelsReady{false};      // heavy models loaded OK
     std::atomic<bool> m_modelsFailed{false};     // heavy models failed to load
+    // True only when the mandatory anti-spoof (PAD) model failed an integrity
+    // (SHA-256) check — i.e. the file was tampered/corrupted, not merely a load
+    // error. Lets ProcessAuthRequest tell the user "可能被篡改" instead of the
+    // generic "模块不可用" so a tamper is visible on the lock screen, not just
+    // in the log. Cleared on a successful CONFIG_RELOAD recovery.
+    std::atomic<bool> m_padIntegrityFailed{false};
     std::atomic<bool> m_modelsLoading{false};    // loader in flight (or done)
     std::atomic<bool> m_modelsAbort{false};      // service stopping — release waiters
     std::thread m_modelLoadThread;
