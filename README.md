@@ -191,7 +191,7 @@ wails build -clean -platform windows/amd64
 | `MiniFASNetV2.onnx` | 反欺诈活体检测（2.7× 裁剪） |
 | `MiniFASNetV1SE.onnx` | 反欺诈活体检测（4.0× 裁剪） |
 
-> 模型均经 INT8 量化优化（体积与速度兼得，精度无损），由 `scripts/download_models.ps1` 准备；技术细节见 [docs](docs/)。
+> 模型均经 INT8 量化优化（体积与速度兼得，精度无损），由 `scripts/download_models.ps1` 准备。
 
 ---
 
