@@ -95,10 +95,11 @@ private:
     void TriggerReEnumeration();
 
     // Start the authentication pipeline (connect pipe + send AUTH_REQUEST).
-    // Called from Advise() (cold boot) or input-detection thread (unlock).
+    // Called from the input-detection thread (LOGON and unlock alike — the
+    // provider no longer auto-triggers on cold boot).
     void StartAuth();
 
-    // Start / stop the background input-detection thread (unlock scenario).
+    // Start / stop the background input-detection thread (LOGON + unlock).
     void StartInputDetectionThread();
     void StopInputDetectionThread();
 
@@ -127,11 +128,11 @@ private:
     // Auth timeout tracking (so we don't block LogonUI forever)
     LONGLONG m_authStartTime = 0;  // 100ns units, 0 = not yet started
 
-    // On unlock: baseline tick recorded in Advise(). A background thread
-    // polls GetLastInputInfo() and calls StartAuth() when NEW input arrives
-    // (keyboard or mouse). The first keypress that dismissed the lock-screen
-    // wallpaper happened BEFORE our DLL was loaded, so any tick <= baseline
-    // is ignored.
+    // Baseline tick recorded in Advise() (LOGON and unlock). A background
+    // thread polls GetLastInputInfo() and calls StartAuth() when NEW input
+    // arrives (keyboard or mouse). The first keypress that dismissed the
+    // lock-screen wallpaper happened BEFORE our DLL was loaded, so any tick
+    // <= baseline is ignored.
     DWORD m_waitingStartTick = 0;
     HANDLE m_hInputThread = nullptr;   // background input-detection thread
     HANDLE m_hInputStop = nullptr;     // event: signal to stop the thread

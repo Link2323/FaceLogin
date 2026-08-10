@@ -92,9 +92,8 @@ func deleteRegKeyTree(parent registry.Key, subpath string) error {
 }
 
 // DeleteRegKey removes the entire HKLM\SOFTWARE\FaceLogin key tree. Use on
-// uninstall: the service and credential provider write runtime values
-// (ServiceStartUptime, UserLoggedIn, ...) that the installer never created,
-// and future versions may write subkeys as well.
+// uninstall: the service writes runtime values (e.g. UserLoggedIn) that the
+// installer never created, and future versions may write subkeys as well.
 func DeleteRegKey() error {
 	err := deleteRegKeyTree(registry.LOCAL_MACHINE, `SOFTWARE\FaceLogin`)
 	if err != nil && err != registry.ErrNotExist {

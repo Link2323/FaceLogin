@@ -154,59 +154,16 @@ STDMETHODIMP FaceLoginProvider::SetUsageScenario(
         return E_NOTIMPL;
     }
 
-    // ── LOGON / UNLOCK → cold-boot detection ────────────────────────
-    // Cold-boot detection via system uptime comparison.
-    //
-    // The service writes GetTickCount64() to ServiceStartUptime at every startup.
-    // GetTickCount64 resets to near-zero on each boot, so comparing the CP's
-    // current uptime to the service's recorded uptime tells us whether they are
-    // on the same boot cycle.
-    //
-    // Decision matrix:
-    //   serviceUptime == 0          → fallback to UserLoggedIn (service not ready)
-    //   currentUptime < serviceUptime → cross-boot: stale registry value from
-    //                                   prior boot → definitely cold boot
-    //   delta < 120s, UserLoggedIn=0 → cold boot → auto-trigger
-    //   delta < 120s, UserLoggedIn=1 → fast-startup resume → manual trigger
-    //   delta >= 120s               → unlock (service started long ago) → manual
-    ULONGLONG serviceUptime = ReadRegQword(REGVAL_SERVICE_START_UPTIME, 0);
-    ULONGLONG currentUptime = GetTickCount64();
-    const ULONGLONG COLD_BOOT_THRESHOLD_MS = 120000; // 2 minutes
-    DWORD userLoggedIn = ReadRegDword(REGVAL_USER_LOGGED_IN, 0);
-
-    if (serviceUptime == 0) {
-        // Service hasn't written ServiceStartUptime yet — fall back to
-        // UserLoggedIn only.
-        m_isColdBoot = (userLoggedIn == 0);
-        FACELOGIN_INFO(L"SetUsageScenario: ServiceStartUptime=0, UserLoggedIn=%lu → coldBoot=%d",
-                      userLoggedIn, static_cast<int>(m_isColdBoot));
-    } else if (currentUptime < serviceUptime) {
-        // Cross-boot: the registry value is from a previous boot (since
-        // GetTickCount64 always increases within one boot and resets to
-        // near-zero on each new boot).  Current boot is fresh → cold boot.
-        m_isColdBoot = true;
-        FACELOGIN_INFO(L"SetUsageScenario: cross-boot detected (current=%llu < service=%llu) → coldBoot=true",
-                      currentUptime, serviceUptime);
-    } else {
-        // Same boot: delta tells us how long ago the service started.
-        ULONGLONG delta = currentUptime - serviceUptime;
-        if (delta < COLD_BOOT_THRESHOLD_MS) {
-            // CP and service started close together — could be cold boot
-            // or fast-startup resume.  UserLoggedIn disambiguates.
-            m_isColdBoot = (userLoggedIn == 0);
-            FACELOGIN_INFO(L"SetUsageScenario: delta=%llu < %llums, UserLoggedIn=%lu → coldBoot=%d",
-                          delta, COLD_BOOT_THRESHOLD_MS, userLoggedIn,
-                          static_cast<int>(m_isColdBoot));
-        } else {
-            // Far apart: service started long ago → unlock scenario.
-            m_isColdBoot = false;
-            FACELOGIN_INFO(L"SetUsageScenario: delta=%llu >= %llums → coldBoot=false",
-                          delta, COLD_BOOT_THRESHOLD_MS);
-        }
-    }
-
-    // Clean up NetWkstaUserEnum includes — no longer needed
-    // (already removed above)
+    // ── LOGON / UNLOCK → trigger policy ─────────────────────────────
+    // Both scenarios wait for user input (keyboard/mouse) before starting
+    // recognition — FaceLoginCredential::Advise runs the same input-detection
+    // thread everywhere.  Previously the CP distinguished "cold boot" (auto-
+    // trigger StartAuth immediately) from unlock (wait for keypress): at boot
+    // the camera started recognizing before the user was at the machine, and
+    // because every failed attempt triggered re-enumeration with coldBoot
+    // still true, an empty scene looped recognition forever.  Removed 2026-08;
+    // the ServiceStartUptime/UserLoggedIn registry machinery is gone too
+    // (UserLoggedIn remains for the service's model-preload decision).
 
     // Check if the Disabled registry flag is set
     HKEY hKey;
@@ -325,15 +282,13 @@ STDMETHODIMP FaceLoginProvider::GetCredentialCount(
     *pdwCount = 1;
     *pdwDefault = 0;
 
-    // ALWAYS set auto-logon so LogonUI selects our tile.
-    // The cold-boot vs unlock distinction is handled inside Advise() and
-    // SetSelected():
-    //   cold boot: auto-logon=TRUE → GetSerialization polled → StartAuth in Advise()
-    //   unlock:    auto-logon=FALSE in SetSelected → user must click Submit button
-    //              → GetSerialization runs synchronous auth
-    *pbAutoLogonWithDefault = m_isColdBoot ? TRUE : FALSE;
-    FACELOGIN_INFO(L"GetCredentialCount: count=%d, default=%d, autoLogon=%d, coldBoot=%d",
-                  *pdwCount, *pdwDefault, *pbAutoLogonWithDefault, static_cast<int>(m_isColdBoot));
+    // No default auto-logon: recognition is always triggered by user input
+    // (the input-detection thread started in Advise), for both LOGON and
+    // UNLOCK.  SetSelected() flips auto-logon to TRUE once credentials are
+    // Ready so LogonUI calls GetSerialization to pack them.
+    *pbAutoLogonWithDefault = FALSE;
+    FACELOGIN_INFO(L"GetCredentialCount: count=%d, default=%d, autoLogon=%d",
+                  *pdwCount, *pdwDefault, *pbAutoLogonWithDefault);
 
     return S_OK;
 }

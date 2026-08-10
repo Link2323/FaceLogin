@@ -329,9 +329,9 @@ func (a *App) Uninstall() map[string]interface{} {
 	}
 
 	// Step 5: Clean registry — remove the whole HKLM\SOFTWARE\FaceLogin key.
-	// The service and credential provider write runtime values
-	// (ServiceStartUptime, UserLoggedIn) that the installer never created, so
-	// deleting only InstallPath/DataPath would leave the key behind.
+	// The service writes runtime values (e.g. UserLoggedIn) that the installer
+	// never created, so deleting only InstallPath/DataPath would leave the key
+	// behind.
 	a.emit(80, "清理注册表", "running", "")
 	if cleanupFailed {
 		// Keep InstallPath so a custom install location can be found and

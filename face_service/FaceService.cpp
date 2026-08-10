@@ -325,13 +325,11 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
             } else if (eventType == WTS_SESSION_LOGOFF) {
                 FACELOGIN_INFO(L"Session LOGOFF: session=%lu → UserLoggedIn=0",
                               evt->dwSessionId);
+                // UserLoggedIn=0 drives the service's own model-preload
+                // decision on the next logon (ShouldPreloadModels) — the
+                // credential provider no longer reads it (cold-boot auto-
+                // trigger removed 2026-08; recognition waits for input).
                 WriteRegDword(REGVAL_USER_LOGGED_IN, 0);
-                // Clear the service start uptime so the next logon is
-                // detected as a cold boot (fresh ServiceStartUptime written
-                // on next service restart, or if the service stays running,
-                // the CP will see ServiceStartUptime=0 and treat it as cold
-                // boot via the UserLoggedIn=0 fallback).
-                WriteRegQword(REGVAL_SERVICE_START_UPTIME, 0);
                 pService->RequestModelLoad(L"session logoff");
             } else if (eventType == WTS_SESSION_LOCK) {
                 FACELOGIN_INFO(L"Session LOCK: session=%lu → preloading models",
@@ -404,21 +402,6 @@ bool FaceService::Initialize() {
         return false;
     }
     FACELOGIN_INFO(L"Loaded %zu registered user(s)", m_store->GetUserCount());
-
-    // Write the service's system uptime at startup for the CP's cold-boot
-    // detection.  The CP compares its own uptime to this value:
-    //   close to this value (within ~120s) → cold boot (CP loaded near service)
-    //   far above, or below (cross-boot stale) → cold boot
-    //   far above (same boot, hours later) → unlock
-    //
-    // ALWAYS overwrite — registry persists across reboots, and GetTickCount64
-    // resets to 0 on each boot, so a stale value from a prior boot would
-    // corrupt detection if we skipped the write.
-    {
-        ULONGLONG uptime = GetTickCount64();
-        WriteRegQword(REGVAL_SERVICE_START_UPTIME, uptime);
-        FACELOGIN_INFO(L"Initialize: ServiceStartUptime = %llu", uptime);
-    }
 
     m_pipeServer = std::make_unique<PipeServer>();
 

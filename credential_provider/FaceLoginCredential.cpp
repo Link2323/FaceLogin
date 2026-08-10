@@ -14,7 +14,7 @@
 #pragma comment(lib, "ntdll.lib")
 
 // ============================================================================
-// Input-detection thread (unlock scenario)
+// Input-detection thread (LOGON + unlock scenarios)
 // ============================================================================
 //
 // Runs as a background thread, polling GetLastInputInfo() every ~200 ms.
@@ -270,32 +270,22 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
         return S_OK;
     }
 
-    // Cold boot: start auth immediately.
-    // CredUI (Windows Security dialog, e.g. Settings password change,
-    // Edge password viewing): use the same input-polling flow as unlock.
-    // Auto-triggering would prematurely close the CredUI dialog for
-    // multi-step workflows like PIN change or fingerprint enrollment.
-    // The 2000ms threshold filters out clicks on the dialog's own UI.
-    // Unlock / switch user: start a background thread that polls
-    // GetLastInputInfo() for new keyboard/mouse input. When input
-    // is detected, the thread calls StartAuth() which connects the
-    // pipe asynchronously. The pipe callback stores credentials and
-    // triggers CredentialsChanged(), causing LogonUI to re-enumerate
-    // and call GetSerialization() to retrieve ready credentials.
-    bool coldBoot = m_pProvider ? m_pProvider->IsColdBoot() : true;
+    // Start a background thread that polls GetLastInputInfo() for new
+    // keyboard/mouse input (the same flow for LOGON and UNLOCK — the
+    // provider no longer auto-triggers on cold boot, which started
+    // recognizing before the user was at the machine and, because every
+    // failed attempt re-enumerated with coldBoot still true, looped
+    // recognition forever on an empty scene).  When input is detected,
+    // the thread calls StartAuth() which connects the pipe
+    // asynchronously. The pipe callback stores credentials and triggers
+    // CredentialsChanged(), causing LogonUI to re-enumerate and call
+    // GetSerialization() to retrieve ready credentials.
     bool credUI = m_pProvider ? m_pProvider->IsCredUI() : false;
-    FACELOGIN_INFO(L"Advise: coldBoot=%d, credUI=%d, m_pProvider=%p",
-                  coldBoot, credUI, m_pProvider);
-    if (coldBoot) {
-        FACELOGIN_INFO(L"Advise: cold boot — starting auth immediately");
-        StartAuth();
-    } else {
-        FACELOGIN_INFO(L"Advise: unlock scenario — starting input detection thread");
-        m_state = State::Waiting;
-        m_waitingStartTick = GetTickCount();
-        FACELOGIN_INFO(L"Advise: baseline tick = %lu", m_waitingStartTick);
-        StartInputDetectionThread();
-    }
+    FACELOGIN_INFO(L"Advise: credUI=%d, m_pProvider=%p", credUI, m_pProvider);
+    m_state = State::Waiting;
+    m_waitingStartTick = GetTickCount();
+    FACELOGIN_INFO(L"Advise: baseline tick = %lu", m_waitingStartTick);
+    StartInputDetectionThread();
 
     FACELOGIN_INFO(L"=== Advise EXIT (state=%d) ===", static_cast<int>(m_state));
     return S_OK;
@@ -325,23 +315,19 @@ STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
                   static_cast<int>(m_state),
                   pbAutoLogon ? static_cast<int>(*pbAutoLogon) : -1);
 
-    bool coldBoot = m_pProvider ? m_pProvider->IsColdBoot() : true;
     bool credUI = m_pProvider ? m_pProvider->IsCredUI() : false;
 
-    if (coldBoot) {
-        // Cold boot: always poll GetSerialization for credentials.
-        *pbAutoLogon = TRUE;
-    } else if (m_state == State::Ready) {
-        // Unlock / CredUI + credentials ready (bg thread finished auth):
+    if (m_state == State::Ready) {
+        // Credentials ready (bg thread finished auth):
         // enable auto-logon so LogonUI calls GetSerialization to pack creds.
         *pbAutoLogon = TRUE;
     } else {
-        // Unlock / CredUI + still Waiting: no auto-logon; we wait for the bg thread.
+        // Still Waiting: no auto-logon; we wait for the bg thread.
         *pbAutoLogon = FALSE;
     }
 
-    FACELOGIN_INFO(L"=== SetSelected EXIT (*pbAutoLogon=%d, coldBoot=%d, credUI=%d, state=%d) ===",
-                  *pbAutoLogon, static_cast<int>(coldBoot), static_cast<int>(credUI),
+    FACELOGIN_INFO(L"=== SetSelected EXIT (*pbAutoLogon=%d, credUI=%d, state=%d) ===",
+                  *pbAutoLogon, static_cast<int>(credUI),
                   static_cast<int>(m_state));
     return S_OK;
 }

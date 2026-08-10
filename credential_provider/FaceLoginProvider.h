@@ -10,7 +10,9 @@ class FaceLoginCredential;
 // FaceLoginProvider — ICredentialProvider implementation
 //
 // Enumerates credential tiles. For face login, we always provide exactly
-// one credential tile that supports auto-logon.
+// one credential tile that supports auto-logon once credentials are ready.
+// Recognition is always triggered by user input (keyboard/mouse), for both
+// LOGON (boot / switch user) and UNLOCK — see FaceLoginCredential::Advise.
 //
 // Field layout (no tile image):
 //   0: CPFT_LARGE_TEXT — "Face Login"
@@ -60,7 +62,6 @@ public:
         ICredentialProviderCredential** ppcpc) override;
 
     // Accessors for our credential
-    bool IsColdBoot() const { return m_isColdBoot; }
     bool IsCredUI() const { return m_cpus == CPUS_CREDUI || m_cpus == CPUS_PLAP; }
 
 private:
@@ -72,8 +73,4 @@ private:
 
     // Our credential object (one instance)
     FaceLoginCredential* m_pCredential = nullptr;
-
-    // True = cold boot / first logon (no active user session)
-    // False = unlock / switch user (existing user session)
-    bool m_isColdBoot = true;
 };
