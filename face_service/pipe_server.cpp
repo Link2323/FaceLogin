@@ -6,19 +6,31 @@
 
 namespace facelogin {
 
+std::atomic<long> PipeServer::g_aclAllocations{0};
+
+PipeServer::PipeSecurity::~PipeSecurity() {
+    // Absolute-format SDs do not own their DACL: both allocations must be
+    // freed separately, and keeping the two frees adjacent here means there
+    // is exactly one ownership path (no caller can forget the ACL).
+    if (acl) {
+        LocalFree(acl);
+        --g_aclAllocations;
+    }
+    if (sd) {
+        LocalFree(sd);
+    }
+}
+
 PipeServer::~PipeServer() {
     Close();
 }
 
-PSECURITY_DESCRIPTOR PipeServer::CreateSecurityDescriptor() {
+bool PipeServer::CreateSecurityDescriptor(PipeSecurity& out) {
     // Create a security descriptor that grants access to:
     // - SYSTEM (full control)
     // - BUILTIN\Administrators (full control)
     // - Current interactive user (full control)
     // Deny: Network, Anonymous, Everyone else
-
-    PSECURITY_DESCRIPTOR pSD = nullptr;
-    PACL pACL = nullptr;
 
     EXPLICIT_ACCESSW ea[3] = {};
 
@@ -84,52 +96,49 @@ PSECURITY_DESCRIPTOR PipeServer::CreateSecurityDescriptor() {
         FACELOGIN_DEBUG(L"Pipe ACL: added current user %s", qualifiedName);
     }
 
-    DWORD dwErr = SetEntriesInAclW(entryCount, ea, nullptr, &pACL);
+    DWORD dwErr = SetEntriesInAclW(entryCount, ea, nullptr, &out.acl);
 
     if (dwErr != ERROR_SUCCESS) {
         FACELOGIN_ERROR(L"SetEntriesInAcl failed: %lu", dwErr);
-        return nullptr;
+        return false;
     }
+    ++g_aclAllocations;  // SetEntriesInAclW allocated the ACL (LocalFree-owned)
 
-    pSD = static_cast<PSECURITY_DESCRIPTOR>(
+    PSECURITY_DESCRIPTOR pSD = static_cast<PSECURITY_DESCRIPTOR>(
         LocalAlloc(LPTR, SECURITY_DESCRIPTOR_MIN_LENGTH));
-    if (!pSD) {
-        LocalFree(pACL);
-        return nullptr;
+    bool ok = pSD != nullptr &&
+              InitializeSecurityDescriptor(pSD, SECURITY_DESCRIPTOR_REVISION) != FALSE &&
+              SetSecurityDescriptorDacl(pSD, TRUE, out.acl, FALSE) != FALSE;
+    if (!ok) {
+        if (pSD) LocalFree(pSD);
+        LocalFree(out.acl);
+        --g_aclAllocations;
+        out.acl = nullptr;
+        return false;
     }
 
-    if (!InitializeSecurityDescriptor(pSD, SECURITY_DESCRIPTOR_REVISION)) {
-        LocalFree(pACL);
-        LocalFree(pSD);
-        return nullptr;
-    }
-
-    if (!SetSecurityDescriptorDacl(pSD, TRUE, pACL, FALSE)) {
-        LocalFree(pACL);
-        LocalFree(pSD);
-        return nullptr;
-    }
-
-    // pACL is owned by pSD now - do NOT free pACL separately
-    return pSD;
+    out.sd = pSD;
+    return true;
 }
 
-bool PipeServer::WaitForClient(DWORD timeoutMs) {
+bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
     Close(); // Ensure clean state
 
-    PSECURITY_DESCRIPTOR pSD = CreateSecurityDescriptor();
-    if (!pSD) return false;
+    const wchar_t* name = pipeName ? pipeName : ipc::PIPE_NAME;
+
+    PipeSecurity sec;
+    if (!CreateSecurityDescriptor(sec)) return false;
 
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-    sa.lpSecurityDescriptor = pSD;
+    sa.lpSecurityDescriptor = sec.sd;
     sa.bInheritHandle = FALSE;
 
     // Use synchronous (blocking) I/O for reliability.
     // ReadFile/WriteFile must be called with a valid OVERLAPPED struct
     // on overlapped handles — avoiding that complexity entirely.
     m_hPipe = CreateNamedPipeW(
-        ipc::PIPE_NAME,
+        name,
         PIPE_ACCESS_DUPLEX,                         // synchronous
         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
         1,                                          // Max 1 instance
@@ -138,8 +147,11 @@ bool PipeServer::WaitForClient(DWORD timeoutMs) {
         timeoutMs,                                  // default timeout for pipe ops
         &sa);
 
-    LocalFree(pSD);
-
+    // CreateNamedPipeW has copied the descriptor into the new pipe instance;
+    // our absolute-format SD and its DACL are no longer needed. `sec`'s
+    // destructor frees both (LocalFree SD + ACL) on scope exit — the ACL is
+    // NOT owned by the SD, so freeing only the SD (as before) leaked one ACL
+    // per pipe instance (once per auth round).
     if (m_hPipe == INVALID_HANDLE_VALUE) {
         FACELOGIN_ERROR(L"CreateNamedPipe failed: %lu", GetLastError());
         return false;
@@ -149,6 +161,12 @@ bool PipeServer::WaitForClient(DWORD timeoutMs) {
         // dispatch ("Received request: ...") logged in FaceService::Run is the
         // INFO-level signal that a client arrived.
         FACELOGIN_DEBUG(L"Named pipe created, waiting for client...");
+
+    return true;
+}
+
+bool PipeServer::WaitForClient(DWORD timeoutMs) {
+    if (!CreatePipeInstance(timeoutMs)) return false;
 
     // Blocking wait for client connection.
     // The handle is closed by Close() in the Stop() path, which unblocks this.

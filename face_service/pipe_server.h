@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <string>
+#include <atomic>
 #include <accctrl.h>
 #include <aclapi.h>
 
@@ -24,6 +25,21 @@ public:
     // Blocks until a client connects or the handle is closed (via Close()).
     // Returns true when a client has connected.
     bool WaitForClient(DWORD timeoutMs = 30000);
+
+    // Create the named pipe instance (security descriptor + handle) WITHOUT
+    // blocking for a client. Separated from WaitForClient so the create→close
+    // cycle can be driven directly (dev tool tools/pipe_lifecycle).
+    // pipeName overrides ipc::PIPE_NAME (used by the dev tool to avoid
+    // colliding with a live service's single instance); nullptr = production
+    // name.
+    bool CreatePipeInstance(DWORD timeoutMs = 30000,
+                            const wchar_t* pipeName = nullptr);
+
+    // Number of SetEntriesInAclW allocations not yet LocalFree'd. Dev/test
+    // aid for the per-instance ACL ownership fix (tools/pipe_lifecycle): an
+    // absolute-format security descriptor does NOT own its DACL, so one ACL
+    // used to leak per pipe instance. Must read 0 after every Close().
+    static long OutstandingAclAllocations() { return g_aclAllocations.load(); }
 
     // Read a null-terminated UTF-16LE message from the pipe (synchronous).
     // Returns true and sets outMessage on success. Honors timeoutMs by polling
@@ -58,7 +74,20 @@ public:
     bool IsClientDisconnected() const;
 
 private:
-    PSECURITY_DESCRIPTOR CreateSecurityDescriptor();
+    // Absolute-format security descriptor + its separately-allocated DACL.
+    // An absolute SD does NOT own its DACL — both must be LocalFree'd once
+    // CreateNamedPipeW has copied the descriptor into the new pipe instance.
+    // The destructor does both frees and keeps g_aclAllocations in sync, so
+    // there is exactly one ownership path.
+    struct PipeSecurity {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        PACL acl = nullptr;
+        ~PipeSecurity();
+    };
+
+    bool CreateSecurityDescriptor(PipeSecurity& out);
+
+    static std::atomic<long> g_aclAllocations;
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
     bool m_connected = false;
