@@ -92,45 +92,7 @@ wails build -clean -platform windows/amd64
 
 ---
 
-## 机制一：自定义操作执行
-
-**用途**：某版本改变了软件的默认参数，需要让已安装的老用户（有旧 `config.json`）也同步到新默认值。只对**本版本**生效，防止未来版本反复覆盖用户调整过的值。
-
-### 相关文件
-
-- 声明/逻辑：`internal/config.go`
-- 开关与参数：`main.go` 自定义动作区
-
-### 工作原理
-
-1. `ConfigUpgradeEnabled` 默认 `false`。发布某版本时在 `main.go` 手动置 `true`。
-2. 安装执行到 **Step 4.5** 时调用 `EnsureConfigDefaults(configPath)`（见 `app.go`）。
-3. 该函数：
-   - 读取已有 `config.json`（不存在则写一份完整默认值，保证首装可用）。
-   - 仅当开关开启时，把 `ConfigUpgradeForcedDefaults` 里列出的键**强制覆盖**为新默认值。
-   - **未列出的键原样保留**（用户的其它自定义设置不受影响）。
-4. 下个版本把开关关闭后，老用户调整回去的值不会被再次覆盖。
-
-### 如何为某版本启用
-
-```go
-// main.go — 自定义动作区
-internal.ConfigUpgradeEnabled = true
-internal.ConfigUpgradeForcedDefaults = map[string]any{
-    "match_threshold":      0.30,   // 本版本调整过的键
-    "anti_spoof_threshold": 0.281,
-}
-```
-
-### 注意事项
-
-- **键必须与 `config.json` 实际键名完全一致**（`config_util.cpp` 中的 `AppConfig` 字段）。
-- 值类型需与 C++ 端解析兼容：整数/浮点用数字，字符串用字符串。
-- 只覆盖"本版本确实调整过默认值"的键；没调整的键**不要**列进来，否则会把用户调过的值悄悄改回。
-
----
-
-## 机制二：新版本公告弹窗
+## 新版本公告弹窗
 
 **用途**：用户使用新版本安装包做**升级安装**（已装过旧版）成功后，弹出一个"更新说明"弹窗。**首次全新安装不弹**。
 
@@ -206,7 +168,7 @@ if (result.success && alreadyInstalled.value) {
 | 3 | 写注册表 InstallPath / DataPath | 见[注册表键](#注册表键)；DataPath = 安装目录本身 |
 | 4 | 解压内嵌资源到安装目录 | `internal.ExtractAll` |
 | 4.1 | 校验已复制模型（大小 + SHA-256） | `internal.ValidateInstalledModels`；与步骤 0 相同的固定哈希 |
-| **4.5** | **确保 config.json 默认值** | **机制一挂载点：`EnsureConfigDefaults`** |
+| **4.5** | **仅在不存在时创建 config.json** | `EnsureConfigDefaults`；旧配置不迁移，要求完整卸载后重装 |
 | 5 | 验证目录权限（递归后置 ACL） | `internal.SetDirectoryACL` 递归再校一次，防止解压文件携带意外显式 ACL |
 | 6 | 注册 COM DLL | `internal.RegisterCOMDLL` |
 | 7 | 安装并启动服务 | `internal.InstallService` |
@@ -234,5 +196,5 @@ if (result.success && alreadyInstalled.value) {
 **公告弹窗没弹，但确认开启了开关？**
 → 检查是否首次安装（无旧版）。可在 `service.log` 或注册表 `InstallPath` 确认已安装状态。
 
-**升级后用户 config 被意外改动？**
-→ 检查 `ConfigUpgradeForcedDefaults` 是否列入了本版本**未调整**的键。只应列出本版本真正改过默认值的键。
+**旧配置没有被迁移？**
+→ 这是预期行为：本版本要求完整卸载旧版本后重装，安装器只创建不存在的配置文件。

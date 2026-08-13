@@ -1,8 +1,17 @@
 #include "ipc_protocol.h"
 #include <algorithm>
+#include <sddl.h>
 
 namespace facelogin {
 namespace ipc {
+
+static bool IsValidSid(const std::wstring& value) {
+    if (value.empty()) return false;
+    PSID sid = nullptr;
+    const BOOL valid = ConvertStringSidToSidW(value.c_str(), &sid);
+    if (sid) LocalFree(sid);
+    return valid == TRUE;
+}
 
 AuthResult ParseAuthMessage(const std::wstring& message) {
     AuthResult result;
@@ -13,21 +22,18 @@ AuthResult ParseAuthMessage(const std::wstring& message) {
         return result;
     }
 
-    // Check for success: "AUTH_SUCCESS:SID:UPN:USERNAME:PASSWORD"
-    // Older format: "AUTH_SUCCESS:DOMAIN\\USER:PASSWORD" (no SID/UPN prefix)
+    // Success format: "AUTH_SUCCESS:SID:UPN:USERNAME:PASSWORD".
     if (message.starts_with(MSG_AUTH_SUCCESS_PREFIX)) {
         std::wstring payload = message.substr(wcslen(MSG_AUTH_SUCCESS_PREFIX));
 
-        // Split by colons. New format has 4 parts: SID:UPN:USERNAME:PASSWORD
-        // Old format has 1 colon separating USER and PASSWORD.
-        // Count colons to detect format.
+        // The first three colons delimit SID, UPN, and username; the password
+        // is the remaining suffix and may itself contain colons.
         size_t colonCount = 0;
         for (wchar_t ch : payload) {
             if (ch == L':') colonCount++;
         }
 
         if (colonCount >= 3) {
-            // New format: SID:UPN:USERNAME:PASSWORD
             size_t pos1 = payload.find(L':');
             if (pos1 == std::wstring::npos) { result.status = AuthResult::Status::Error; result.errorMessage = L"Malformed AUTH_SUCCESS"; return result; }
             result.sid = payload.substr(0, pos1);
@@ -41,45 +47,25 @@ AuthResult ParseAuthMessage(const std::wstring& message) {
 
             std::wstring userPart = payload.substr(pos2 + 1, pos3 - pos2 - 1);
             std::wstring passwordPart = payload.substr(pos3 + 1);
-
-            // Split domain\user
-            size_t slashPos = userPart.find(L'\\');
-            if (slashPos != std::wstring::npos) {
-                result.domain = userPart.substr(0, slashPos);
-                result.username = userPart.substr(slashPos + 1);
-            } else {
-                result.domain = L".";
-                result.username = userPart;
-            }
-
-            result.password = passwordPart;
-            result.status = AuthResult::Status::Success;
-            return result;
-        } else {
-            // Old format: "DOMAIN\\USER:PASSWORD" (backward compat)
-            size_t colonPos = payload.find(L':');
-            if (colonPos == std::wstring::npos) {
+            const size_t slashPos = userPart.find(L'\\');
+            if (!IsValidSid(result.sid) || slashPos == std::wstring::npos ||
+                slashPos == 0 || slashPos + 1 >= userPart.size() || passwordPart.empty()) {
                 result.status = AuthResult::Status::Error;
-                result.errorMessage = L"Malformed AUTH_SUCCESS: unexpected format";
+                result.errorMessage = L"Malformed AUTH_SUCCESS: invalid required field";
                 return result;
             }
 
-            std::wstring userPart = payload.substr(0, colonPos);
-            std::wstring passwordPart = payload.substr(colonPos + 1);
-
-            size_t slashPos = userPart.find(L'\\');
-            if (slashPos != std::wstring::npos) {
-                result.domain = userPart.substr(0, slashPos);
-                result.username = userPart.substr(slashPos + 1);
-            } else {
-                result.domain = L".";
-                result.username = userPart;
-            }
+            // Split domain\user
+            result.domain = userPart.substr(0, slashPos);
+            result.username = userPart.substr(slashPos + 1);
 
             result.password = passwordPart;
             result.status = AuthResult::Status::Success;
             return result;
         }
+        result.status = AuthResult::Status::Error;
+        result.errorMessage = L"Malformed AUTH_SUCCESS: expected current format";
+        return result;
     }
 
     if (message == MSG_AUTH_TIMEOUT) {

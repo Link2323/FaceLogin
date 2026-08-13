@@ -30,8 +30,7 @@ AuthPipelineResult AuthPipeline::Run() {
         FACELOGIN_ERROR(L"AuthPipeline callbacks are incomplete");
         return result;
     }
-    if (m_config.livenessMethod != LivenessMethod::AntiSpoof ||
-        !m_antiSpoof.IsInitialized()) {
+    if (!m_antiSpoof.IsInitialized()) {
         result.errorMessage = L"活体检测模块不可用，请使用密码登录";
         FACELOGIN_ERROR(L"AuthPipeline refused to run without anti-spoof");
         return result;

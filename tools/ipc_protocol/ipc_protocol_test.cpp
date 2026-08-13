@@ -44,21 +44,26 @@ void TestLocalAccountRoundTrip() {
           "local account success message round trips");
 }
 
-void TestLegacyCompatibility() {
+void TestLegacyFormatIsRejected() {
     const AuthResult domainUser = facelogin::ipc::ParseAuthMessage(
         L"AUTH_SUCCESS:OLDPC\\legacy:old:password");
-    Check(domainUser.status == AuthResult::Status::Success &&
-          domainUser.sid.empty() && domainUser.upn.empty() &&
-          domainUser.domain == L"OLDPC" && domainUser.username == L"legacy" &&
-          domainUser.password == L"old:password",
-          "legacy DOMAIN\\USER success format remains compatible");
+    Check(domainUser.status == AuthResult::Status::Error,
+          "legacy DOMAIN\\USER success format is rejected");
 
     const AuthResult bareUser = facelogin::ipc::ParseAuthMessage(
         L"AUTH_SUCCESS:legacy:password");
-    Check(bareUser.status == AuthResult::Status::Success &&
-          bareUser.domain == L"." && bareUser.username == L"legacy" &&
-          bareUser.password == L"password",
-          "legacy bare username format keeps the local-domain fallback");
+    Check(bareUser.status == AuthResult::Status::Error,
+          "legacy bare username success format is rejected");
+
+    const AuthResult colonHeavyLegacy = facelogin::ipc::ParseAuthMessage(
+        L"AUTH_SUCCESS:OLDPC\\legacy:one:two:three");
+    Check(colonHeavyLegacy.status == AuthResult::Status::Error,
+          "legacy success message with multiple password colons is rejected");
+
+    const AuthResult missingDomain = facelogin::ipc::ParseAuthMessage(
+        L"AUTH_SUCCESS:S-1-5-21-100::local-user:password");
+    Check(missingDomain.status == AuthResult::Status::Error,
+          "current-format success message without DOMAIN\\USER is rejected");
 }
 
 void TestTerminalMessages() {
@@ -102,7 +107,7 @@ void TestMalformedMessagesFailClosed() {
 int wmain() {
     TestMsaRoundTrip();
     TestLocalAccountRoundTrip();
-    TestLegacyCompatibility();
+    TestLegacyFormatIsRejected();
     TestTerminalMessages();
     TestMalformedMessagesFailClosed();
     if (g_failures != 0) {

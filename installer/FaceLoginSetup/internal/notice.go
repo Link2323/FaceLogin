@@ -3,8 +3,7 @@ package internal
 // UpgradeNotice is the version-scoped "what's new" popup shown after an
 // upgrade install completes.
 //
-// This mirrors the ConfigUpgradeEnabled pattern in config.go:
-//   - NoticeEnabled defaults to OFF. Each release that wants to surface an
+// NoticeEnabled defaults to OFF. Each release that wants to surface an
 //     announcement to existing users turns it ON in main.go's custom action
 //     area (and fills in NoticeVersion / NoticeTitle / NoticeBody).
 //   - It is shown ONLY when the install is an UPGRADE (a previous install

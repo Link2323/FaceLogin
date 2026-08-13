@@ -42,7 +42,6 @@ struct AuthPipelineCallbacks {
 };
 
 struct AuthPipelineConfig {
-    LivenessMethod livenessMethod = LivenessMethod::AntiSpoof;
     float antiSpoofThreshold = 0.281f;
     int authTimeoutSeconds = 15;
     int cameraRotation = 0;

@@ -68,27 +68,13 @@ void WriteText(std::ofstream& file, const std::wstring& value) {
     }
 }
 
-void WriteLegacyDatabase(const std::wstring& root, uint32_t version) {
+void WriteUnsupportedDatabase(const std::wstring& root, uint32_t version) {
     CreateDirectoryW((root + L"\\data").c_str(), nullptr);
     std::ofstream file(root + L"\\data\\users.dat", std::ios::binary | std::ios::trunc);
-    const uint32_t count = 1;
+    const uint32_t count = 0;
     Write(file, kFileMagic);
     Write(file, version);
     Write(file, count);
-    WriteText(file, L"legacy-test-user");
-    if (version >= 2) {
-        WriteText(file, L"legacy@example.test");
-        WriteText(file, L"S-1-5-21-10-20-30-1001");
-    }
-    const uint32_t passwordLength = 1;
-    Write(file, passwordLength);
-    const uint8_t passwordless = facelogin::kPasswordlessSentinelByte;
-    Write(file, passwordless);
-    const uint32_t dimension = version >= 3 ? 512U : 128U;
-    if (version >= 3) Write(file, dimension);
-    const auto embedding = Basis(0, dimension);
-    file.write(reinterpret_cast<const char*>(embedding.data()),
-               static_cast<std::streamsize>(embedding.size() * sizeof(float)));
 }
 
 void WriteValidV4Record(std::ofstream& file, const std::wstring& username,
@@ -209,23 +195,17 @@ void TestV4RoundTripAndReload() {
     CleanupTempRoot(root);
 }
 
-void TestLegacyCompatibility() {
+void TestUnsupportedVersionsAreRejected() {
     const std::wstring root = MakeTempRoot();
-    Check(!root.empty(), "legacy fixture directory is created");
+    Check(!root.empty(), "unsupported-version fixture directory is created");
     if (root.empty()) return;
 
     for (uint32_t version = 1; version <= 3; ++version) {
-        WriteLegacyDatabase(root, version);
+        WriteUnsupportedDatabase(root, version);
         facelogin::CredentialStore store;
         store.SetDataDir(root);
-        Check(store.LoadDatabase() && store.GetUserCount() == 1,
-              "legacy database version loads");
-        const auto& users = store.GetUsers();
-        const size_t expectedDimension = version >= 3 ? 512 : 128;
-        Check(users.size() == 1 && users[0].faces.size() == 1 &&
-              users[0].faces[0].id == 1 &&
-              users[0].faces[0].embedding.size() == expectedDimension,
-              "legacy record upgrades to one in-memory V4 face");
+        Check(!store.LoadDatabase() && store.GetUserCount() == 0,
+              "non-V4 database version is rejected");
     }
     CleanupTempRoot(root);
 }
@@ -277,7 +257,7 @@ int wmain() {
     TestIdentityMatching();
     TestPasswordlessAndThresholds();
     TestV4RoundTripAndReload();
-    TestLegacyCompatibility();
+    TestUnsupportedVersionsAreRejected();
     TestMalformedReloadIsTransactional();
     if (g_failures != 0) {
         std::fprintf(stderr, "CredentialStoreTest: %d failure(s)\n", g_failures);

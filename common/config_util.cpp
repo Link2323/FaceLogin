@@ -119,9 +119,6 @@ static int jsonGetInt(const std::string& json, const std::string& key, int defVa
 std::string ConfigToJson(const AppConfig& cfg) {
     std::ostringstream ss;
     ss << "{\n";
-    ss << "  "; jsonWriteString(ss, "recognition_model"); ss << ": "; jsonWriteString(ss, cfg.recognition_model); ss << ",\n";
-    ss << "  "; jsonWriteString(ss, "detector"); ss << ": "; jsonWriteString(ss, cfg.detector); ss << ",\n";
-    ss << "  "; jsonWriteString(ss, "liveness_method"); ss << ": "; jsonWriteString(ss, LivenessMethodToString(cfg.liveness_method)); ss << ",\n";
     ss << "  "; jsonWriteString(ss, "match_threshold"); ss << ": " << cfg.match_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "anti_spoof_threshold"); ss << ": " << cfg.anti_spoof_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
@@ -133,12 +130,6 @@ std::string ConfigToJson(const AppConfig& cfg) {
 
 AppConfig ConfigFromJson(const std::string& json) {
     AppConfig cfg = DefaultConfig();
-    auto rec = jsonGetString(json, "recognition_model");
-    if (!rec.empty()) cfg.recognition_model = rec;
-    auto det = jsonGetString(json, "detector");
-    if (!det.empty()) cfg.detector = det;
-    auto live = jsonGetString(json, "liveness_method");
-    if (!live.empty()) cfg.liveness_method = LivenessMethodFromString(live);
     cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.80f);
     // UI permits [0.70, 1.00] for 512-D (calibrated band; see
     // docs/threshold-calibration.md). Enforce here too because config.json
@@ -211,10 +202,8 @@ AppConfig LoadConfig(const std::wstring& dataDir) {
     file.close();
 
     AppConfig cfg = ConfigFromJson(buf.str());
-    FACELOGIN_INFO(L"Loaded config.json: rec=%hs det=%hs live=%hs thr=%.2f camera=%hs rotation=%d",
-                  cfg.recognition_model.c_str(), cfg.detector.c_str(),
-                  LivenessMethodToString(cfg.liveness_method).c_str(),
-                  cfg.match_threshold, cfg.camera_device.c_str(),
+    FACELOGIN_INFO(L"Loaded config.json: thr=%.2f antiSpoof=%.3f camera=%hs rotation=%d",
+                  cfg.match_threshold, cfg.anti_spoof_threshold, cfg.camera_device.c_str(),
                   cfg.camera_rotation);
     return cfg;
 }
@@ -235,28 +224,6 @@ bool SaveConfig(const std::wstring& dataDir, const AppConfig& cfg) {
     file.close();
     FACELOGIN_INFO(L"Saved config.json");
     return true;
-}
-
-std::string LivenessMethodToString(LivenessMethod m) {
-    switch (m) {
-        case LivenessMethod::Blink:     return "blink";
-        case LivenessMethod::AntiSpoof: return "antispoof";
-        case LivenessMethod::None:      return "none";
-    }
-    return "antispoof"; // unreachable — all enum values covered; kept consistent with the default
-}
-
-LivenessMethod LivenessMethodFromString(const std::string& s) {
-    if (s == "blink")     return LivenessMethod::Blink;      // legacy v1.4 value; callers map it to anti-spoof with a warning
-    if (s == "antispoof") return LivenessMethod::AntiSpoof;
-    if (s == "none") {
-        // Production authentication is fail-closed.  Preserve compatibility
-        // with old configs by migrating the former opt-out to anti-spoof
-        // instead of silently allowing password release without liveness.
-        FACELOGIN_WARN(L"liveness_method=none is no longer permitted; using anti-spoof");
-        return LivenessMethod::AntiSpoof;
-    }
-    return LivenessMethod::AntiSpoof; // default for unknown/misspelled values (matches DefaultConfig; blink removed in v1.5)
 }
 
 } // namespace facelogin

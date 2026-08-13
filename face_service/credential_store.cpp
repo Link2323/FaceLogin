@@ -4,7 +4,6 @@
 #include <shlobj.h>
 #include <fstream>
 #include <algorithm>
-#include <sddl.h>
 
 namespace facelogin {
 
@@ -26,50 +25,6 @@ inline std::wstring NormalizeFaceLabel(const std::wstring& label, uint32_t id) {
 }
 
 } // namespace
-
-// Helper: try to look up SID and UPN from a username.
-// Used for upgrading V1 databases on the fly.
-static void LookupUserIdentity(const std::wstring& username,
-                                std::wstring& outSid,
-                                std::wstring& outUpn) {
-    outSid.clear();
-    outUpn.clear();
-
-    // Get SID via LookupAccountNameW
-    DWORD sidSize = 0, domainSize = 0;
-    SID_NAME_USE sidType;
-    LookupAccountNameW(nullptr, username.c_str(),
-                       nullptr, &sidSize, nullptr, &domainSize, &sidType);
-    if (sidSize > 0) {
-        std::vector<BYTE> sidBuf(sidSize);
-        std::vector<wchar_t> domainBuf(domainSize > 0 ? domainSize : 1);
-        if (LookupAccountNameW(nullptr, username.c_str(),
-                               sidBuf.data(), &sidSize,
-                               domainBuf.data(), &domainSize, &sidType)) {
-            LPWSTR sidStr = nullptr;
-            if (ConvertSidToStringSidW(reinterpret_cast<PSID>(sidBuf.data()), &sidStr)) {
-                outSid = sidStr;
-                LocalFree(sidStr);
-            }
-        }
-    }
-
-    // Get UPN via GetUserNameExW (dynamic bind to avoid secext.h conflicts)
-    HMODULE hSecur32 = LoadLibraryW(L"secur32.dll");
-    if (hSecur32) {
-        typedef BOOLEAN (WINAPI *PFN_GetUserNameExW)(int, LPWSTR, PULONG);
-        auto pfn = reinterpret_cast<PFN_GetUserNameExW>(
-            GetProcAddress(hSecur32, "GetUserNameExW"));
-        if (pfn) {
-            ULONG upnSize = 256;
-            std::vector<wchar_t> upnBuf(upnSize);
-            if (pfn(8 /* NameUserPrincipal */, upnBuf.data(), &upnSize)) {
-                outUpn = upnBuf.data();
-            }
-        }
-        FreeLibrary(hSecur32);
-    }
-}
 
 std::wstring CredentialStore::GetDataDir() const {
     if (!m_dataDir.empty()) return m_dataDir;
@@ -105,7 +60,7 @@ bool CredentialStore::LoadDatabase() {
         FACELOGIN_ERROR(L"Invalid database file (bad magic: 0x%08X)", magic);
         return false;
     }
-    if (version != FILE_VERSION && version != 3 && version != 2 && version != 1) {
+    if (version != FILE_VERSION) {
         FACELOGIN_ERROR(L"Unsupported database version: %u", version);
         return false;
     }
@@ -132,32 +87,30 @@ bool CredentialStore::LoadDatabase() {
         file.read(reinterpret_cast<char*>(nameBuf.data()), nameLen * sizeof(wchar_t));
         rec.username = nameBuf.data();
 
-        if (version >= 2) {
-            // UPN
-            uint32_t upnLen = 0;
-            file.read(reinterpret_cast<char*>(&upnLen), sizeof(upnLen));
-            if (upnLen > 256) {
-                FACELOGIN_ERROR(L"Invalid UPN length: %u", upnLen);
-                return false;
-            }
-            if (upnLen > 0) {
-                std::vector<wchar_t> upnBuf(upnLen + 1, 0);
-                file.read(reinterpret_cast<char*>(upnBuf.data()), upnLen * sizeof(wchar_t));
-                rec.upn = upnBuf.data();
-            }
+        // UPN
+        uint32_t upnLen = 0;
+        file.read(reinterpret_cast<char*>(&upnLen), sizeof(upnLen));
+        if (upnLen > 256) {
+            FACELOGIN_ERROR(L"Invalid UPN length: %u", upnLen);
+            return false;
+        }
+        if (upnLen > 0) {
+            std::vector<wchar_t> upnBuf(upnLen + 1, 0);
+            file.read(reinterpret_cast<char*>(upnBuf.data()), upnLen * sizeof(wchar_t));
+            rec.upn = upnBuf.data();
+        }
 
-            // SID
-            uint32_t sidLen = 0;
-            file.read(reinterpret_cast<char*>(&sidLen), sizeof(sidLen));
-            if (sidLen > 512) {
-                FACELOGIN_ERROR(L"Invalid SID length: %u", sidLen);
-                return false;
-            }
-            if (sidLen > 0) {
-                std::vector<wchar_t> sidBuf(sidLen + 1, 0);
-                file.read(reinterpret_cast<char*>(sidBuf.data()), sidLen * sizeof(wchar_t));
-                rec.sid = sidBuf.data();
-            }
+        // SID
+        uint32_t sidLen = 0;
+        file.read(reinterpret_cast<char*>(&sidLen), sizeof(sidLen));
+        if (sidLen > 512) {
+            FACELOGIN_ERROR(L"Invalid SID length: %u", sidLen);
+            return false;
+        }
+        if (sidLen > 0) {
+            std::vector<wchar_t> sidBuf(sidLen + 1, 0);
+            file.read(reinterpret_cast<char*>(sidBuf.data()), sidLen * sizeof(wchar_t));
+            rec.sid = sidBuf.data();
         }
 
         // Password
@@ -175,63 +128,41 @@ bool CredentialStore::LoadDatabase() {
             file.read(reinterpret_cast<char*>(rec.encryptedPassword.data()), passLen);
         }
 
-        if (version >= 4) {
-            // V4: one or more faces, each with id/label/embedding.
-            uint32_t faceCount = 0;
-            file.read(reinterpret_cast<char*>(&faceCount), sizeof(faceCount));
-            // Writer is capped at kMaxFacesPerUser; read-side is lenient to
-            // avoid killing the whole DB on a slightly-over spec file.
-            if (faceCount < 1 || faceCount > 16) {
-                FACELOGIN_ERROR(L"Invalid face count: %u", faceCount);
+        // V4: one or more faces, each with id/label/embedding.
+        uint32_t faceCount = 0;
+        file.read(reinterpret_cast<char*>(&faceCount), sizeof(faceCount));
+        // Writer is capped at kMaxFacesPerUser; read-side is lenient to
+        // avoid killing the whole DB on a slightly-over spec file.
+        if (faceCount < 1 || faceCount > 16) {
+            FACELOGIN_ERROR(L"Invalid face count: %u", faceCount);
+            return false;
+        }
+        rec.faces.reserve(faceCount);
+        for (uint32_t f = 0; f < faceCount; f++) {
+            FaceRecord face;
+            file.read(reinterpret_cast<char*>(&face.id), sizeof(face.id));
+            if (face.id < 1) {
+                FACELOGIN_ERROR(L"Invalid face id: %u", face.id);
                 return false;
             }
-            rec.faces.reserve(faceCount);
-            for (uint32_t f = 0; f < faceCount; f++) {
-                FaceRecord face;
-                file.read(reinterpret_cast<char*>(&face.id), sizeof(face.id));
-                if (face.id < 1) {
-                    FACELOGIN_ERROR(L"Invalid face id: %u", face.id);
-                    return false;
-                }
-                uint32_t labelLen = 0;
-                file.read(reinterpret_cast<char*>(&labelLen), sizeof(labelLen));
-                if (labelLen > 64) {
-                    FACELOGIN_ERROR(L"Invalid face label length: %u", labelLen);
-                    return false;
-                }
-                if (labelLen > 0) {
-                    std::vector<wchar_t> labelBuf(labelLen + 1, 0);
-                    file.read(reinterpret_cast<char*>(labelBuf.data()),
-                              labelLen * sizeof(wchar_t));
-                    face.label = labelBuf.data();
-                }
-                uint32_t embLen = 0;
-                file.read(reinterpret_cast<char*>(&embLen), sizeof(embLen));
-                // Sanity range: 64..4096 floats (covers 128-D dlib and 512-D ONNX)
-                if (embLen < 64 || embLen > 4096) {
-                    FACELOGIN_ERROR(L"Invalid embedding length: %u", embLen);
-                    return false;
-                }
-                face.embedding.resize(embLen);
-                file.read(reinterpret_cast<char*>(face.embedding.data()),
-                          embLen * sizeof(float));
-                rec.faces.push_back(std::move(face));
+            uint32_t labelLen = 0;
+            file.read(reinterpret_cast<char*>(&labelLen), sizeof(labelLen));
+            if (labelLen > 64) {
+                FACELOGIN_ERROR(L"Invalid face label length: %u", labelLen);
+                return false;
             }
-        } else {
-            // V1/V2/V3: a single embedding, upgraded in memory to one face.
+            if (labelLen > 0) {
+                std::vector<wchar_t> labelBuf(labelLen + 1, 0);
+                file.read(reinterpret_cast<char*>(labelBuf.data()),
+                          labelLen * sizeof(wchar_t));
+                face.label = labelBuf.data();
+            }
             uint32_t embLen = 0;
-            if (version >= 3) {
-                file.read(reinterpret_cast<char*>(&embLen), sizeof(embLen));
-                if (embLen < 64 || embLen > 4096) {
-                    FACELOGIN_ERROR(L"Invalid embedding length: %u", embLen);
-                    return false;
-                }
-            } else {
-                embLen = 128;  // V1/V2 fixed 128 floats
+            file.read(reinterpret_cast<char*>(&embLen), sizeof(embLen));
+            if (embLen < 64 || embLen > 4096) {
+                FACELOGIN_ERROR(L"Invalid embedding length: %u", embLen);
+                return false;
             }
-            FaceRecord face;
-            face.id = 1;
-            face.label = DefaultFaceLabel(1);
             face.embedding.resize(embLen);
             file.read(reinterpret_cast<char*>(face.embedding.data()),
                       embLen * sizeof(float));
@@ -239,22 +170,11 @@ bool CredentialStore::LoadDatabase() {
         }
 
         if (file.good()) {
-            // V1 → V2 upgrade: look up SID/UPN for existing records
-            if (version < 2 && rec.sid.empty()) {
-                LookupUserIdentity(rec.username, rec.sid, rec.upn);
-                FACELOGIN_INFO(L"Upgraded V1 record '%s' → SID=%s UPN=%s",
-                              rec.username.c_str(), rec.sid.c_str(), rec.upn.c_str());
-            }
             loadedUsers.push_back(std::move(rec));
         } else {
             FACELOGIN_ERROR(L"Failed to read record %u", i);
             return false;
         }
-    }
-
-    if (version < FILE_VERSION) {
-        FACELOGIN_INFO(L"Upgraded database v%u → v%u in-memory (will be written on next save)",
-                       version, FILE_VERSION);
     }
 
     m_users = std::move(loadedUsers);

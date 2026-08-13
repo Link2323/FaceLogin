@@ -28,7 +28,22 @@ func TestEnsureConfigDefaultsUsesProductionAuthenticationDefaults(t *testing.T) 
 	if got := cfg["anti_spoof_threshold"]; got != defaultAntiSpoofThreshold {
 		t.Fatalf("fresh-install anti_spoof_threshold = %v, want %.3f", got, defaultAntiSpoofThreshold)
 	}
-	if got := cfg["liveness_method"]; got != "antispoof" {
-		t.Fatalf("fresh-install liveness_method = %v, want antispoof", got)
+}
+
+func TestEnsureConfigDefaultsLeavesExistingConfigUntouched(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	const existing = "{\n  \"recognition_model\": \"onnx\",\n  \"match_threshold\": 0.90\n}\n"
+	if err := os.WriteFile(configPath, []byte(existing), 0644); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+	if err := EnsureConfigDefaults(configPath); err != nil {
+		t.Fatalf("EnsureConfigDefaults returned error: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read existing config: %v", err)
+	}
+	if string(data) != existing {
+		t.Fatalf("existing config was rewritten: %q", data)
 	}
 }

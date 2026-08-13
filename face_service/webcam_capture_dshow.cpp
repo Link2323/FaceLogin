@@ -10,30 +10,6 @@
 namespace facelogin {
 
 // ============================================================================
-// Legacy DevicePath compatibility
-// ============================================================================
-
-// Older releases could persist a symbolic link using this former category
-// GUID. DirectShow uses CLSID_VideoInputDeviceCategory instead. The rest of
-// the symbolic link remains identical, so translate the old GUID while users
-// migrate to the single DirectShow camera path.
-static const wchar_t kLegacyCategoryGuid[] = L"e5323777-f976-4f5b-9b55-b94699c46e44";
-static const wchar_t kDsCategoryGuid[] = L"65e8773d-8f56-11d0-a3b9-00a0c9223196";
-
-static std::wstring LegacyPathToDsPath(const std::wstring& path) {
-    if (path.find(kLegacyCategoryGuid) == std::wstring::npos) {
-        return path;
-    }
-    std::wstring ds = path;
-    size_t pos = 0;
-    while ((pos = ds.find(kLegacyCategoryGuid, pos)) != std::wstring::npos) {
-        ds.replace(pos, wcslen(kLegacyCategoryGuid), kDsCategoryGuid);
-        pos += wcslen(kDsCategoryGuid);
-    }
-    return ds;
-}
-
-// ============================================================================
 // Static COM helpers
 // ============================================================================
 
@@ -179,9 +155,7 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
         return false;
     }
 
-    // First pass: match the configured device by DevicePath. Compare both the
-    // configured value and its DirectShow equivalent for legacy configurations.
-    const std::wstring dsDevicePath = LegacyPathToDsPath(devicePath);
+    // First pass: match the configured DirectShow DevicePath.
     IMoniker* pMatch = nullptr;
     IMoniker* pFirst = nullptr;
     IMoniker* pMoniker = nullptr;
@@ -197,7 +171,7 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
                 VARIANT var; VariantInit(&var);
                 if (SUCCEEDED(pBag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
                     std::wstring dsPath = var.bstrVal;
-                    if (devicePath == dsPath || dsDevicePath == dsPath) {
+                    if (devicePath == dsPath) {
                         pMatch = pMoniker;
                         pMatch->AddRef();
                     }

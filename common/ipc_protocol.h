@@ -74,7 +74,7 @@ AuthResult ParseAuthMessage(const std::wstring& message);
 
 // Build a success message to send through the pipe.
 // Format: AUTH_SUCCESS:SID:UPN:USERNAME:PASSWORD
-// For local accounts without UPN, upn can be empty.
+// For local accounts without UPN, upn can be empty. DOMAIN\\USER is required.
 std::wstring BuildAuthSuccessMessage(const std::wstring& sid,
                                       const std::wstring& upn,
                                       const std::wstring& domain,

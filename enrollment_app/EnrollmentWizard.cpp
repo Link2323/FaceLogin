@@ -282,7 +282,6 @@ EnrollmentWizard::EnrollmentWizard() {
     m_store.SetDataDir(m_dataDir);
 
     m_config = LoadConfig(m_dataDir);
-    m_livenessMethod = m_config.liveness_method;
     m_antiSpoofThreshold = m_config.anti_spoof_threshold;
 }
 
@@ -353,16 +352,7 @@ bool EnrollmentWizard::StartPreview() {
         m_webcam->Shutdown();
         return false;
     }
-    // dlib recognizer/detector were removed — pure ONNX. recognition_model
-    // and detector config values are ignored.
-
-    // Validate liveness method — no identity-only fallback is permitted.
-    if (m_livenessMethod == LivenessMethod::Blink) {
-        FACELOGIN_WARN(L"liveness_method=blink no longer supported (dlib 68-point removed) — using anti-spoof");
-        m_livenessMethod = LivenessMethod::AntiSpoof;
-    }
-    if (m_livenessMethod != LivenessMethod::AntiSpoof ||
-        !m_antiSpoof || !m_antiSpoof->IsInitialized()) {
+    if (!m_antiSpoof || !m_antiSpoof->IsInitialized()) {
         FACELOGIN_ERROR(L"No supported liveness method available — enrollment refused");
         m_webcam->Shutdown();
         return false;
@@ -639,8 +629,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
     // COM methods can be invoked independently of the intended HTML flow.
     // Enforce the full capture boundary here so a caller cannot start a side
     // capture after StartPreview failed and thereby bypass anti-spoofing.
-    if (!m_previewRunning || m_livenessMethod != LivenessMethod::AntiSpoof ||
-        !m_antiSpoof || !m_antiSpoof->IsInitialized() ||
+    if (!m_previewRunning || !m_antiSpoof || !m_antiSpoof->IsInitialized() ||
         !m_onnxDetector || !m_onnxDetector->IsInitialized() ||
         !m_onnxRecognizer || !m_onnxRecognizer->IsInitialized()) {
         FACELOGIN_ERROR(L"CaptureFaceSamples refused: preview or mandatory models are unavailable");
@@ -690,7 +679,6 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         // Phase 1: every independently callable capture must prove liveness.
         // In particular, side-angle append is exposed through COM and cannot
         // inherit a stale proof from an earlier front capture or save.
-        LivenessMethod method = m_livenessMethod;
         bool livenessPassed = false;
         bool livenessInferenceError = false;
         std::uint64_t lastFrameSequence = 0;
@@ -713,8 +701,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         FACELOGIN_INFO(L"Enrollment: starting mandatory anti-spoof check for angle %d",
                        angleIndex);
 
-        if (method == LivenessMethod::AntiSpoof &&
-            m_antiSpoof && m_antiSpoof->IsInitialized()) {
+        if (m_antiSpoof && m_antiSpoof->IsInitialized()) {
             int totalChecks = AntiSpoofCheckCount(m_antiSpoofThreshold);
             int passRequired = AntiSpoofPassRequired(totalChecks);
             FACELOGIN_INFO(L"Enrollment anti-spoof: threshold=%.3f → %d checks, %d required",
@@ -1663,13 +1650,6 @@ std::string EnrollmentWizard::GetConfig() const {
 
 bool EnrollmentWizard::SetConfig(const std::string& json) {
     AppConfig newConfig = ConfigFromJson(json);
-    if (newConfig.liveness_method == LivenessMethod::Blink) {
-        newConfig.liveness_method = LivenessMethod::AntiSpoof;
-    }
-    if (newConfig.liveness_method != LivenessMethod::AntiSpoof) {
-        FACELOGIN_ERROR(L"SetConfig: unsupported liveness method rejected");
-        return false;
-    }
     // A running preview must already have the mandatory model.  Refuse to
     // mutate live settings if that invariant has somehow been broken.
     if (m_previewRunning && (!m_antiSpoof || !m_antiSpoof->IsInitialized())) {
@@ -1684,7 +1664,6 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
         return false;
     }
     m_config = newConfig;
-    m_livenessMethod = newConfig.liveness_method;
     m_antiSpoofThreshold = newConfig.anti_spoof_threshold;
 
     // Low-light enhancement is recognition-only. PAD stays on its calibrated
@@ -1742,10 +1721,9 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
                         GetLastError());
     }
 
-    FACELOGIN_INFO(L"Configuration updated: rec=%hs det=%hs live=%hs thr=%.2f rotation=%d",
-                  m_config.recognition_model.c_str(), m_config.detector.c_str(),
-                  LivenessMethodToString(m_config.liveness_method).c_str(),
-                  m_config.match_threshold, m_config.camera_rotation);
+    FACELOGIN_INFO(L"Configuration updated: thr=%.2f antiSpoof=%.3f rotation=%d",
+                  m_config.match_threshold, m_config.anti_spoof_threshold,
+                  m_config.camera_rotation);
 
     // If the camera selection changed and the preview is running, restart the
     // preview so the new camera takes effect immediately.

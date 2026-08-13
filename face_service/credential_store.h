@@ -41,7 +41,7 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 
 // Stores and retrieves encrypted user credentials and face embeddings.
 //
-// File format (PROGRAMDATA/FaceLogin/data/users.dat):
+// File format (PROGRAMDATA/FaceLogin/data/users.dat), version 4 only:
 //   Header:
 //     Magic:  4 bytes ("FLOG")
 //     Version: 4 bytes (uint32, currently 4)
@@ -49,10 +49,10 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 //   Records (Count times):
 //     Username length: 4 bytes (uint32, in wchar_t units)
 //     Username:        N*2 bytes (UTF-16LE)
-//     UPN length:      4 bytes (uint32, in wchar_t units) ← V2
-//     UPN:             N*2 bytes (UTF-16LE)               ← V2
-//     SID length:      4 bytes (uint32, in wchar_t units) ← V2
-//     SID:             N*2 bytes (UTF-16LE)               ← V2
+//     UPN length:      4 bytes (uint32, in wchar_t units)
+//     UPN:             N*2 bytes (UTF-16LE)
+//     SID length:      4 bytes (uint32, in wchar_t units)
+//     SID:             N*2 bytes (UTF-16LE)
 //     Password length: 4 bytes (uint32, in bytes, encrypted)
 //     Password:        N bytes (DPAPI encrypted)
 //     Face count:      4 bytes (uint32, >= 1)             ← V4
@@ -62,17 +62,6 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 //       Label:         N*2 bytes (UTF-16LE, e.g. L"脸1" or a custom name)
 //       Embedding length: 4 bytes (uint32, in floats)
 //       Embedding:     D*4 bytes (D floats * 4 bytes)
-//
-// V1 backward compat: version=1 records omit UPN/SID fields.
-// On load, V1 records are auto-upgraded by looking up the SID/UPN from SAM.
-// V2 backward compat: version=2 records store a fixed 128-float embedding.
-// V3 backward compat: version=3 records store one length-prefixed embedding.
-// V1/V2/V3 databases are upgraded IN MEMORY on load: the single embedding is
-// wrapped into a one-element faces vector (id=1, label="脸1"). Nothing is
-// written back to disk during load; the file is only re-written as V4 when the
-// next SaveDatabase() happens (enrollment/deletion). This keeps old versions
-// readable for as long as possible (see FaceLoginProvider's version gate).
-//
 // The file is protected by ACLs (SYSTEM + Administrators only).
 // Passwords are encrypted with DPAPI CRYPTPROTECT_LOCAL_MACHINE.
 
@@ -103,13 +92,13 @@ inline bool IsPasswordlessRecord(const std::vector<uint8_t>& encryptedPassword) 
 struct FaceRecord {
     uint32_t           id = 0;
     std::wstring       label;              // display name; "脸N" if user left blank
-    std::vector<float> embedding;          // D-D embedding (128 for dlib, 512 for ONNX)
+    std::vector<float> embedding;          // current production embedding is 512-D ONNX
 };
 
 struct UserRecord {
     std::wstring username;
-    std::wstring upn;      // UserPrincipalName (e.g. "john@outlook.com"), V2
-    std::wstring sid;      // Security Identifier (e.g. "S-1-5-21-..."), V2
+    std::wstring upn;      // UserPrincipalName (e.g. "john@outlook.com")
+    std::wstring sid;      // Security Identifier (e.g. "S-1-5-21-...")
     std::vector<uint8_t> encryptedPassword;  // DPAPI encrypted (or passwordless sentinel)
     std::vector<FaceRecord> faces;           // one or more enrolled faces (V4)
 };

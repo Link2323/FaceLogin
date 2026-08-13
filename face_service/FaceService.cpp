@@ -308,15 +308,7 @@ bool FaceService::Initialize() {
     // before camera init — the configured camera_device is used below.
     m_config = LoadConfig(m_dataDir);
     m_matchThreshold = m_config.match_threshold;
-    m_livenessMethod = m_config.liveness_method;
     m_antiSpoofThreshold = m_config.anti_spoof_threshold;
-
-    // Blink liveness was removed with the dlib 68-point model (v1.5). Configs
-    // that still say "blink" are mapped to the silent anti-spoof path.
-    if (m_livenessMethod == LivenessMethod::Blink) {
-        FACELOGIN_WARN(L"liveness_method=blink no longer supported (dlib 68-point removed) — using anti-spoof");
-        m_livenessMethod = LivenessMethod::AntiSpoof;
-    }
 
     std::wstring logPath = m_dataDir + L"\\log\\service.log";
     Logger::Instance().SetLogFile(logPath);
@@ -347,18 +339,6 @@ bool FaceService::Initialize() {
         // (especially when FaceLoginConsole is running concurrently).
         FACELOGIN_INFO(L"DirectShow webcam will be initialized on demand%s",
                        m_config.camera_device.empty() ? L"" : L" (configured device)");
-    }
-
-    // dlib recognizer/detector were removed — the system is now pure ONNX.
-    // recognition_model/detector config values are ignored (only onnx/scrfd
-    // are supported; anything else logs a warning for backwards compat).
-
-    // Defensive invariant: config parsing maps legacy "none" to anti-spoof,
-    // and legacy blink was normalized above.  Do not permit any future config
-    // path to reintroduce identity-only authentication.
-    if (m_livenessMethod != LivenessMethod::AntiSpoof) {
-        FACELOGIN_ERROR(L"No supported liveness method configured — refusing to start");
-        return false;
     }
 
     {
@@ -756,19 +736,6 @@ void FaceService::Run() {
         }
         else if (request == ipc::MSG_CONFIG_RELOAD) {
             AppConfig reloadedConfig = LoadConfig(m_dataDir);
-            LivenessMethod reloadedLiveness = reloadedConfig.liveness_method;
-
-            // dlib recognizer/detector were removed — recognition_model and
-            // detector config values are ignored (pure ONNX now).
-            if (reloadedLiveness == LivenessMethod::Blink) {
-                FACELOGIN_WARN(L"liveness_method=blink no longer supported — using anti-spoof");
-                reloadedLiveness = LivenessMethod::AntiSpoof;
-            }
-            if (reloadedLiveness != LivenessMethod::AntiSpoof) {
-                FACELOGIN_WARN(L"CONFIG_RELOAD: unsupported liveness method rejected — enforcing anti-spoof");
-                reloadedLiveness = LivenessMethod::AntiSpoof;
-            }
-
             // CONFIG_RELOAD must not wake intentionally-unloaded models on an
             // unlocked desktop. In service mode every camera/model setting is
             // part of the child construction snapshot, so request a fresh
@@ -782,7 +749,6 @@ void FaceService::Run() {
                 std::lock_guard<std::mutex> lock(m_modelMutex);
                 m_config = std::move(reloadedConfig);
                 m_matchThreshold = m_config.match_threshold;
-                m_livenessMethod = reloadedLiveness;
                 m_antiSpoofThreshold = m_config.anti_spoof_threshold;
                 m_modelLowLightEnhance = m_config.low_light_enhance;
                 if (m_isServiceMode) {
@@ -838,10 +804,9 @@ void FaceService::Run() {
                 ? ipc::MSG_CONFIG_RELOAD_OK
                 : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->Disconnect();
-            FACELOGIN_INFO(L"Configuration reloaded: rec=%hs det=%hs live=%hs thr=%.2f rotation=%d",
-                          m_config.recognition_model.c_str(), m_config.detector.c_str(),
-                          "antispoof",
-                          m_matchThreshold, m_config.camera_rotation);
+            FACELOGIN_INFO(L"Configuration reloaded: thr=%.2f antiSpoof=%.3f rotation=%d",
+                          m_matchThreshold, m_antiSpoofThreshold,
+                          m_config.camera_rotation);
         }
         else if (request == ipc::MSG_GET_LOGS) {
             auto lines = Logger::Instance().GetRecentLogs(500);
@@ -1175,8 +1140,7 @@ bool FaceService::ProcessAuthRequest() {
         m_pipeServer->DrainOutput(5000);
         return false;
     }
-    if (m_livenessMethod != LivenessMethod::AntiSpoof ||
-        !models->antiSpoof->IsInitialized()) {
+    if (!models->antiSpoof->IsInitialized()) {
         FACELOGIN_ERROR(L"Authentication refused: anti-spoof model is unavailable");
         const wchar_t* message = m_padIntegrityFailed.load()
             ? L"活体模型完整性校验失败，文件可能被篡改或损坏，请使用密码登录并重新安装 FaceLogin"
@@ -1257,8 +1221,8 @@ bool FaceService::ProcessAuthRequest() {
 
     AuthPipeline pipeline(
         *models->detector, *models->recognizer, *models->antiSpoof,
-        AuthPipelineConfig{m_livenessMethod, m_antiSpoofThreshold,
-                           m_authTimeoutSeconds, m_config.camera_rotation},
+        AuthPipelineConfig{m_antiSpoofThreshold, m_authTimeoutSeconds,
+                           m_config.camera_rotation},
         std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
 

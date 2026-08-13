@@ -277,8 +277,7 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     };
 
     AuthPipeline pipeline(*models->detector, *models->recognizer, *models->antiSpoof,
-                          AuthPipelineConfig{LivenessMethod::AntiSpoof,
-                                             config.antiSpoofThreshold,
+                          AuthPipelineConfig{config.antiSpoofThreshold,
                                              config.authTimeoutSeconds,
                                              config.cameraRotation},
                           std::move(callbacks));

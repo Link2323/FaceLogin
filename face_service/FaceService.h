@@ -115,7 +115,6 @@ private:
 
     // Configuration
     AppConfig m_config;
-    LivenessMethod m_livenessMethod = LivenessMethod::AntiSpoof;
     float m_antiSpoofThreshold = 0.281f;
 
     bool m_isServiceMode = false;  // set by ServiceMain

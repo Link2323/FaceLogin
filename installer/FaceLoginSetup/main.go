@@ -40,50 +40,16 @@ func main() {
 	}
 
 	// =========================================================================
-	// Custom action area — PER-RELEASE upgrade actions.
-	//
-	// Two independent, version-scoped switches live here:
-	//
-	//   A) Config upgrade  — force-sync changed default parameters onto
-	//      existing installs (see internal/config.go).
-	//   B) Upgrade notice  — show a "what's new" popup after an upgrade
+	// Upgrade notice — show a "what's new" popup after an upgrade
 	//      install completes (see internal/notice.go). Only shown when the
 	//      install is an upgrade (a previous version is already installed),
 	//      never on a fresh first-time install.
-	//
-	// Both default to OFF. Each release that needs an action turns the
-	// relevant switch ON here; future releases leave them OFF so stale
-	// overrides/announcements never re-apply.
-	//
-	//   internal.ConfigUpgradeEnabled = true   // A: sync thresholds
-	//   internal.ConfigUpgradeForcedDefaults = map[string]any{
-	//       "match_threshold":      0.80,   // calibrated 512-D production default
-	//       "anti_spoof_threshold": 0.281,
-	//   }
 	//
 	//   internal.NoticeEnabled  = true            // B: announcement popup
 	//   internal.NoticeVersion  = "1.2.0"         // badge shown in the popup
 	//   internal.NoticeTitle    = "FaceLogin 1.2.0 更新说明"
 	//   internal.NoticeBody     = "行1\n行2\n行3"  // one bullet per line
 	//
-	// v1.0.1: threshold defaults changed (match strictness 70 / anti-spoof 0.30).
-	// v1.2.0: no forced config overrides needed (thresholds unchanged; the new
-	// camera_device field defaults to "" = first device automatically). The
-	// V2→V3 database migration cannot be automated (requires re-enrollment),
-	// so it is surfaced via the upgrade notice below instead.
-	// v1.3.0: no forced config overrides needed. The V3→V4 database migration
-	// (multi-face support) is fully backward compatible — old data is upgraded
-	// in memory on load, no re-enrollment required.
-	// v1.4.0: no forced config overrides needed. Removed the unused legacy dlib
-	// models (recognizer + HOG detector) — smaller installer, no re-enrollment.
-	// Dual-MiniFAS migration: scores are not comparable with the removed PAD
-	// model, so force the locally calibrated fusion threshold once on upgrade.
-	internal.ConfigUpgradeEnabled = true
-	internal.ConfigUpgradeForcedDefaults = map[string]any{
-		"anti_spoof_threshold": 0.281,
-		"liveness_method":      "antispoof",
-	}
-
 	// =========================================================================
 	// B) Upgrade notice — per-release announcement shown only on UPGRADE.
 	// =========================================================================
@@ -108,7 +74,7 @@ func main() {
 		"- 修复锁屏空场景误报「检测到攻击」，失败提示文案更准确\n" +
 		"- 修复账号身份切换误报、录入撞槽位等问题\n\n" +
 		"说明：\n" +
-		"- 现有人脸数据兼容，无需重新录入（多角度为新增可选能力）"
+		"- 安装本版本前必须完整卸载旧版；需要重新录入人脸"
 
 	// Initialize the embedded resource filesystem in the internal package
 	internal.EmbeddedFS = resources
