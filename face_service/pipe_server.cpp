@@ -134,13 +134,14 @@ bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
     sa.lpSecurityDescriptor = sec.sd;
     sa.bInheritHandle = FALSE;
 
-    // Use synchronous (blocking) I/O for reliability.
-    // ReadFile/WriteFile must be called with a valid OVERLAPPED struct
-    // on overlapped handles — avoiding that complexity entirely.
+    // Message reads/writes remain synchronous. PIPE_NOWAIT is used only while
+    // accepting a connection; WaitForClient polls ConnectNamedPipe and can
+    // therefore observe RequestShutdown without relying on CloseHandle from
+    // another thread to cancel a synchronous operation.
     m_hPipe = CreateNamedPipeW(
         name,
-        PIPE_ACCESS_DUPLEX,                         // synchronous
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        PIPE_ACCESS_DUPLEX,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
         1,                                          // Max 1 instance
         ipc::PIPE_BUFFER_SIZE,
         ipc::PIPE_BUFFER_SIZE,
@@ -166,31 +167,49 @@ bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
 }
 
 bool PipeServer::WaitForClient(DWORD timeoutMs) {
+    if (m_shutdownRequested.load()) return false;
     if (!CreatePipeInstance(timeoutMs)) return false;
 
-    // Blocking wait for client connection.
-    // The handle is closed by Close() in the Stop() path, which unblocks this.
-    BOOL connected = ConnectNamedPipe(m_hPipe, nullptr);
-    DWORD err = GetLastError();
+    constexpr DWORD kPollIntervalMs = 25;
+    DWORD waited = 0;
+    while (!m_shutdownRequested.load() && waited < timeoutMs) {
+        if (ConnectNamedPipe(m_hPipe, nullptr)) {
+            m_connected = true;
+        } else {
+            const DWORD err = GetLastError();
+            if (err == ERROR_PIPE_CONNECTED) {
+                m_connected = true;
+            } else if (err == ERROR_PIPE_LISTENING) {
+                const DWORD sleepMs = (timeoutMs - waited < kPollIntervalMs)
+                    ? (timeoutMs - waited) : kPollIntervalMs;
+                Sleep(sleepMs);
+                waited += sleepMs;
+                continue;
+            } else if (err == ERROR_NO_DATA || err == ERROR_PIPE_NOT_CONNECTED) {
+                // A client connected and went away before the service accepted
+                // it. Reset this instance and continue waiting within the same
+                // bounded interval.
+                DisconnectNamedPipe(m_hPipe);
+                continue;
+            } else {
+                FACELOGIN_WARN(L"Client connection failed: %lu", err);
+                Close();
+                return false;
+            }
+        }
 
-    if (connected) {
-        m_connected = true;
-        // Per-auth connect detail — DEBUG; redundant with the request dispatch.
-        FACELOGIN_DEBUG(L"Client connected synchronously");
+        DWORD mode = PIPE_READMODE_MESSAGE | PIPE_WAIT;
+        if (!SetNamedPipeHandleState(m_hPipe, &mode, nullptr, nullptr)) {
+            FACELOGIN_ERROR(L"SetNamedPipeHandleState(PIPE_WAIT) failed: %lu", GetLastError());
+            Close();
+            return false;
+        }
+        FACELOGIN_DEBUG(L"Client connected");
         return true;
     }
 
-    if (err == ERROR_PIPE_CONNECTED) {
-        m_connected = true;
-        FACELOGIN_INFO(L"Client already connected");
-        return true;
-    }
-
-    // Handle was likely closed by Stop()
-    if (err == ERROR_NO_DATA || err == ERROR_PIPE_NOT_CONNECTED) {
-        FACELOGIN_INFO(L"Pipe closed while waiting for client");
-    } else {
-        FACELOGIN_WARN(L"Client connection failed: %lu", err);
+    if (m_shutdownRequested.load()) {
+        FACELOGIN_INFO(L"Pipe wait cancelled by service stop request");
     }
     Close();
     return false;
@@ -205,6 +224,7 @@ bool PipeServer::ReadMessage(std::wstring& outMessage, DWORD timeoutMs) {
     // connection, up to timeoutMs.
     DWORD bytesAvail = 0, totalBytes = 0;
     for (DWORD waited = 0; waited < timeoutMs; ) {
+        if (m_shutdownRequested.load()) return false;
         if (PeekNamedPipe(m_hPipe, nullptr, 0, nullptr, &bytesAvail, &totalBytes)) {
             if (bytesAvail > 0) {
                 // Data ready — the ReadFile below returns immediately.
@@ -277,6 +297,7 @@ bool PipeServer::DrainOutput(DWORD timeoutMs) {
 
     DWORD bytesAvail = 0, totalBytes = 0;
     for (DWORD waited = 0; waited < timeoutMs; ) {
+        if (m_shutdownRequested.load()) return false;
         if (PeekNamedPipe(m_hPipe, nullptr, 0, nullptr, &bytesAvail, &totalBytes)) {
             if (bytesAvail == 0) {
                 // All output consumed (or client already closed). Done.
@@ -303,7 +324,7 @@ bool PipeServer::DrainOutput(DWORD timeoutMs) {
 }
 
 bool PipeServer::WriteMessage(const std::wstring& message) {
-    if (!m_connected || m_hPipe == INVALID_HANDLE_VALUE) return false;
+    if (m_shutdownRequested.load() || !m_connected || m_hPipe == INVALID_HANDLE_VALUE) return false;
 
     DWORD bytesWritten = 0;
     DWORD byteSize = static_cast<DWORD>((message.size() + 1) * sizeof(wchar_t));
@@ -345,6 +366,10 @@ void PipeServer::Disconnect() {
         DisconnectNamedPipe(m_hPipe);
         m_connected = false;
     }
+}
+
+void PipeServer::RequestShutdown() {
+    m_shutdownRequested.store(true);
 }
 
 void PipeServer::Close() {

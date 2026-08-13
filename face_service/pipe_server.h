@@ -9,7 +9,9 @@
 namespace facelogin {
 
 // Named pipe server for communication with the credential provider DLL.
-// Uses synchronous I/O (no FILE_FLAG_OVERLAPPED) for reliability.
+// Uses synchronous I/O for message reads/writes. Connection acceptance is
+// polled in PIPE_NOWAIT mode so a service-stop request is never held hostage
+// by a synchronous ConnectNamedPipe call.
 // Security: SYSTEM + Administrators + current interactive user can connect.
 
 class PipeServer {
@@ -21,8 +23,8 @@ public:
     PipeServer(const PipeServer&) = delete;
     PipeServer& operator=(const PipeServer&) = delete;
 
-    // Create the named pipe and wait for a client connection.
-    // Blocks until a client connects or the handle is closed (via Close()).
+    // Create the named pipe and wait for a client connection. The wait is
+    // bounded by timeoutMs and observes RequestShutdown() at short intervals.
     // Returns true when a client has connected.
     bool WaitForClient(DWORD timeoutMs = 30000);
 
@@ -60,7 +62,11 @@ public:
     // Disconnect current client (allows a new client to connect).
     void Disconnect();
 
-    // Close the pipe entirely. Unblocks any pending I/O.
+    // Tell a waiting server loop to exit. This is safe from the SCM control
+    // handler: it does not touch the pipe HANDLE owned by the service thread.
+    void RequestShutdown();
+
+    // Close the pipe entirely. Call only after the server loop has stopped.
     void Close();
 
     // Get the raw pipe handle (for FlushFileBuffers, etc.)
@@ -91,6 +97,7 @@ private:
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
     bool m_connected = false;
+    std::atomic<bool> m_shutdownRequested{false};
 };
 
 } // namespace facelogin

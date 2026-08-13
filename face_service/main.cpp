@@ -1,6 +1,10 @@
 #include "FaceService.h"
+#include "auth_worker.h"
 #include "../common/logger.h"
 #include <cstdio>
+#include <cstdint>
+#include <cwchar>
+#include <limits>
 
 // Named mutex to prevent multiple instances
 static constexpr wchar_t SINGLE_INSTANCE_MUTEX[] =
@@ -12,8 +16,85 @@ static constexpr wchar_t SINGLE_INSTANCE_MUTEX[] =
 //   FaceLoginService.exe -install           — Install the service
 //   FaceLoginService.exe -uninstall         — Uninstall the service
 //   FaceLoginService.exe -standalone        — Run in foreground (for testing)
+//   FaceLoginService.exe -auth-worker ...   — private parent-launched worker
+
+namespace {
+
+bool ParseInheritedHandle(const wchar_t* text, HANDLE& handle) {
+    if (!text || !*text) return false;
+    wchar_t* end = nullptr;
+    const unsigned long long raw = std::wcstoull(text, &end, 10);
+    if (!end || *end != L'\0' || raw == 0 ||
+        raw > static_cast<unsigned long long>(std::numeric_limits<uintptr_t>::max())) {
+        return false;
+    }
+    handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(raw));
+    return handle != nullptr && handle != INVALID_HANDLE_VALUE;
+}
+
+bool TryRunAuthenticationWorker(int argc, wchar_t* argv[], int& exitCode) {
+    int workerModeCount = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (_wcsicmp(argv[i], L"-auth-worker") == 0) ++workerModeCount;
+    }
+    if (workerModeCount == 0) return false;
+    if (workerModeCount != 1 || argc != 6) {
+        exitCode = ERROR_INVALID_PARAMETER;
+        return true;
+    }
+
+    HANDLE parentToWorker = INVALID_HANDLE_VALUE;
+    HANDLE workerToParent = INVALID_HANDLE_VALUE;
+    bool haveInput = false;
+    bool haveOutput = false;
+    for (int i = 1; i < argc; ++i) {
+        if (_wcsicmp(argv[i], L"-auth-worker") == 0) {
+            continue;
+        } else if (_wcsicmp(argv[i], L"--in") == 0 && i + 1 < argc) {
+            if (haveInput) {
+                exitCode = ERROR_INVALID_PARAMETER;
+                return true;
+            }
+            if (!ParseInheritedHandle(argv[++i], parentToWorker)) {
+                exitCode = ERROR_INVALID_HANDLE;
+                return true;
+            }
+            haveInput = true;
+        } else if (_wcsicmp(argv[i], L"--out") == 0 && i + 1 < argc) {
+            if (haveOutput) {
+                exitCode = ERROR_INVALID_PARAMETER;
+                return true;
+            }
+            if (!ParseInheritedHandle(argv[++i], workerToParent)) {
+                exitCode = ERROR_INVALID_HANDLE;
+                return true;
+            }
+            haveOutput = true;
+        } else {
+            exitCode = ERROR_INVALID_PARAMETER;
+            return true;
+        }
+    }
+    if (!haveInput || !haveOutput ||
+        parentToWorker == INVALID_HANDLE_VALUE || workerToParent == INVALID_HANDLE_VALUE) {
+        exitCode = ERROR_INVALID_HANDLE;
+        return true;
+    }
+    exitCode = facelogin::RunAuthenticationWorker(parentToWorker, workerToParent);
+    return true;
+}
+
+} // namespace
 
 int wmain(int argc, wchar_t* argv[]) {
+    // The short-lived auth worker shares this executable but must not acquire
+    // the service singleton: its parent already owns it. Worker mode verifies
+    // LocalSystem and the inherited private handles in RunAuthenticationWorker.
+    int workerExitCode = 0;
+    if (TryRunAuthenticationWorker(argc, argv, workerExitCode)) {
+        return workerExitCode;
+    }
+
     // Prevent multiple instances
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, SINGLE_INSTANCE_MUTEX);
     if (hMutex == nullptr) {

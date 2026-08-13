@@ -1,20 +1,21 @@
 #include "FaceService.h"
+#include "auth_pipeline.h"
+#include "performance_affinity.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
 #include "../common/frame_image.h"
 #include "../common/sha256_util.h"
+#include "../common/model_hashes.h"
 #include "../common/data_path.h"
 #include "../common/secure_clear.h"
 #include <shlobj.h>
 #include <chrono>
 #include <thread>
-#include <future>
-#include <algorithm>
-#include <cmath>
 #include <vector>
 #include <psapi.h>
+#include <tlhelp32.h>
 #include <wtsapi32.h>
 
 #pragma comment(lib, "psapi.lib")
@@ -25,23 +26,6 @@ namespace facelogin {
 FaceService* FaceService::s_pInstance = nullptr;
 
 static constexpr wchar_t SERVICE_NAME[] = L"FaceLoginService";
-
-// Expected SHA-256 (lowercase hex) of each bundled v1.5 model file. The
-// installer validates against the same values (see installer/FaceLoginSetup/
-// internal/extract.go::requiredModels) at install time; the service re-verifies
-// on every load so a model swapped on disk after install is rejected fail-closed
-// (a tampered PAD model could otherwise always return real≥0.99 and defeat the
-// bug3 photo-attack defense). These are the single source of truth for the C++
-// runtime check; the Go manifest and tools/pad_calibration predate this and are
-// not changed here.
-static constexpr char kDetSha256[] =
-    "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc";
-static constexpr char kRecognizerSha256[] =
-    "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185";
-static constexpr char kMiniFasV2Sha256[] =
-    "b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907";
-static constexpr char kMiniFasV1SeSha256[] =
-    "ebab7f90c7833fbccd46d3a555410e78d969db5438e169b6524be444862b3676";
 
 // UTF-8 → wide string, for passing config.camera_device to the camera backends.
 static std::wstring Utf8ToWstr(const std::string& s) {
@@ -55,6 +39,7 @@ static std::wstring Utf8ToWstr(const std::string& s) {
 
 struct ProcessResourceUsage {
     DWORD handles = 0;
+    DWORD threads = 0;
     double privateMiB = 0.0;
     double workingSetMiB = 0.0;
 };
@@ -62,6 +47,20 @@ struct ProcessResourceUsage {
 static ProcessResourceUsage CurrentProcessResourceUsage() {
     ProcessResourceUsage usage;
     GetProcessHandleCount(GetCurrentProcess(), &usage.handles);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+        if (Thread32First(snapshot, &entry)) {
+            do {
+                if (entry.th32OwnerProcessID == GetCurrentProcessId()) {
+                    ++usage.threads;
+                }
+            } while (Thread32Next(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
 
     PROCESS_MEMORY_COUNTERS_EX counters{};
     counters.cb = sizeof(counters);
@@ -117,81 +116,6 @@ static void SecureClearMatchPassword(std::optional<CredentialStore::MatchResult>
     }
 }
 
-// ============================================================================
-// Hybrid (P+E core) affinity — auth-window optimization
-// ============================================================================
-//
-// On P+E hybrid CPUs (e.g. i7-1360P: 4P+8E) the ONNX thread pool (8 threads =
-// hardware_concurrency/2) spreads across P and E cores; every layer-reduction
-// waits on the slowest E-core.  During an auth we pin the whole process to the
-// P-cores (highest EfficiencyClass, including HT siblings) so every ONNX and
-// MiniFAS thread runs on a fast core.  Uniform CPUs (max EfficiencyClass == 0,
-// e.g. Ryzen 9 7945HX) are untouched — the mask is 0 and the guard is a no-op.
-
-// Returns a mask of the highest-EfficiencyClass cores' logical processors,
-// or 0 on uniform CPUs / failure.
-static DWORD_PTR GetPerformanceCoreMask() {
-    DWORD len = 0;
-    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
-    if (len == 0) return 0;
-
-    std::vector<BYTE> buf(len);
-    if (!GetLogicalProcessorInformationEx(RelationProcessorCore,
-            reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()),
-            &len)) {
-        return 0;
-    }
-
-    BYTE maxEff = 0;
-    for (size_t off = 0; off < buf.size();) {
-        const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
-        if (info->Relationship == RelationProcessorCore) {
-            maxEff = (std::max)(maxEff, info->Processor.EfficiencyClass);
-        }
-        off += info->Size;
-        if (info->Size == 0) break;  // malformed — bail
-    }
-    if (maxEff == 0) return 0;  // uniform CPU — no P/E split
-
-    DWORD_PTR mask = 0;
-    for (size_t off = 0; off < buf.size();) {
-        const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
-        if (info->Relationship == RelationProcessorCore &&
-            info->Processor.EfficiencyClass == maxEff) {
-            mask |= info->Processor.GroupMask[0].Mask;
-        }
-        off += info->Size;
-        if (info->Size == 0) break;
-    }
-    return mask;
-}
-
-// RAII: pins the process to the P-core mask for the auth duration and restores
-// the original mask on every exit path.
-class ScopedPerformanceCoreAffinity {
-public:
-    explicit ScopedPerformanceCoreAffinity(DWORD_PTR mask) : m_active(mask != 0) {
-        if (m_active) {
-            GetProcessAffinityMask(GetCurrentProcess(), &m_oldMask, &m_systemMask);
-            if (!SetProcessAffinityMask(GetCurrentProcess(), mask)) {
-                FACELOGIN_WARN(L"SetProcessAffinityMask failed: %lu", GetLastError());
-                m_active = false;
-            } else {
-                FACELOGIN_INFO(L"P-core affinity enabled (mask 0x%llX)", (unsigned long long)mask);
-            }
-        }
-    }
-    ~ScopedPerformanceCoreAffinity() {
-        if (m_active) SetProcessAffinityMask(GetCurrentProcess(), m_oldMask);
-    }
-    ScopedPerformanceCoreAffinity(const ScopedPerformanceCoreAffinity&) = delete;
-    ScopedPerformanceCoreAffinity& operator=(const ScopedPerformanceCoreAffinity&) = delete;
-private:
-    bool m_active;
-    DWORD_PTR m_oldMask = 0;
-    DWORD_PTR m_systemMask = 0;
-};
-
 FaceService::FaceService() {
     s_pInstance = this;
 }
@@ -239,6 +163,10 @@ void WINAPI FaceService::ServiceMain(DWORD argc, LPWSTR* argv) {
     FACELOGIN_INFO(L"FaceLoginService started");
 
     service.Run();
+    // HandlerEx only requested the stop. Perform joins, job teardown and pipe
+    // destruction on this service-main thread so SCM control delivery never
+    // waits on a synchronous I/O operation.
+    service.Stop();
 
     service.m_status.dwCurrentState = SERVICE_STOPPED;
     service.m_status.dwWin32ExitCode = NO_ERROR;
@@ -293,18 +221,20 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
     switch (control) {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
-        pService->Stop();
+        pService->m_status.dwCurrentState = SERVICE_STOP_PENDING;
+        pService->m_status.dwControlsAccepted = 0;
+        pService->m_status.dwWaitHint = 20000;
+        pService->m_status.dwCheckPoint = 1;
+        SetServiceStatus(pService->m_hStatus, &pService->m_status);
+        pService->RequestStop();
         return NO_ERROR;
     case SERVICE_CONTROL_POWEREVENT: {
         // PBT_APMRESUMESUSPEND = resumed from sleep/hibernation. The USB camera
         // may still be in low-power recovery, so force a fresh camera init on
         // the next auth instead of reusing a stale SourceReader.
         //
-        // Consumed only on the MF (standalone) path: see the m_resumedFlag check
-        // in ProcessAuthRequest's MF branch. The DS (service) path doesn't read
-        // it — service mode rebuilds the DS camera on every auth anyway
-        // (Shutdown+reset after each request), so a stale SourceReader can't
-        // accumulate there. The flag is harmless when set but unconsumed.
+        // Service mode has no parent-owned camera and starts a fresh child on
+        // every authentication, so this flag is consumed only by standalone.
         if (eventType == PBT_APMRESUMESUSPEND) {
             FACELOGIN_INFO(L"Power resume event — forcing camera re-init on next auth");
             pService->m_resumedFlag.store(true);
@@ -406,9 +336,11 @@ bool FaceService::Initialize() {
     m_pipeServer = std::make_unique<PipeServer>();
 
     if (m_isServiceMode) {
-        // Camera is initialized lazily per auth request to avoid
-        // device contention with the console app. See Run().
-        FACELOGIN_INFO(L"DirectShow webcam will be initialized on demand%s",
+        // The parent service never opens a camera or an ONNX session. The
+        // preloaded child does so for one request, then exits to reclaim driver
+        // ETW registrations and ORT/Windows heap high-water deterministically.
+        FACELOGIN_INFO(L"Authentication worker will initialize %s on demand%s",
+                       m_config.camera_backend == "mf" ? L"Media Foundation" : L"DirectShow",
                        m_config.camera_device.empty() ? L"" : L" (configured device)");
     } else {
         // Media Foundation camera is also initialized on demand — keeping
@@ -467,7 +399,7 @@ FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
     // 1. SCRFD detector (gnkps variant with five alignment keypoints).
     models->detector = std::make_unique<OnnxDetector>();
     const std::wstring detectorPath = m_modelsDir + L"\\det_10g_gnkps.onnx";
-    if (!VerifyModelIntegrity(detectorPath, kDetSha256, L"SCRFD detector")) {
+    if (!VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector")) {
         FACELOGIN_ERROR(L"SCRFD detector integrity check failed — face detection unavailable");
         return {};
     }
@@ -480,7 +412,7 @@ FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
     // 2. InsightFace recognizer (the largest resident model).
     models->recognizer = std::make_unique<OnnxRecognizer>();
     const std::wstring recognizerPath = m_modelsDir + L"\\w600k_r50.onnx";
-    if (!VerifyModelIntegrity(recognizerPath, kRecognizerSha256,
+    if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
                               L"InsightFace w600k_r50 recognizer")) {
         FACELOGIN_ERROR(L"ONNX recognizer integrity check failed — recognition unavailable");
         return {};
@@ -496,8 +428,8 @@ FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
     models->antiSpoof = std::make_unique<OnnxAntiSpoof>();
     const std::wstring miniFasV2Path = m_modelsDir + L"\\MiniFASNetV2.onnx";
     const std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
-    if (!VerifyModelIntegrity(miniFasV2Path, kMiniFasV2Sha256, L"MiniFASNetV2 (PAD)") ||
-        !VerifyModelIntegrity(miniFasV1SePath, kMiniFasV1SeSha256, L"MiniFASNetV1SE (PAD)")) {
+    if (!VerifyModelIntegrity(miniFasV2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") ||
+        !VerifyModelIntegrity(miniFasV1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)")) {
         padIntegrityFailed = true;
         FACELOGIN_ERROR(L"Anti-spoof model integrity check failed — authentication "
                         L"will remain disabled (fail-closed)");
@@ -581,9 +513,64 @@ std::shared_ptr<FaceService::InferenceModels> FaceService::AcquireModelsForAuth(
     return m_modelState == ModelState::Ready ? m_models : nullptr;
 }
 
+std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
+    const AppConfig& appConfig, std::wstring& errorMessage) {
+    auth_worker::WorkerConfig workerConfig;
+    // The production service remains in Session 0 and starts with the proven
+    // DirectShow backend. Media Foundation is selected only by the later A/B
+    // configuration gate; moving into a child process does not itself change
+    // the Windows session or camera-driver compatibility.
+    workerConfig.cameraBackend = appConfig.camera_backend == "mf"
+        ? auth_worker::CameraBackend::MediaFoundation
+        : auth_worker::CameraBackend::DirectShow;
+    workerConfig.cameraRotation = appConfig.camera_rotation;
+    workerConfig.antiSpoofThreshold = appConfig.anti_spoof_threshold;
+    workerConfig.authTimeoutSeconds = m_authTimeoutSeconds;
+    workerConfig.lowLightEnhance = appConfig.low_light_enhance;
+    workerConfig.cameraDevice = Utf8ToWstr(appConfig.camera_device);
+
+    auto worker = std::make_shared<AuthWorkerClient>(std::move(workerConfig));
+    if (!worker->Start(errorMessage)) return {};
+    return worker;
+}
+
+std::shared_ptr<AuthWorkerClient> FaceService::AcquireAuthWorkerForAuth() {
+    // AUTH_REQUEST is the fail-safe if WTS_SESSION_LOCK was delayed or missed.
+    RequestModelLoad(L"AUTH_REQUEST worker fallback");
+
+    std::unique_lock<std::mutex> lock(m_modelMutex);
+    m_modelCv.wait(lock, [this]() {
+        return m_modelState == ModelState::Ready ||
+               m_modelState == ModelState::Failed ||
+               m_modelState == ModelState::Stopping ||
+               !m_modelsWanted;
+    });
+    return m_modelState == ModelState::Ready ? m_authWorker : nullptr;
+}
+
+void FaceService::MarkAuthWorkerConsumed(bool preloadReplacement) {
+    std::shared_ptr<AuthWorkerClient> consumed;
+    {
+        std::lock_guard<std::mutex> lock(m_modelMutex);
+        consumed = std::move(m_authWorker);
+        if (m_modelState != ModelState::Stopping) {
+            m_modelState = ModelState::Unloaded;
+            if (preloadReplacement && m_modelsWanted && !m_modelStopRequested) {
+                m_modelLoadRequested = true;
+            }
+        }
+    }
+    // Authenticate() has already terminated the child after its terminal
+    // message. Reset outside the lifecycle lock so the Job close cannot block
+    // a WTS handler or model state transition.
+    consumed.reset();
+    m_modelCv.notify_all();
+}
+
 void FaceService::ModelWorkerLoop() {
     for (;;) {
         std::shared_ptr<InferenceModels> modelsToRelease;
+        std::shared_ptr<AuthWorkerClient> workerToRelease;
 
         std::unique_lock<std::mutex> lock(m_modelMutex);
         m_modelCv.wait(lock, [this]() {
@@ -595,25 +582,35 @@ void FaceService::ModelWorkerLoop() {
         });
 
         if (m_modelStopRequested) {
-            modelsToRelease = std::move(m_models);
+            if (m_isServiceMode) workerToRelease = std::move(m_authWorker);
+            else modelsToRelease = std::move(m_models);
             m_modelState = ModelState::Stopping;
             m_modelCv.notify_all();
             lock.unlock();
             modelsToRelease.reset();
+            workerToRelease.reset();
             return;
         }
 
         if (!m_modelsWanted && m_modelState != ModelState::Loading &&
             m_activeModelUsers == 0) {
-            modelsToRelease = std::move(m_models);
+            if (m_isServiceMode) workerToRelease = std::move(m_authWorker);
+            else modelsToRelease = std::move(m_models);
             m_modelState = ModelState::Unloaded;
             m_padIntegrityFailed.store(false);
             m_modelCv.notify_all();
             lock.unlock();
             modelsToRelease.reset();
+            workerToRelease.reset();
             const auto usage = CurrentProcessResourceUsage();
-            FACELOGIN_INFO(L"Inference models released (unlocked idle state; handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
-                           usage.handles, usage.privateMiB, usage.workingSetMiB);
+            if (m_isServiceMode) {
+                FACELOGIN_INFO(L"Authentication worker released (unlocked idle state; parent handles=%lu, private=%.1f MiB, working_set=%.1f MiB, threads=%lu)",
+                               usage.handles, usage.privateMiB, usage.workingSetMiB,
+                               usage.threads);
+            } else {
+                FACELOGIN_INFO(L"Inference models released (unlocked idle state; handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
+                               usage.handles, usage.privateMiB, usage.workingSetMiB);
+            }
             continue;
         }
 
@@ -627,10 +624,34 @@ void FaceService::ModelWorkerLoop() {
         const auto loadStart = std::chrono::steady_clock::now();
         bool padIntegrityFailed = false;
         std::shared_ptr<InferenceModels> loaded;
+        std::shared_ptr<AuthWorkerClient> loadedWorker;
+        std::wstring workerError;
+        AppConfig workerConfigSnapshot;
+        uint64_t workerConfigGeneration = 0;
+
+        // A pending replacement is always one-shot in service mode. Stop the
+        // previous child before opening a new one so it cannot retain a camera
+        // graph or model heap beside the replacement.
+        if (m_isServiceMode) {
+            lock.lock();
+            workerToRelease = std::move(m_authWorker);
+            workerConfigSnapshot = m_config;
+            workerConfigGeneration = m_workerConfigGeneration;
+            lock.unlock();
+            workerToRelease.reset();
+        }
         try {
-            loaded = LoadInferenceModels(padIntegrityFailed);
+            if (m_isServiceMode) {
+                loadedWorker = LoadAuthenticationWorker(workerConfigSnapshot, workerError);
+            }
+            else loaded = LoadInferenceModels(padIntegrityFailed);
         } catch (const std::exception& e) {
-            FACELOGIN_ERROR(L"Model loader threw: %hs", e.what());
+            if (m_isServiceMode) {
+                FACELOGIN_ERROR(L"Authentication worker launcher threw: %hs", e.what());
+            } else {
+                FACELOGIN_ERROR(L"Model loader threw: %hs", e.what());
+            }
+            workerError = L"认证工作进程启动异常";
         }
 
         bool published = false;
@@ -638,7 +659,14 @@ void FaceService::ModelWorkerLoop() {
         lock.lock();
         if (m_modelStopRequested) {
             m_modelState = ModelState::Stopping;
-        } else if (loaded && m_modelsWanted) {
+        } else if (m_isServiceMode && loadedWorker && m_modelsWanted) {
+            m_authWorker = loadedWorker;
+            m_modelState = ModelState::Ready;
+            m_padIntegrityFailed.store(false);
+            m_workerLoadError.clear();
+            m_loadedWorkerConfigGeneration = workerConfigGeneration;
+            published = true;
+        } else if (!m_isServiceMode && loaded && m_modelsWanted) {
             loaded->recognizer->SetLowLightEnhance(m_modelLowLightEnhance);
             m_models = loaded;
             m_modelState = ModelState::Ready;
@@ -650,6 +678,11 @@ void FaceService::ModelWorkerLoop() {
         } else {
             m_modelState = ModelState::Failed;
             m_padIntegrityFailed.store(padIntegrityFailed);
+            if (m_isServiceMode) {
+                m_workerLoadError = workerError.empty()
+                    ? L"认证工作进程启动失败，请使用密码登录"
+                    : workerError;
+            }
         }
         wantedAfterLoad = m_modelsWanted;
         m_modelCv.notify_all();
@@ -659,12 +692,24 @@ void FaceService::ModelWorkerLoop() {
             std::chrono::steady_clock::now() - loadStart).count();
         if (published) {
             const auto usage = CurrentProcessResourceUsage();
-            FACELOGIN_INFO(L"Inference models ready in %.0f ms (handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
-                           loadMs, usage.handles, usage.privateMiB, usage.workingSetMiB);
+            if (m_isServiceMode) {
+                FACELOGIN_INFO(L"Authentication worker ready in %.0f ms (parent handles=%lu, private=%.1f MiB, working_set=%.1f MiB, threads=%lu)",
+                               loadMs, usage.handles, usage.privateMiB,
+                               usage.workingSetMiB, usage.threads);
+            } else {
+                FACELOGIN_INFO(L"Inference models ready in %.0f ms (handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
+                               loadMs, usage.handles, usage.privateMiB, usage.workingSetMiB);
+            }
         } else {
             loaded.reset();
-            FACELOGIN_INFO(L"Inference model load not published (wanted=%d, %.0f ms)",
-                          wantedAfterLoad ? 1 : 0, loadMs);
+            loadedWorker.reset();
+            if (m_isServiceMode) {
+                FACELOGIN_INFO(L"Authentication worker load not published (wanted=%d, %.0f ms)",
+                               wantedAfterLoad ? 1 : 0, loadMs);
+            } else {
+                FACELOGIN_INFO(L"Inference model load not published (wanted=%d, %.0f ms)",
+                               wantedAfterLoad ? 1 : 0, loadMs);
+            }
         }
     }
 }
@@ -712,40 +757,54 @@ void FaceService::Run() {
                 m_pipeServer->WriteMessage(ipc::MSG_CONFIG_RELOAD_ERROR);
                 m_pipeServer->Disconnect();
                 FACELOGIN_ERROR(L"Database reload failed — users.dat parse error; "
-                                L"in-memory database may be empty until next successful reload");
+                                L"previous in-memory database retained");
             }
         }
         else if (request == ipc::MSG_CONFIG_RELOAD) {
-            m_config = LoadConfig(m_dataDir);
-            m_matchThreshold = m_config.match_threshold;
-            m_livenessMethod = m_config.liveness_method;
-            m_antiSpoofThreshold = m_config.anti_spoof_threshold;
+            AppConfig reloadedConfig = LoadConfig(m_dataDir);
+            LivenessMethod reloadedLiveness = reloadedConfig.liveness_method;
 
             // dlib recognizer/detector were removed — recognition_model and
             // detector config values are ignored (pure ONNX now).
-            if (m_livenessMethod == LivenessMethod::Blink) {
+            if (reloadedLiveness == LivenessMethod::Blink) {
                 FACELOGIN_WARN(L"liveness_method=blink no longer supported — using anti-spoof");
-                m_livenessMethod = LivenessMethod::AntiSpoof;
+                reloadedLiveness = LivenessMethod::AntiSpoof;
             }
-            if (m_livenessMethod != LivenessMethod::AntiSpoof) {
+            if (reloadedLiveness != LivenessMethod::AntiSpoof) {
                 FACELOGIN_WARN(L"CONFIG_RELOAD: unsupported liveness method rejected — enforcing anti-spoof");
-                m_livenessMethod = LivenessMethod::AntiSpoof;
+                reloadedLiveness = LivenessMethod::AntiSpoof;
             }
 
             // CONFIG_RELOAD must not wake intentionally-unloaded models on an
-            // unlocked desktop. Update the worker's next-load snapshot, apply
-            // the recognition-only option to a currently-ready bundle, and
-            // retry a failed bundle only when the session still wants models.
+            // unlocked desktop. In service mode every camera/model setting is
+            // part of the child construction snapshot, so request a fresh
+            // worker when the lock screen is active. A generation prevents a
+            // child that was already loading from being acknowledged as the
+            // newly configured backend.
             std::shared_ptr<InferenceModels> loadedModels;
-            bool retryFailedModels = false;
+            bool waitForConfiguredWorker = false;
+            uint64_t requiredWorkerGeneration = 0;
             {
                 std::lock_guard<std::mutex> lock(m_modelMutex);
+                m_config = std::move(reloadedConfig);
+                m_matchThreshold = m_config.match_threshold;
+                m_livenessMethod = reloadedLiveness;
+                m_antiSpoofThreshold = m_config.anti_spoof_threshold;
                 m_modelLowLightEnhance = m_config.low_light_enhance;
-                if (m_modelState == ModelState::Ready) {
-                    loadedModels = m_models;
-                } else if (m_modelsWanted && m_modelState == ModelState::Failed) {
-                    m_modelLoadRequested = true;
-                    retryFailedModels = true;
+                if (m_isServiceMode) {
+                    ++m_workerConfigGeneration;
+                    requiredWorkerGeneration = m_workerConfigGeneration;
+                    if (m_modelsWanted && m_modelState != ModelState::Stopping) {
+                        m_modelLoadRequested = true;
+                        waitForConfiguredWorker = true;
+                    }
+                } else {
+                    if (m_modelState == ModelState::Ready) {
+                        loadedModels = m_models;
+                    } else if (m_modelsWanted && m_modelState == ModelState::Failed) {
+                        m_modelLoadRequested = true;
+                        waitForConfiguredWorker = true;
+                    }
                 }
             }
             m_modelCv.notify_all();
@@ -755,25 +814,41 @@ void FaceService::Run() {
             }
 
             bool modelStateOk = true;
-            if (retryFailedModels) {
+            if (waitForConfiguredWorker) {
                 std::unique_lock<std::mutex> lock(m_modelMutex);
-                m_modelCv.wait(lock, [this]() {
+                m_modelCv.wait(lock, [this, requiredWorkerGeneration]() {
                     return m_modelState == ModelState::Ready ||
                            m_modelState == ModelState::Failed ||
                            m_modelState == ModelState::Stopping ||
                            !m_modelsWanted;
                 });
-                modelStateOk = !m_modelsWanted || m_modelState == ModelState::Ready;
+                if (m_isServiceMode && m_modelState == ModelState::Ready &&
+                    m_loadedWorkerConfigGeneration < requiredWorkerGeneration) {
+                    // The first child was started before CONFIG_RELOAD. Wait
+                    // for the queued replacement, not merely any Ready state.
+                    m_modelCv.wait(lock, [this, requiredWorkerGeneration]() {
+                        return (m_modelState == ModelState::Ready &&
+                                m_loadedWorkerConfigGeneration >= requiredWorkerGeneration) ||
+                               m_modelState == ModelState::Failed ||
+                               m_modelState == ModelState::Stopping ||
+                               !m_modelsWanted;
+                    });
+                }
+                modelStateOk = !m_modelsWanted ||
+                    (m_modelState == ModelState::Ready &&
+                     (!m_isServiceMode ||
+                      m_loadedWorkerConfigGeneration >= requiredWorkerGeneration));
             }
 
             m_pipeServer->WriteMessage(modelStateOk
                 ? ipc::MSG_CONFIG_RELOAD_OK
                 : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->Disconnect();
-            FACELOGIN_INFO(L"Configuration reloaded: rec=%hs det=%hs live=%hs thr=%.2f rotation=%d",
+            FACELOGIN_INFO(L"Configuration reloaded: rec=%hs det=%hs live=%hs thr=%.2f backend=%hs rotation=%d",
                           m_config.recognition_model.c_str(), m_config.detector.c_str(),
                           "antispoof",
-                          m_matchThreshold, m_config.camera_rotation);
+                           m_matchThreshold, m_config.camera_backend.c_str(),
+                           m_config.camera_rotation);
         }
         else if (request == ipc::MSG_GET_LOGS) {
             auto lines = Logger::Instance().GetRecentLogs(500);
@@ -792,23 +867,20 @@ void FaceService::Run() {
             FACELOGIN_DEBUG(L"Sent %zu log lines to client", lines.size());
         }
         else if (request == ipc::MSG_AUTH_REQUEST) {
-            // Lazy-init camera: create + start on demand, then fully shutdown
-            // after auth to free the device for other processes.
             if (m_isServiceMode) {
-                if (!m_webcamDS) {
-                    m_webcamDS = std::make_unique<WebcamCaptureDS>();
-                    if (!m_webcamDS->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
-                        FACELOGIN_ERROR(L"DS camera init failed on demand");
-                        m_webcamDS.reset();
-                        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"摄像头不可用"));
-                        FlushFileBuffers(m_pipeServer->GetHandle());
-                        m_pipeServer->DrainOutput(5000);
-                        m_pipeServer->Disconnect();
-                        continue;
-                    }
-                    FACELOGIN_INFO(L"DS camera initialized on demand for auth");
-                }
-            } else {
+                // Service mode owns no camera/ONNX objects. The preloaded
+                // child creates its graph only for this request and exits after
+                // the terminal result, which releases driver ETW registrations
+                // and ORT/Windows heap high-water with the process.
+                ProcessAuthRequest();
+                m_pipeServer->Disconnect();
+                continue;
+            }
+
+            // Standalone keeps the in-process MF path for desktop development
+            // and enrollment-adjacent diagnostics. Production always uses the
+            // worker branch above.
+            {
                 // After a system resume the camera may still be in low-power
                 // recovery. Drop the stale instance so Initialize() rebuilds a
                 // fresh SourceReader instead of reusing the one that stalled.
@@ -832,14 +904,7 @@ void FaceService::Run() {
                 }
             }
             ProcessAuthRequest();
-            if (m_isServiceMode && m_webcamDS) {
-                m_webcamDS->Shutdown();
-                m_webcamDS.reset();
-                const auto usage = CurrentProcessResourceUsage();
-                FACELOGIN_INFO(L"DS camera released after auth (handles=%lu)",
-                               usage.handles);
-            }
-            if (!m_isServiceMode && m_webcamMF) {
+            if (m_webcamMF) {
                 m_webcamMF->Shutdown();
                 m_webcamMF.reset();
                 const auto usage = CurrentProcessResourceUsage();
@@ -866,11 +931,10 @@ void FaceService::Run() {
 
 void FaceService::Stop() {
     m_running = false;
-    StopModelWorker();
-    if (m_isServiceMode && m_webcamDS) {
-        m_webcamDS->Shutdown();
-        m_webcamDS.reset();
+    if (m_pipeServer) {
+        m_pipeServer->RequestShutdown();
     }
+    StopModelWorker();
     if (!m_isServiceMode && m_webcamMF) {
         m_webcamMF->Shutdown();
     }
@@ -879,21 +943,217 @@ void FaceService::Stop() {
     }
 }
 
+void FaceService::RequestStop() {
+    m_running = false;
+    if (m_pipeServer) {
+        m_pipeServer->RequestShutdown();
+    }
+}
+
+bool FaceService::ProcessWorkerAuthRequest() {
+    FACELOGIN_INFO(L"Starting face authentication through worker...");
+
+    if (m_store->GetUserCount() == 0) {
+        FACELOGIN_WARN(L"No registered users");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"没有注册用户"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+
+    std::optional<CredentialStore::IdentityMatch> lockedIdentity;
+    std::wstring initialSid;
+    AuthWorkerResult workerResult;
+
+    {
+        // Prevent SESSION_UNLOCK from killing the worker between the public
+        // request and its terminal response. The worker itself owns all model
+        // and camera objects; this guard protects only the parent control
+        // channel and lifecycle state.
+        const ModelUseGuard workerUse(*this);
+
+        bool workerNeedsWait = false;
+        {
+            std::lock_guard<std::mutex> lock(m_modelMutex);
+            workerNeedsWait = m_modelState != ModelState::Ready ||
+                !m_authWorker || !m_authWorker->IsReady();
+            if (m_modelState == ModelState::Ready &&
+                (!m_authWorker || !m_authWorker->IsReady())) {
+                // A one-shot worker may have exited after a previous result
+                // before Windows emitted SESSION_UNLOCK. Treat it as unloaded
+                // and let the ordinary lifecycle thread make a fresh one.
+                m_modelState = ModelState::Unloaded;
+                m_modelLoadRequested = true;
+            }
+        }
+        if (workerNeedsWait) {
+            m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) +
+                                       L"正在加载模型...");
+            FlushFileBuffers(m_pipeServer->GetHandle());
+        }
+        m_modelCv.notify_all();
+
+        auto worker = AcquireAuthWorkerForAuth();
+        if (!worker || !worker->IsReady()) {
+            std::wstring loadError;
+            {
+                std::lock_guard<std::mutex> lock(m_modelMutex);
+                loadError = m_workerLoadError;
+            }
+            FACELOGIN_ERROR(L"Authentication worker is not ready");
+            workerResult.errorMessage = loadError.empty()
+                ? L"认证工作进程加载失败，请使用密码登录"
+                : loadError;
+        } else {
+            AuthWorkerCallbacks callbacks;
+            callbacks.reportStatus = [this](const std::wstring& text) {
+                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + text);
+                FlushFileBuffers(m_pipeServer->GetHandle());
+            };
+            callbacks.isCancelled = [this]() {
+                return !m_running || m_pipeServer->IsClientDisconnected();
+            };
+            callbacks.verifyBinding = [this, &lockedIdentity, &initialSid](
+                const std::vector<float>& embedding, unsigned int bindingIndex) {
+                auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
+                                                          m_matchThreshold);
+                if (!identity) return BindingDecision{BindingDecisionKind::Retry, {}};
+
+                if (bindingIndex == 0) {
+                    if (lockedIdentity) {
+                        return BindingDecision{BindingDecisionKind::Reject,
+                                               L"身份验证状态异常，请使用密码登录"};
+                    }
+                    if (identity->sid.empty()) {
+                        FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
+                        return BindingDecision{BindingDecisionKind::Reject,
+                                               L"身份数据无效，请使用密码登录并重新录入人脸"};
+                    }
+                    if (identity->passwordless) {
+                        FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock",
+                                       identity->username.c_str());
+                        return BindingDecision{BindingDecisionKind::Reject,
+                                               ipc::MSG_PASSWORDLESS_NOTICE};
+                    }
+                    initialSid = identity->sid;
+                    lockedIdentity = std::move(identity);
+                    return BindingDecision{BindingDecisionKind::Accept, {}};
+                }
+
+                if (!lockedIdentity || bindingIndex > 2 || identity->sid.empty() ||
+                    identity->sid != initialSid) {
+                    FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
+                    return BindingDecision{BindingDecisionKind::Reject,
+                                           L"活体验证期间人脸不匹配，请重试"};
+                }
+                return BindingDecision{BindingDecisionKind::Accept, {}};
+            };
+            workerResult = worker->Authenticate(std::move(callbacks));
+        }
+    }
+
+    // Every worker has handled at most one request. The replacement decision
+    // follows the complete parent-side result: a valid worker success can
+    // still fail closed if the SID/credential disappeared before the single
+    // final decrypt or if the public pipe breaks. In those cases preload a
+    // fresh worker only when the lifecycle still says the desktop is locked.
+    if (workerResult.cancelled) {
+        MarkAuthWorkerConsumed(true);
+        return false;
+    }
+    if (workerResult.timedOut) {
+        MarkAuthWorkerConsumed(true);
+        FACELOGIN_INFO(L"Authentication timed out in worker");
+        m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+    if (!workerResult.succeeded) {
+        MarkAuthWorkerConsumed(true);
+        const std::wstring message = workerResult.errorMessage.empty()
+            ? L"认证工作进程执行失败，请使用密码登录"
+            : workerResult.errorMessage;
+        FACELOGIN_WARN(L"Authentication worker failed: %s", message.c_str());
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(message));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+    if (!lockedIdentity) {
+        MarkAuthWorkerConsumed(true);
+        FACELOGIN_ERROR(L"Worker reported success without a parent-bound identity");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+            L"身份验证状态异常，请使用密码登录"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+
+    auto credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
+                                                     lockedIdentity->distance);
+    if (!credential || credential->passwordless) {
+        MarkAuthWorkerConsumed(true);
+        FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+            credential && credential->passwordless
+                ? ipc::MSG_PASSWORDLESS_NOTICE
+                : L"账户凭据不可用，请使用密码登录"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        SecureClearMatchPassword(credential);
+        return false;
+    }
+
+    std::wstring domain = L".";
+    wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
+    DWORD size = ARRAYSIZE(computerName);
+    if (GetComputerNameW(computerName, &size)) domain = computerName;
+
+    std::wstring message = ipc::BuildAuthSuccessMessage(
+        credential->sid, credential->upn, domain, credential->username,
+        credential->password);
+    const bool writeOk = m_pipeServer->WriteMessage(message);
+    FlushFileBuffers(m_pipeServer->GetHandle());
+    SecureClearWString(message);
+    if (!writeOk) {
+        MarkAuthWorkerConsumed(true);
+        FACELOGIN_WARN(L"Failed to send authentication credentials");
+        SecureClearMatchPassword(credential);
+        return false;
+    }
+
+    FACELOGIN_INFO(L"Credentials sent for %s\\%s", domain.c_str(),
+                   credential->username.c_str());
+    FACELOGIN_INFO(L"Identity binding complete: user=%s, distance=%.4f, same_sid=3/3",
+                   credential->username.c_str(), lockedIdentity->distance);
+    if (workerResult.hasTiming) {
+        FACELOGIN_INFO(L"Authentication worker timing: camera_init=%.1f ms, pipeline=%.1f ms, total=%.1f ms; supervisor=%.1f ms, cleanup=%.1f ms",
+                       workerResult.timing.cameraInitMs,
+                       workerResult.timing.pipelineMs,
+                       workerResult.timing.totalMs,
+                       workerResult.supervisorElapsedMs,
+                       workerResult.cleanupMs);
+    }
+    SecureClearMatchPassword(credential);
+    // A successful public credential handoff does not speculatively start a
+    // second model worker. If Windows rejects the credential and sends another
+    // AUTH_REQUEST, the ordinary fallback starts one then.
+    MarkAuthWorkerConsumed(false);
+    WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
+    FACELOGIN_INFO(L"UserLoggedIn=1 written after auth success");
+    m_pipeServer->DrainOutput(5000);
+    return true;
+}
+
 bool FaceService::ProcessAuthRequest() {
+    if (m_isServiceMode) return ProcessWorkerAuthRequest();
+
     FACELOGIN_INFO(L"Starting face authentication...");
 
-    // Keep the published model bundle alive for every exit path. Unlock can be
-    // reported by SCM before this function returns; the worker defers release
-    // while this guard is active, and the local shared_ptr below is destroyed
-    // before EndModelUse() wakes the worker.
     const ModelUseGuard modelUseGuard(*this);
-
-    // Pin ONNX/MiniFAS threads to the P-cores for the whole auth on hybrid
-    // CPUs (no-op elsewhere).  Restored on every exit path by the guard.
     const ScopedPerformanceCoreAffinity affinityGuard(GetPerformanceCoreMask());
 
-    // WTS_SESSION_LOCK normally starts this load before LogonUI requests auth.
-    // AUTH_REQUEST also requests it below, covering a missed/late WTS event.
     bool modelsNeedWait = false;
     {
         std::lock_guard<std::mutex> lock(m_modelMutex);
@@ -901,8 +1161,10 @@ bool FaceService::ProcessAuthRequest() {
     }
     if (modelsNeedWait) {
         m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) +
-                                   L"\u6b63\u5728\u52a0\u8f7d\u6a21\u578b...");
+                                   L"正在加载模型...");
+        FlushFileBuffers(m_pipeServer->GetHandle());
     }
+
     auto models = AcquireModelsForAuth();
     if (!models) {
         FACELOGIN_ERROR(L"Required models not loaded — cannot authenticate");
@@ -912,7 +1174,6 @@ bool FaceService::ProcessAuthRequest() {
         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(loadError));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
-        m_pipeServer->Disconnect();
         return false;
     }
     if (!models->detector || !models->recognizer || !models->antiSpoof) {
@@ -923,71 +1184,133 @@ bool FaceService::ProcessAuthRequest() {
         m_pipeServer->DrainOutput(5000);
         return false;
     }
-
-    // Authentication must never degrade to identity-only matching.  This
-    // check also covers a model that was removed/corrupted after startup and a
-    // failed hot-reload attempt.
     if (m_livenessMethod != LivenessMethod::AntiSpoof ||
-        !models->antiSpoof || !models->antiSpoof->IsInitialized()) {
+        !models->antiSpoof->IsInitialized()) {
         FACELOGIN_ERROR(L"Authentication refused: anti-spoof model is unavailable");
-        // Distinguish an integrity (tamper) failure from a generic load failure
-        // so the cause is visible on the lock screen, not just in the log.
-        const wchar_t* msg = m_padIntegrityFailed.load()
+        const wchar_t* message = m_padIntegrityFailed.load()
             ? L"活体模型完整性校验失败，文件可能被篡改或损坏，请使用密码登录并重新安装 FaceLogin"
             : L"活体检测模块不可用，请使用密码登录并检查模型文件";
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(msg));
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(message));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
         return false;
     }
-
-    // Single grab helper used by ALL auth stages (match, anti-spoof, blink,
-    // final verify): it applies the configured camera rotation so every stage
-    // operates on identically-oriented frames. Previously rotation was only
-    // applied in the match loop, leaving the liveness/verify stages to process
-    // unrotated frames — with 90/270 rotation the face was sideways there and
-    // detection/landmarks/EAR failed, blocking unlock.
-    auto grabFrame = [this](FrameImage& f) -> bool {
-        bool ok = m_isServiceMode ? m_webcamDS->GrabFrame(f)
-                                  : (m_webcamMF ? m_webcamMF->GrabFrame(f) : false);
-        if (ok) RotateFrame(f, m_config.camera_rotation);
-        return ok;
-    };
-
     if (m_store->GetUserCount() == 0) {
         FACELOGIN_WARN(L"No registered users");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"\u6ca1\u6709\u6ce8\u518c\u7528\u6237"));
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"没有注册用户"));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
         return false;
     }
 
-    // Drop initial frames to let camera exposure adjust. Exposure settles
-    // within 3 frames in practice (measured: match distance is stable from the
-    // first kept frame); 5 frames × 50ms was over-conservative. 3 frames × 20ms
-    // saves ~0.2s per auth with no accuracy regression (see
-    // docs/performance-baseline.md experiment 3).
-    FrameImage frame;
-    for (int i = 0; i < 3; i++) {
-        grabFrame(frame);
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::optional<CredentialStore::IdentityMatch> lockedIdentity;
+    std::wstring initialSid;
+
+    AuthPipelineCallbacks callbacks;
+    callbacks.grabFrame = [this](FrameImage& frame) {
+        return m_webcamMF && m_webcamMF->GrabFrame(frame);
+    };
+    callbacks.isCancelled = [this]() {
+        return !m_running;
+    };
+    callbacks.isClientDisconnected = [this]() {
+        return m_pipeServer->IsClientDisconnected();
+    };
+    callbacks.reportStatus = [this](const std::wstring& text) {
+        m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + text);
+        FlushFileBuffers(m_pipeServer->GetHandle());
+    };
+    callbacks.verifyBinding = [this, &lockedIdentity, &initialSid](
+        const std::vector<float>& embedding, unsigned int bindingIndex) {
+        auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
+                                                  m_matchThreshold);
+        if (!identity) {
+            return BindingDecision{BindingDecisionKind::Retry, {}};
+        }
+
+        if (bindingIndex == 0) {
+            if (lockedIdentity) {
+                return BindingDecision{BindingDecisionKind::Reject,
+                                       L"身份验证状态异常，请使用密码登录"};
+            }
+            if (identity->sid.empty()) {
+                FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
+                return BindingDecision{BindingDecisionKind::Reject,
+                                       L"身份数据无效，请使用密码登录并重新录入人脸"};
+            }
+            if (identity->passwordless) {
+                FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock",
+                               identity->username.c_str());
+                return BindingDecision{BindingDecisionKind::Reject,
+                                       ipc::MSG_PASSWORDLESS_NOTICE};
+            }
+
+            initialSid = identity->sid;
+            lockedIdentity = std::move(identity);
+            FACELOGIN_INFO(L"Identity locked: %s (distance=%.4f) [1/3]",
+                           lockedIdentity->username.c_str(), lockedIdentity->distance);
+            return BindingDecision{BindingDecisionKind::Accept, {}};
+        }
+
+        if (!lockedIdentity || bindingIndex > 2 || identity->sid.empty() ||
+            identity->sid != initialSid) {
+            FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
+            return BindingDecision{BindingDecisionKind::Reject,
+                                   L"活体验证期间人脸不匹配，请重试"};
+        }
+
+        FACELOGIN_INFO(L"Identity confirmed: %s [%u/3]", initialSid.c_str(),
+                       bindingIndex + 1);
+        return BindingDecision{BindingDecisionKind::Accept, {}};
+    };
+
+    AuthPipeline pipeline(
+        *models->detector, *models->recognizer, *models->antiSpoof,
+        AuthPipelineConfig{m_livenessMethod, m_antiSpoofThreshold,
+                           m_authTimeoutSeconds, m_config.camera_rotation},
+        std::move(callbacks));
+    const AuthPipelineResult result = pipeline.Run();
+
+    if (result.cancelled) {
+        return false;
+    }
+    if (result.timedOut) {
+        m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+    if (!result.succeeded) {
+        const std::wstring error = result.errorMessage.empty()
+            ? L"认证过程异常，请使用密码登录"
+            : result.errorMessage;
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(error));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
+    }
+    if (!lockedIdentity) {
+        FACELOGIN_ERROR(L"Authentication reached final release without a locked identity");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+            L"身份验证状态异常，请使用密码登录"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        return false;
     }
 
-    // No separate "识别中..." status push here — the credential provider's
-    // StartAuth already pushed it on connect, and the fused loop below pushes
-    // "正在识别..." as soon as it begins. A status between them would just
-    // cause a brief text flash on the tile.
-
-    auto startTime = std::chrono::steady_clock::now();
-    bool authSent = false;
-    // The first anti-spoof anchor frame (below) locks the identity for this
-    // auth; every later embedding (mid-window consensus frame, final anchor)
-    // must return this same SID or authentication fails closed.  The final
-    // anchor (PAD frame 5) is the last identity gate — there is no separate
-    // post-liveness verify (see the tail-anchor note further down).
-    // lockedMatch carries the credential released on success.
-    std::wstring initialSid;
-    std::optional<CredentialStore::MatchResult> lockedMatch;
+    auto credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
+                                                     lockedIdentity->distance);
+    if (!credential || credential->passwordless) {
+        FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
+        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
+            credential && credential->passwordless
+                ? ipc::MSG_PASSWORDLESS_NOTICE
+                : L"账户凭据不可用，请使用密码登录"));
+        FlushFileBuffers(m_pipeServer->GetHandle());
+        m_pipeServer->DrainOutput(5000);
+        SecureClearMatchPassword(credential);
+        return false;
+    }
 
     std::wstring domain = L".";
     wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1] = {};
@@ -996,396 +1319,29 @@ bool FaceService::ProcessAuthRequest() {
         domain = computerName;
     }
 
-    // === Consensus + liveness, fused into a single window ===
-    // Historically auth ran a separate 3-frame match consensus (3 embeddings)
-    // ahead of a 5-frame PAD stage that re-anchored identity on frames 1/5
-    // (2 more embeddings): 6 embeddings per auth, and the consensus frames
-    // had NO PAD coverage.  This fused loop runs PAD on every frame (5/5 must
-    // pass — unchanged) and binds identity on frames 1/3/5 of the PAD window:
-    // the first anchor locks the SID, the mid-window embedding and the final
-    // anchor must return the same SID.  The "3-frame consensus" strength is
-    // preserved with three spaced samples (harder for a transient lighting
-    // glitch to hit than three consecutive frames) at 3 embeddings per auth —
-    // the final anchor doubles as the post-liveness identity gate, so no
-    // separate fresh-frame final verify runs (tail-anchor reuse, reviewed
-    // 2026-08: the old verify closed only the ~200ms window between frame 5
-    // and credential release at the cost of a full extra embedding).
-    // An embedding that fails to produce a match slides the frame out of the
-    // count — it is neither counted for PAD nor allowed to satisfy the anchor
-    // schedule, so consensus can never silently shrink below three bindings.
-    // An embedding that matches a DIFFERENT SID is a hard fail (face swap).
-        {
-            // === Liveness check ===
-            {
-                LivenessMethod method = m_livenessMethod;
+    std::wstring message = ipc::BuildAuthSuccessMessage(
+        credential->sid, credential->upn, domain, credential->username,
+        credential->password);
+    const bool writeOk = m_pipeServer->WriteMessage(message);
+    FlushFileBuffers(m_pipeServer->GetHandle());
+    SecureClearWString(message);
+    if (!writeOk) {
+        FACELOGIN_WARN(L"Failed to send authentication credentials");
+        SecureClearMatchPassword(credential);
+        return false;
+    }
 
-                // Determine status text. The fused loop runs face detection,
-                // liveness, and identity binding together on each frame — show
-                // one unified "recognizing" status rather than implying a
-                // standalone "liveness-only" phase.
-                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + L"正在识别...");
-                FlushFileBuffers(m_pipeServer->GetHandle());
+    FACELOGIN_INFO(L"Credentials sent for %s\\%s", domain.c_str(),
+                   credential->username.c_str());
+    SecureClearMatchPassword(credential);
+    WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
+    FACELOGIN_INFO(L"UserLoggedIn=1 written after auth success");
 
-                bool livenessPassed = false;
-                bool livenessInferenceError = false;
-                bool livenessIdentityMismatch = false;
-                bool anyFaceSeen = false; // any frame detected a face this window?
-
-                if (method == LivenessMethod::AntiSpoof) {
-                    // Calibrated dual-model consensus: all five frames must pass.
-                    int totalChecks = AntiSpoofCheckCount(m_antiSpoofThreshold);
-                    int passRequired = AntiSpoofPassRequired(totalChecks);
-                    FACELOGIN_INFO(L"Anti-spoof: threshold=%.3f → %d checks, %d required",
-                                   m_antiSpoofThreshold, totalChecks, passRequired);
-                    auto asStart = std::chrono::steady_clock::now();
-                    int passCount = 0, totalChecked = 0;
-                    // Anchor schedule inside the PAD window (see the fused
-                    // design note above): frames 1/3/5 of the counted PAD
-                    // samples embed and must agree on one SID; frames 2/4 use
-                    // a cheap bbox-overlap continuity check.  A full embedding
-                    // on every frame costs ~1-2s on low-end hardware and blew
-                    // the old 5s window there; the 1/3/5 schedule keeps three
-                    // bindings while staying inside the 8s window.
-                    bool anchored = false;    // first anchor landed (identity locked)?
-                    bool havePrevRect = false;
-                    FaceRect prevRect; // last counted frame's face box
-                    int consensusCount = 0;   // anchor + mid + final = 3 bindings
-                    // Fail-fast timers (wall-clock, machine-independent). The
-                    // inter-frame pacing (30ms retry on no-face / no-grab,
-                    // 60ms between counted PAD frames) makes a frame-count
-                    // cutoff machine-dependent: on a throttled 2GHz laptop a
-                    // frame is ~600-1000ms, so "N frames" lasts several times
-                    // longer there than on the dev Ryzen.  Wall-clock seconds
-                    // give the same perceived wait on every machine and only
-                    // ever shorten the failure path — the success path's frame
-                    // schedule and the 8s/15s windows are untouched.
-                    //   noFaceStart: when the current no-face streak began.
-                    //   noPassStart: when the current all-PAD-fail streak began.
-                    // Both reset to "now" when their condition clears, and both
-                    // start at the window start.
-                    auto noFaceStart = asStart;
-                    auto noPassStart = asStart;
-                    // Fail-fast triggers (set below, consulted after the loop).
-                    // When either fires we break out and skip the normal
-                    // livenessPassed computation so the false verdict sticks.
-                    bool failFastEmpty = false;   // empty scene ≥ 2.5s
-                    bool failFastAttack = false;  // face seen, PAD all-fail ≥ 2s
-                    while (m_running && totalChecked < totalChecks) {
-                        if (m_pipeServer->IsClientDisconnected()) {
-                            FACELOGIN_INFO(L"Client disconnected during anti-spoof — aborting");
-                            SecureClearMatchPassword(lockedMatch);
-                            return false;
-                        }
-                        // Global 15s auth timeout.  The separate consensus loop
-                        // that used to enforce it is gone; this loop owns it.
-                        auto allElapsed = std::chrono::steady_clock::now() - startTime;
-                        if (std::chrono::duration_cast<std::chrono::seconds>(allElapsed).count() >= m_authTimeoutSeconds) {
-                            FACELOGIN_INFO(L"Authentication timed out");
-                            m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
-                            FlushFileBuffers(m_pipeServer->GetHandle());
-                            m_pipeServer->DrainOutput(5000);
-                            SecureClearMatchPassword(lockedMatch);
-                            return false;
-                        }
-                        // Window matches enrollment's 8s (EnrollmentWizard).
-                        auto asElapsed = std::chrono::steady_clock::now() - asStart;
-                        if (std::chrono::duration_cast<std::chrono::seconds>(asElapsed).count() >= 8) break;
-
-                        // Fail-fast: empty scene. If no face has been detected
-                        // yet this window and 2.5s have elapsed, the scene is
-                        // empty — bail now with "未检测到人脸" instead of
-                        // making the user wait the full 8s window. 2.5s
-                        // tolerates slow camera exposure / weak-light first-
-                        // frame delay (anyFaceSeen flips true the instant a
-                        // face appears, which stops this check for the rest of
-                        // the window). Wall-clock so the wait is the same on a
-                        // 2GHz throttled laptop as on the dev Ryzen.
-                        if (!anyFaceSeen) {
-                            auto noFaceElapsed = std::chrono::steady_clock::now() - noFaceStart;
-                            if (std::chrono::duration<double>(noFaceElapsed).count() >= 2.5) {
-                                FACELOGIN_INFO(L"No face detected within 2.5s — failing fast (empty scene)");
-                                failFastEmpty = true;
-                                // anyFaceSeen stays false -> "未检测到人脸" below
-                                break;
-                            }
-                        }
-
-                        FrameImage asFrame;
-                        if (!grabFrame(asFrame)) { if (!m_running) break; std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
-
-                        // MiniFASNet consumes expanded crops around the SCRFD bbox.
-                        auto asDet = models->detector->DetectLargestFace(asFrame);
-                        if (!asDet) { std::this_thread::sleep_for(std::chrono::milliseconds(30)); continue; }
-                        anyFaceSeen = true;
-
-                        // Fail-fast: persistent PAD rejection. A face is
-                        // present but passCount is still 0 (no frame has
-                        // cleared the threshold) and 2s have elapsed since the
-                        // first detection — the subject is almost certainly a
-                        // photo/mask, so fail now instead of running the
-                        // remaining PAD frames. The 2s grace window lets a
-                        // real face that needs a frame or two of exposure
-                        // settle clear the threshold first; once any frame
-                        // passes, noPassStart is reset below and this check
-                        // stays dormant for the rest of the window.
-                        if (passCount == 0) {
-                            auto noPassElapsed = std::chrono::steady_clock::now() - noPassStart;
-                            if (std::chrono::duration<double>(noPassElapsed).count() >= 2.0) {
-                                FACELOGIN_INFO(L"PAD persistently below threshold for 2s — failing fast (likely attack)");
-                                failFastAttack = true;
-                                // anyFaceSeen is true -> "未通过活体检测" below
-                                break;
-                            }
-                        }
-
-                        const FaceRect faceRect(
-                            static_cast<long>(asDet->x1), static_cast<long>(asDet->y1),
-                            static_cast<long>(asDet->x2), static_cast<long>(asDet->y2));
-
-                        // Frame 1 (until the first anchor lands) and frame 5
-                        // (totalChecks-1) are identity anchors; frame 3
-                        // (totalChecked==2) is the mid-window consensus embed.
-                        // The 1/3/5 schedule assumes totalChecks == 5 (the
-                        // calibrated anti_spoof_threshold=0.281 default).  If a
-                        // future config ever changes the check count, the
-                        // binding plan must be re-derived so that exactly three
-                        // spaced embeddings still bracket the window.
-                        const bool isAnchor = !anchored || totalChecked == totalChecks - 1;
-                        const bool isConsensusFrame = (totalChecked == 2);
-
-                        // On binding frames the PAD inference runs concurrently
-                        // with the embedding (independent ONNX sessions, read-only
-                        // input — same rationale as the dual-MiniFAS overlap in
-                        // OnnxAntiSpoof::Predict). Middle frames run it alone.
-                        auto scoreFuture = std::async(std::launch::async,
-                            [&] { return models->antiSpoof->Predict(asFrame, faceRect); });
-
-                        if (isAnchor || isConsensusFrame) {
-                            auto continuityEmb =
-                                models->recognizer->ComputeEmbedding(asFrame, asDet->kps);
-                            if (continuityEmb.empty()) {
-                                scoreFuture.get(); // consume the running predict
-                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                                continue;
-                            }
-                            auto continuityMatch = m_store->FindBestMatch(
-                                continuityEmb.data(), continuityEmb.size(), m_matchThreshold);
-                            if (!continuityMatch) {
-                                scoreFuture.get();
-                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                                continue;
-                            }
-
-                            if (!anchored) {
-                                // First anchor: lock the identity.  This is the
-                                // credential released on success — never clear
-                                // its password here.
-                                if (continuityMatch->sid.empty()) {
-                                    scoreFuture.get();
-                                    FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
-                                    SecureClearMatchPassword(continuityMatch);
-                                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-                                        L"身份数据无效，请使用密码登录并重新录入人脸"));
-                                    FlushFileBuffers(m_pipeServer->GetHandle());
-                                    m_pipeServer->DrainOutput(5000);
-                                    SecureClearMatchPassword(lockedMatch);
-                                    return false;
-                                }
-                                if (continuityMatch->passwordless) {
-                                    scoreFuture.get();
-                                    FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock; notifying CP",
-                                                   continuityMatch->username.c_str());
-                                    SecureClearMatchPassword(continuityMatch);
-                                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(ipc::MSG_PASSWORDLESS_NOTICE));
-                                    FlushFileBuffers(m_pipeServer->GetHandle());
-                                    m_pipeServer->DrainOutput(5000);
-                                    SecureClearMatchPassword(lockedMatch);
-                                    return false;
-                                }
-                                initialSid = continuityMatch->sid;
-                                lockedMatch = std::move(continuityMatch);
-                                anchored = true;
-                                consensusCount++;
-                                FACELOGIN_INFO(L"Identity locked: %s (distance=%.4f) [%d/3]",
-                                              lockedMatch->username.c_str(),
-                                              lockedMatch->distance, consensusCount);
-                            } else {
-                                // Mid-window consensus / final anchor: must be
-                                // the same identity that locked the sequence.
-                                // Otherwise user A's stored credential could be
-                                // released after user B (or a swapped face)
-                                // supplied the liveness frames.
-                                const bool sameIdentity = !continuityMatch->sid.empty() &&
-                                                          continuityMatch->sid == initialSid;
-                                SecureClearMatchPassword(continuityMatch);
-                                if (!sameIdentity) {
-                                    scoreFuture.get();
-                                    FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
-                                    livenessIdentityMismatch = true;
-                                    break;
-                                }
-                                consensusCount++;
-                                FACELOGIN_INFO(L"Identity confirmed: %s [%d/3]",
-                                              initialSid.c_str(), consensusCount);
-                            }
-                        } else if (havePrevRect) {
-                            // Middle frames: cheap geometric continuity. A real
-                            // face swap displaces the box beyond the ~35% IoU
-                            // band; frame 5 re-binds identity by embedding. An
-                            // IoU dip just skips the frame (forgiving of sway);
-                            // a sustained displacement starves totalChecked and
-                            // the run fails closed.
-                            const auto interW = std::max<long>(0,
-                                std::min(faceRect.right(), prevRect.right()) -
-                                std::max(faceRect.left(), prevRect.left()) + 1);
-                            const auto interH = std::max<long>(0,
-                                std::min(faceRect.bottom(), prevRect.bottom()) -
-                                std::max(faceRect.top(), prevRect.top()) + 1);
-                            const double inter = static_cast<double>(interW) * interH;
-                            const double uni = static_cast<double>(faceRect.width()) * faceRect.height() +
-                                               static_cast<double>(prevRect.width()) * prevRect.height() - inter;
-                            if (uni > 0.0 && inter / uni < 0.35) {
-                                scoreFuture.get();
-                                FACELOGIN_WARN(L"Face position discontinuity during anti-spoof — frame skipped");
-                                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                                continue;
-                            }
-                        }
-
-                        float score = scoreFuture.get();
-                        if (!std::isfinite(score) || score < 0.0f || score > 1.0f) {
-                            FACELOGIN_ERROR(L"Anti-spoof inference returned invalid score: %.4f", score);
-                            livenessInferenceError = true;
-                            break;
-                        }
-
-                        totalChecked++;
-                        prevRect = faceRect;
-                        havePrevRect = true;
-                        if (score >= m_antiSpoofThreshold) {
-                            passCount++; // config-driven threshold
-                            // A frame cleared the threshold — the persistent-
-                            // rejection streak is broken; reset the fail-fast
-                            // timer so a later run of failures must again
-                            // exceed 2s before early-exiting.
-                            noPassStart = std::chrono::steady_clock::now();
-                        }
-                        // Per-frame tally — DEBUG; the per-auth summary
-                        // (Liveness passed / fail-closed) stays at INFO.
-                        FACELOGIN_DEBUG(L"Anti-spoof frame %d: score=%.3f (pass=%d)", totalChecked, score, passCount);
-
-                        // Inter-frame pacing for temporal diversity (distinct
-                        // frames resist video-replay attacks). 60ms keeps the
-                        // samples spread without the over-conservative 100ms
-                        // (see docs/performance-baseline.md experiment 3).
-                        std::this_thread::sleep_for(std::chrono::milliseconds(60));
-                    }
-                    // A partial sample set is not enough.  Previously one early
-                    // passing frame could satisfy passRequired even when the
-                    // remaining required frames were never captured.  The
-                    // consensusCount >= 3 term is defensive: the loop's binding
-                    // schedule already forces all three embeddings to succeed
-                    // before totalChecked can reach totalChecks, but the check
-                    // makes it impossible for a future edit to silently weaken
-                    // consensus below three same-SID bindings.
-                    // Fail-fast breaks leave livenessPassed=false (its init);
-                    // skip the normal computation so the verdict sticks.
-                    if (!failFastEmpty && !failFastAttack) {
-                        livenessPassed = (!livenessInferenceError &&
-                                          totalChecked == totalChecks &&
-                                          passCount >= passRequired &&
-                                          consensusCount >= 3);
-                    }
-                    if (!livenessPassed) {
-                        FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
-                                       passCount, totalChecked, passRequired);
-                    }
-                }
-
-                if (!livenessPassed) {
-                    FACELOGIN_WARN(L"Liveness check failed");
-                    // Distinguish "never detected a face this window" from a
-                    // genuine anti-spoof rejection.  Previously an empty scene
-                    // (5/5 frames with no detection) timed out the 8s window
-                    // with all three flags false and fell through to the
-                    // attack-rejection message — telling the user "检测到攻击"
-                    // when in fact no face was ever seen.
-                    std::wstring failMsg;
-                    if (livenessInferenceError) {
-                        failMsg = L"活体检测模块异常，请使用密码登录";
-                    } else if (livenessIdentityMismatch) {
-                        failMsg = L"活体验证期间人脸不匹配，请重试";
-                    } else if (!anyFaceSeen) {
-                        failMsg = L"未检测到人脸";
-                    } else {
-                        failMsg = L"未通过活体检测，请使用真实人脸";
-                    }
-                    m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(failMsg));
-                    FlushFileBuffers(m_pipeServer->GetHandle());
-                    m_pipeServer->DrainOutput(5000);
-                    SecureClearMatchPassword(lockedMatch);
-                    return false;
-                }
-
-                // The final anchor (PAD frame 5) doubles as the post-liveness
-                // identity check: it is the last PAD sample AND its embedding
-                // already proved the same SID as the first anchor.  A separate
-                // fresh-frame final verify existed solely to close the ~200ms
-                // window between frame 5 and credential release - it cost a
-                // whole extra embedding (~0.7s on slow hardware).  After
-                // review the window is accepted and that step removed: the
-                // tail-anchor binding is the final identity gate (see
-                // docs/performance-baseline.md experiment 7).  Credentials go
-                // out immediately after the 5/5 PAD pass.
-                FACELOGIN_INFO(L"Liveness passed \u2014 tail anchor bound, releasing credentials");
-
-            }
-
-            // Serialize credentials only after liveness 5/5 and the tail-anchor
-            // same-SID binding have both succeeded.
-            std::wstring msg = ipc::BuildAuthSuccessMessage(
-                lockedMatch->sid, lockedMatch->upn,
-                domain, lockedMatch->username, lockedMatch->password);
-            bool writeOk = m_pipeServer->WriteMessage(msg);
-            FlushFileBuffers(m_pipeServer->GetHandle());
-            SecureClearWString(msg);
-            SecureClearMatchPassword(lockedMatch);
-
-            if (!writeOk) {
-                FACELOGIN_WARN(L"Failed to send authentication credentials");
-                return false;
-            }
-
-            authSent = true;
-            FACELOGIN_INFO(L"Credentials sent for %s\\%s",
-                          domain.c_str(), lockedMatch->username.c_str());
-
-            // Mark user as logged in IMMEDIATELY after sending credentials.
-            // This prevents a race condition: the user can lock (Win+L)
-            // before Windows fires WTS_SESSION_LOGON (which can take
-            // seconds), causing the CP to misdetect the unlock as a cold
-            // boot because UserLoggedIn is still 0.
-            WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
-            FACELOGIN_INFO(L"UserLoggedIn=1 written after auth success");
-
-            // Stop the capture graph NOW (camera LED off) before the bounded
-            // pipe drain below. The graph keeps streaming during auth; pausing
-            // it immediately after success frees the camera without waiting for
-            // the full teardown.
-            if (m_isServiceMode && m_webcamDS) {
-                m_webcamDS->Pause();
-            } else if (!m_isServiceMode && m_webcamMF) {
-                m_webcamMF->Shutdown();
-            }
-
-            // Bounded drain: wait briefly for the client to consume the
-            // AUTH_SUCCESS message, then return. The old code did an
-            // unbounded ReadFile(dummy) here — if the client closed the pipe
-            // or never read, the service blocked forever and SCM killed it.
-            m_pipeServer->DrainOutput(5000);
-        }
-
-    return authSent;
+    if (m_webcamMF) {
+        m_webcamMF->Shutdown();
+    }
+    m_pipeServer->DrainOutput(5000);
+    return true;
 }
 
 bool FaceService::Install(const std::wstring& exePath) {

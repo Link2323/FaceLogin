@@ -84,6 +84,9 @@ std::wstring CredentialStore::GetDataDir() const {
 
 bool CredentialStore::LoadDatabase() {
     std::wstring path = GetDataDir() + L"\\data\\users.dat";
+    // Reload is transactional and fail-closed. Never expose a prefix of a
+    // malformed database: authentication must see either the complete newly
+    // validated file or no identities at all.
     m_users.clear();
 
     std::ifstream file(path, std::ios::binary);
@@ -106,8 +109,14 @@ bool CredentialStore::LoadDatabase() {
         FACELOGIN_ERROR(L"Unsupported database version: %u", version);
         return false;
     }
+    if (count > kMaxUsers) {
+        FACELOGIN_ERROR(L"Invalid database user count: %u", count);
+        return false;
+    }
 
     FACELOGIN_INFO(L"Loading %u user record(s) from database (v%u)", count, version);
+    std::vector<UserRecord> loadedUsers;
+    loadedUsers.reserve(count);
 
     for (uint32_t i = 0; i < count; i++) {
         UserRecord rec = {};
@@ -236,7 +245,7 @@ bool CredentialStore::LoadDatabase() {
                 FACELOGIN_INFO(L"Upgraded V1 record '%s' → SID=%s UPN=%s",
                               rec.username.c_str(), rec.sid.c_str(), rec.upn.c_str());
             }
-            m_users.push_back(std::move(rec));
+            loadedUsers.push_back(std::move(rec));
         } else {
             FACELOGIN_ERROR(L"Failed to read record %u", i);
             return false;
@@ -248,6 +257,7 @@ bool CredentialStore::LoadDatabase() {
                        version, FILE_VERSION);
     }
 
+    m_users = std::move(loadedUsers);
     FACELOGIN_INFO(L"Loaded %zu user(s) successfully", m_users.size());
     return true;
 }
@@ -546,7 +556,7 @@ size_t CredentialStore::GetFaceCount(const std::wstring& sid) const {
     return m_users[idx].faces.size();
 }
 
-std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
+std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     const float probeEmbedding[], size_t probeDim, float threshold) {
 
     if (m_users.empty() || probeDim == 0 || probeEmbedding == nullptr) {
@@ -599,7 +609,7 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     // (e.g. dlib 128-D probe against an ONNX 512-D enrollment — a config/data
     // mismatch. DEBUG level: fires on every frame and would spam the log.)
     if (bestIdx >= m_users.size()) {
-        FACELOGIN_DEBUG(L"FindBestMatch: no stored %zu-D embedding (accounts=%zu)",
+        FACELOGIN_DEBUG(L"FindBestIdentity: no stored %zu-D embedding (accounts=%zu)",
                         probeDim, m_users.size());
         return std::nullopt;
     }
@@ -611,7 +621,7 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     // (DEBUG level: this runs on every frame and would spam the log.)
     float effThreshold = EmbeddingThresholdForDim(threshold, probeDim);
     if (effThreshold != threshold) {
-        FACELOGIN_DEBUG(L"FindBestMatch: dim=%zu → threshold %.3f scaled to %.3f",
+        FACELOGIN_DEBUG(L"FindBestIdentity: dim=%zu → threshold %.3f scaled to %.3f",
                         probeDim, threshold, effThreshold);
     }
 
@@ -630,42 +640,58 @@ std::optional<CredentialStore::MatchResult> CredentialStore::FindBestMatch(
     }
 
     if (bestDist < effThreshold) {
-        MatchResult best;
+        IdentityMatch best;
         best.distance = bestDist;
         best.upn = m_users[bestIdx].upn;
         best.sid = m_users[bestIdx].sid;
         best.username = m_users[bestIdx].username;
-
-        if (IsPasswordlessRecord(m_users[bestIdx].encryptedPassword)) {
-            // Passwordless account: no password to decrypt. Return the match
-            // with passwordless=true so the caller (FaceService) knows not to
-            // submit LSA credentials and instead shows a degraded notice.
-            best.passwordless = true;
-            return best;
-        }
-
-        // Decrypt the password
-        auto plain = DpapiUtil::Unprotect(m_users[bestIdx].encryptedPassword);
-        if (!plain.empty()) {
-            // The password was stored as a wstring
-            if (plain.size() % sizeof(wchar_t) == 0) {
-                best.password.assign(
-                    reinterpret_cast<const wchar_t*>(plain.data()),
-                    plain.size() / sizeof(wchar_t));
-            }
-            // Zero the plaintext buffer
-            SecureZeroMemory(plain.data(), plain.size());
-        }
-
-        if (!best.password.empty()) {
-            return best;
-        }
-        // Password-bearing record whose decrypt failed (e.g. DPAPI key
-        // lost) — keep the old strict behavior: no match.
-        FACELOGIN_WARN(L"FindBestMatch: match found but password decrypt failed for %s",
-                       m_users[bestIdx].username.c_str());
+        best.passwordless = IsPasswordlessRecord(m_users[bestIdx].encryptedPassword);
+        return best;
     }
 
+    return std::nullopt;
+}
+
+std::optional<CredentialStore::MatchResult> CredentialStore::LoadCredentialForSid(
+    const std::wstring& sid, float distance) {
+    if (sid.empty()) {
+        FACELOGIN_ERROR(L"LoadCredentialForSid called with an empty SID");
+        return std::nullopt;
+    }
+
+    const auto it = std::find_if(m_users.begin(), m_users.end(),
+        [&sid](const UserRecord& user) { return user.sid == sid; });
+    if (it == m_users.end()) {
+        FACELOGIN_WARN(L"LoadCredentialForSid: authorized SID no longer exists");
+        return std::nullopt;
+    }
+
+    MatchResult result;
+    result.distance = distance;
+    result.upn = it->upn;
+    result.sid = it->sid;
+    result.username = it->username;
+
+    if (IsPasswordlessRecord(it->encryptedPassword)) {
+        result.passwordless = true;
+        return result;
+    }
+
+    auto plain = DpapiUtil::Unprotect(it->encryptedPassword);
+    if (!plain.empty()) {
+        if (plain.size() % sizeof(wchar_t) == 0) {
+            result.password.assign(reinterpret_cast<const wchar_t*>(plain.data()),
+                                   plain.size() / sizeof(wchar_t));
+        }
+        SecureZeroMemory(plain.data(), plain.size());
+    }
+
+    if (!result.password.empty()) return result;
+
+    // Password-bearing record whose decrypt failed (e.g. DPAPI key lost) —
+    // preserve the previous fail-closed behavior.
+    FACELOGIN_WARN(L"LoadCredentialForSid: password decrypt failed for %s",
+                   it->username.c_str());
     return std::nullopt;
 }
 

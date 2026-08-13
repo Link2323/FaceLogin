@@ -198,15 +198,27 @@ public:
     // Number of faces enrolled for an account (0 = not enrolled).
     size_t GetFaceCount(const std::wstring& sid) const;
 
-    // Find the best matching user for a probe embedding.
+    // Find the best matching identity for a probe embedding.
     // Matching is account-level: each account's closest face is its
     // representative distance, then accounts are compared against each other
     // (so two faces of the same account never compete and inflate the
-    // best/second-best ratio). Returns the UserRecord and the user's decrypted
-    // password if:
+    // best/second-best ratio). This operation never decrypts a password.
+    // It is used by the authentication worker boundary so the long-lived
+    // parent only materializes a credential after all liveness/identity gates
+    // have passed.
+    //
+    // Returns the identity if:
     //  1. distance < threshold, AND
     //  2. best distance / second-best distance < 0.75 (single account case: always passes)
     // Returns std::nullopt if no match found.
+    struct IdentityMatch {
+        std::wstring username;
+        std::wstring upn;
+        std::wstring sid;
+        bool         passwordless = false;
+        float        distance = 0.0f;
+    };
+
     struct MatchResult {
         std::wstring username;
         std::wstring upn;
@@ -218,9 +230,15 @@ public:
     // probeDim is the number of floats in probeEmbedding (128 for dlib,
     // 512 for InsightFace ONNX). Only stored embeddings of the same
     // dimensionality are compared; others are skipped as non-comparable.
-    std::optional<MatchResult> FindBestMatch(const float probeEmbedding[],
-                                              size_t probeDim,
-                                              float threshold = 0.30f);
+    std::optional<IdentityMatch> FindBestIdentity(const float probeEmbedding[],
+                                                   size_t probeDim,
+                                                   float threshold = 0.30f);
+
+    // Locate an already-authorized identity and decrypt its password.  This
+    // must be called only after the caller has completed all authentication
+    // gates; it intentionally performs no face matching itself.
+    std::optional<MatchResult> LoadCredentialForSid(const std::wstring& sid,
+                                                     float distance = 0.0f);
 
     // Get the number of registered users
     size_t GetUserCount() const { return m_users.size(); }

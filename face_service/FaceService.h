@@ -10,8 +10,8 @@
 
 #include "liveness_types.h"
 #include "onnx_models.h"
+#include "auth_worker_client.h"
 #include "webcam_capture.h"
-#include "webcam_capture_dshow.h"
 #include "pipe_server.h"
 #include "credential_store.h"
 #include "../common/config_util.h"
@@ -77,9 +77,11 @@ private:
     };
 
     void Run();          // Main service loop
-    void Stop();
+    void Stop();         // Heavy cleanup; called by the service main thread
+    void RequestStop();  // Non-blocking SCM control-handler path
     bool Initialize();   // Load DB/config and start the model lifecycle worker
     bool ProcessAuthRequest();  // Handle one auth session
+    bool ProcessWorkerAuthRequest(); // Service-mode auth via child process
 
     // Model residency follows the interactive session: preload all inference
     // sessions when Windows locks, retain them across failed auth retries, and
@@ -93,6 +95,10 @@ private:
     void RequestModelUnload(const wchar_t* reason);
     std::shared_ptr<InferenceModels> AcquireModelsForAuth();
     std::shared_ptr<InferenceModels> LoadInferenceModels(bool& padIntegrityFailed);
+    std::shared_ptr<AuthWorkerClient> AcquireAuthWorkerForAuth();
+    std::shared_ptr<AuthWorkerClient> LoadAuthenticationWorker(const AppConfig& config,
+                                                                std::wstring& errorMessage);
+    void MarkAuthWorkerConsumed(bool preloadReplacement);
     void BeginModelUse();
     void EndModelUse();
 
@@ -104,8 +110,7 @@ private:
 
     // Components
     std::unique_ptr<PipeServer> m_pipeServer;
-    std::unique_ptr<WebcamCapture>   m_webcamMF;   // Media Foundation (standalone)
-    std::unique_ptr<WebcamCaptureDS> m_webcamDS;   // DirectShow (service mode)
+    std::unique_ptr<WebcamCapture> m_webcamMF; // standalone only
     std::unique_ptr<CredentialStore> m_store;
 
     // Configuration
@@ -116,9 +121,9 @@ private:
     bool m_isServiceMode = false;  // set by ServiceMain
 
     // Set when the system resumes from sleep/hibernate (PBT_APMRESUMESUSPEND).
-    // The MF platform survives resume but the USB camera may still be in
-    // low-power recovery — force a fresh camera init on the next auth so we
-    // don't reuse a stale SourceReader that returns no frames.
+    // Standalone MF can survive resume while its USB source reader is stale;
+    // force a fresh camera init on the next standalone auth. Service mode
+    // always creates a new disposable child, so it has no retained camera.
     std::atomic<bool> m_resumedFlag{false};
 
     // Settings
@@ -129,11 +134,21 @@ private:
 
     // --- Session-aware model residency ---
     std::shared_ptr<InferenceModels> m_models;
+    // Service mode owns no ONNX or camera objects. It holds only the parent
+    // control object for the short-lived worker; standalone retains the
+    // in-process path for desktop development verification.
+    std::shared_ptr<AuthWorkerClient> m_authWorker;
     ModelState m_modelState = ModelState::Unloaded;
     bool m_modelsWanted = false;
     bool m_modelLoadRequested = false;
     bool m_modelStopRequested = false;
     bool m_modelLowLightEnhance = false;
+    std::wstring m_workerLoadError;
+    // CONFIG_RELOAD may arrive while a child is preloading. A generation lets
+    // the lifecycle thread discard that stale child and acknowledge only the
+    // child that reflects the newly saved camera/model settings.
+    uint64_t m_workerConfigGeneration = 0;
+    uint64_t m_loadedWorkerConfigGeneration = 0;
     unsigned int m_activeModelUsers = 0;
 
     // True only when the mandatory anti-spoof (PAD) model failed an integrity

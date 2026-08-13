@@ -1,7 +1,13 @@
 add_executable(FaceLoginService
     main.cpp
     FaceService.cpp
+    auth_pipeline.cpp
+    auth_worker.cpp
+    auth_worker_client.cpp
+    auth_worker_protocol.cpp
+    camera_backend.cpp
     onnx_models.cpp
+    performance_affinity.cpp
     webcam_capture.cpp
     webcam_capture_dshow.cpp
     pipe_server.cpp
