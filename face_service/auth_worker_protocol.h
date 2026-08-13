@@ -9,7 +9,7 @@
 namespace facelogin::auth_worker {
 
 inline constexpr uint32_t kProtocolMagic = 0x4B574C46; // "FLWK"
-inline constexpr uint16_t kProtocolVersion = 2;
+inline constexpr uint16_t kProtocolVersion = 3;
 inline constexpr uint32_t kMaxPayloadBytes = 16 * 1024;
 inline constexpr uint32_t kEmbeddingDimension = 512;
 // The recognizer L2-normalizes every production embedding before it crosses
@@ -19,11 +19,6 @@ inline constexpr float kMinEmbeddingNorm = 0.90f;
 inline constexpr float kMaxEmbeddingNorm = 1.10f;
 inline constexpr float kMaxAuthTimingMs = 120000.0f;
 inline constexpr float kAuthTimingConsistencyToleranceMs = 10.0f;
-
-enum class CameraBackend : uint32_t {
-    DirectShow = 1,
-    MediaFoundation = 2,
-};
 
 enum class MessageType : uint16_t {
     Hello = 1,
@@ -154,7 +149,6 @@ private:
 };
 
 struct WorkerConfig {
-    CameraBackend cameraBackend = CameraBackend::DirectShow;
     int cameraRotation = 0;
     float antiSpoofThreshold = 0.281f;
     int authTimeoutSeconds = 15;

@@ -1,6 +1,5 @@
 add_executable(PadCalibration
     main.cpp
-    ${CMAKE_SOURCE_DIR}/face_service/webcam_capture.cpp
     ${CMAKE_SOURCE_DIR}/face_service/webcam_capture_dshow.cpp
     ${CMAKE_SOURCE_DIR}/face_service/onnx_models.cpp
 )
@@ -9,10 +8,6 @@ target_link_libraries(PadCalibration PRIVATE
     facelogin_common
 
     onnxruntime::onnxruntime
-    mfplat
-    mf
-    mfreadwrite
-    mfuuid
     strmiids
     ole32
 )

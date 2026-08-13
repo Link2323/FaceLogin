@@ -1,22 +1,26 @@
 #pragma once
 
-// DirectShow webcam capture — Session 0 compatible.
-// Mirrors the WebcamCapture API so FaceService can use either backend.
+// DirectShow webcam capture — used by every FaceLogin camera path.
 //
 // Filter graph:  [Capture] -> [SampleGrabber (RGB24)] -> [Null Renderer]
 // ISampleGrabberCB::BufferCB copies frames into a shared buffer protected
 // by a CRITICAL_SECTION.  GrabFrame() copies out.
 
-#define WINVER       0x0602
+#ifndef WINVER
+#define WINVER 0x0602
+#endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0602
+#endif
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 
 #include "../common/frame_image.h"
 #include <windows.h>
 #include <dshow.h>
 #include <strmif.h>
 #include <uuids.h>
-#include <mutex>
 
 #include "camera_types.h"
 
@@ -98,9 +102,12 @@ public:
     static std::vector<CameraDeviceInfo> ListCameras();
 
 private:
-    static bool   s_comInitialized;
-    static int    s_comRefCount;
-    static std::mutex s_comMutex;
+    // COM initialization is thread-local. The enrollment UI is STA because
+    // WebView2 requires it; the Session 0 worker is MTA. DirectShow can use
+    // either existing apartment, but must only CoUninitialize an apartment it
+    // initialized on this same thread.
+    static thread_local bool s_comOwned;
+    static thread_local int  s_comRefCount;
 
     // ISampleGrabberCB nested implementation
     class GrabberCB : public ISampleGrabberCB {

@@ -14,7 +14,7 @@
 #include "../face_service/face_align.h"
 #include "../face_service/liveness_types.h"
 #include "../face_service/onnx_models.h"
-#include "../face_service/webcam_capture.h"
+#include "../face_service/webcam_capture_dshow.h"
 #include "../face_service/credential_store.h"
 #include "../common/config_util.h"
 
@@ -165,7 +165,7 @@ private:
     static std::wstring GetCurrentProcessUserSid();
 
     // Camera & face processing
-    std::unique_ptr<WebcamCapture>  m_webcam;
+    std::unique_ptr<WebcamCaptureDS>  m_webcam;
     std::unique_ptr<OnnxDetector>   m_onnxDetector;   // SCRFD detection (+5 keypoints)
     std::unique_ptr<OnnxRecognizer> m_onnxRecognizer; // InsightFace recognition
     std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;

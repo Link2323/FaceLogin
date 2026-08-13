@@ -3,7 +3,7 @@ add_executable(FaceLoginConsole
     WebviewHost.cpp
     EnrollmentWizard.cpp
     resource.rc
-    ${CMAKE_SOURCE_DIR}/face_service/webcam_capture.cpp
+    ${CMAKE_SOURCE_DIR}/face_service/webcam_capture_dshow.cpp
     ${CMAKE_SOURCE_DIR}/face_service/onnx_models.cpp
     ${CMAKE_SOURCE_DIR}/face_service/credential_store.cpp
 )
@@ -12,10 +12,6 @@ target_link_libraries(FaceLoginConsole PRIVATE
     facelogin_common
 
     onnxruntime::onnxruntime
-    mfplat
-    mf
-    mfreadwrite
-    mfuuid
     strmiids
     comctl32
     advapi32

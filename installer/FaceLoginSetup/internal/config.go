@@ -9,7 +9,6 @@ import (
 const (
 	defaultMatchThreshold     = 0.80
 	defaultAntiSpoofThreshold = 0.281
-	defaultCameraBackend      = "dshow"
 )
 
 // ConfigUpgradeEnabled is the version-scoped switch for running config
@@ -62,7 +61,6 @@ func EnsureConfigDefaults(configPath string) error {
 			"anti_spoof_threshold": defaultAntiSpoofThreshold,
 			"low_light_enhance":    false,
 			"camera_rotation":      0,
-			"camera_backend":       defaultCameraBackend,
 		}
 	}
 

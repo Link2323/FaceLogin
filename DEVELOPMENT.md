@@ -20,7 +20,7 @@
 |---|---|---|---|
 | 认证循环、活体、识别、超时 | `face_service/FaceService.cpp`、`auth_pipeline.*`、`auth_worker*`、`onnx_models.*` | [`face-service.md`](docs/modules/face-service.md)、[`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | Release 构建 + `AuthWorkerProtocolTest` + `ModelIntegrityTest` + `AuthWorkerLifecycleTest` + 锁屏 |
 | worker 启动、私有 IPC、Job/超时 | `face_service/auth_worker_client.*`、`auth_worker_protocol.*`、`main.cpp` | [`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | 两个 AuthWorker 测试 + 进程/Job 故障注入 |
-| 摄像头/Session 0 | `face_service/camera_backend.*`、`webcam_capture.*`、`webcam_capture_dshow.*`、`auth_worker.cpp` | [`face-service.md`](docs/modules/face-service.md) | `CameraLifecycleTest` 两后端 child 100 轮 + 服务 Session 0 A/B |
+| 摄像头/Session 0 | `face_service/webcam_capture_dshow.*`、`auth_worker.cpp` | [`face-service.md`](docs/modules/face-service.md) | `CameraLifecycleTest` child 100 轮 + 服务 Session 0 |
 | IPC 字段、终态、缓冲区 | `common/ipc_protocol.*`、`face_service/pipe_server.*`、`credential_provider/pipe_client.*` | [`ipc.md`](docs/contracts/ipc.md) | 两端构建 + `IpcProtocolTest` + 断开/超长消息 |
 | 人脸匹配、多人脸、`users.dat` | `face_service/credential_store.*`、`enrollment_app/EnrollmentWizard.*`、`credential_provider/FaceLoginProvider.cpp`（header） | [`users-dat.md`](docs/contracts/users-dat.md) | `CredentialStoreTest` + 保存/重载/匹配 |
 | 锁屏磁贴、COM、LSA、卡死 | `credential_provider/FaceLoginCredential.*`、`credential_provider/auth_interaction_policy.h`、`credential_provider/FaceLoginProvider.*`、`credential_provider/pipe_client.*` | [`windows-clients.md`](docs/modules/windows-clients.md)；消息问题再读 IPC 契约 | Release 构建 + `CredentialProviderInteractionPolicyTest` + 锁屏登录/解锁 |
@@ -100,7 +100,8 @@ ProgramData 不是默认生产位置。
 - 产品/安全设计：[`docs/design/overview.md`](docs/design/overview.md)
 - 本地开发规范：[`docs/design/development.md`](docs/design/development.md)
 - 运维与排障：[`docs/operations/operations.md`](docs/operations/operations.md)
-- 性能实验：[`docs/performance-baseline.md`](docs/performance-baseline.md)
+- 认证 worker 迁移、性能与资源验收：[`docs/auth-worker-migration-completion.md`](docs/auth-worker-migration-completion.md)
+- 迁移前性能优化实验 1–9：[`docs/performance-baseline.md`](docs/performance-baseline.md)
 - 阈值标定：[`docs/threshold-calibration.md`](docs/threshold-calibration.md)
 - 多角度设计：[`docs/side-face-plan-v2.md`](docs/side-face-plan-v2.md)
 - 渐进学习：[`docs/progressive-learning.md`](docs/progressive-learning.md)

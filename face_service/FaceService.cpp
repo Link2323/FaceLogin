@@ -231,7 +231,7 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
     case SERVICE_CONTROL_POWEREVENT: {
         // PBT_APMRESUMESUSPEND = resumed from sleep/hibernation. The USB camera
         // may still be in low-power recovery, so force a fresh camera init on
-        // the next auth instead of reusing a stale SourceReader.
+        // the next auth instead of reusing a stale capture graph.
         //
         // Service mode has no parent-owned camera and starts a fresh child on
         // every authentication, so this flag is consumed only by standalone.
@@ -339,14 +339,13 @@ bool FaceService::Initialize() {
         // The parent service never opens a camera or an ONNX session. The
         // preloaded child does so for one request, then exits to reclaim driver
         // ETW registrations and ORT/Windows heap high-water deterministically.
-        FACELOGIN_INFO(L"Authentication worker will initialize %s on demand%s",
-                       m_config.camera_backend == "mf" ? L"Media Foundation" : L"DirectShow",
+        FACELOGIN_INFO(L"Authentication worker will initialize DirectShow on demand%s",
                        m_config.camera_device.empty() ? L"" : L" (configured device)");
     } else {
-        // Media Foundation camera is also initialized on demand — keeping
-        // it open across auth sessions causes the source reader to stall
+        // DirectShow camera is initialized on demand — keeping
+        // it open across auth sessions can stall the capture graph
         // (especially when FaceLoginConsole is running concurrently).
-        FACELOGIN_INFO(L"MF webcam will be initialized on demand%s",
+        FACELOGIN_INFO(L"DirectShow webcam will be initialized on demand%s",
                        m_config.camera_device.empty() ? L"" : L" (configured device)");
     }
 
@@ -516,13 +515,8 @@ std::shared_ptr<FaceService::InferenceModels> FaceService::AcquireModelsForAuth(
 std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
     const AppConfig& appConfig, std::wstring& errorMessage) {
     auth_worker::WorkerConfig workerConfig;
-    // The production service remains in Session 0 and starts with the proven
-    // DirectShow backend. Media Foundation is selected only by the later A/B
-    // configuration gate; moving into a child process does not itself change
-    // the Windows session or camera-driver compatibility.
-    workerConfig.cameraBackend = appConfig.camera_backend == "mf"
-        ? auth_worker::CameraBackend::MediaFoundation
-        : auth_worker::CameraBackend::DirectShow;
+    // The production service remains in Session 0, where the worker always
+    // uses the proven DirectShow path.
     workerConfig.cameraRotation = appConfig.camera_rotation;
     workerConfig.antiSpoofThreshold = appConfig.anti_spoof_threshold;
     workerConfig.authTimeoutSeconds = m_authTimeoutSeconds;
@@ -844,11 +838,10 @@ void FaceService::Run() {
                 ? ipc::MSG_CONFIG_RELOAD_OK
                 : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->Disconnect();
-            FACELOGIN_INFO(L"Configuration reloaded: rec=%hs det=%hs live=%hs thr=%.2f backend=%hs rotation=%d",
+            FACELOGIN_INFO(L"Configuration reloaded: rec=%hs det=%hs live=%hs thr=%.2f rotation=%d",
                           m_config.recognition_model.c_str(), m_config.detector.c_str(),
                           "antispoof",
-                           m_matchThreshold, m_config.camera_backend.c_str(),
-                           m_config.camera_rotation);
+                          m_matchThreshold, m_config.camera_rotation);
         }
         else if (request == ipc::MSG_GET_LOGS) {
             auto lines = Logger::Instance().GetRecentLogs(500);
@@ -877,38 +870,36 @@ void FaceService::Run() {
                 continue;
             }
 
-            // Standalone keeps the in-process MF path for desktop development
-            // and enrollment-adjacent diagnostics. Production always uses the
-            // worker branch above.
+            // Standalone keeps the same DirectShow capture path as production.
             {
                 // After a system resume the camera may still be in low-power
                 // recovery. Drop the stale instance so Initialize() rebuilds a
-                // fresh SourceReader instead of reusing the one that stalled.
-                if (m_resumedFlag.exchange(false) && m_webcamMF) {
-                    FACELOGIN_INFO(L"Resume detected — rebuilding MF camera");
-                    m_webcamMF->Shutdown();
-                    m_webcamMF.reset();
+                // fresh capture graph instead of reusing the stalled one.
+                if (m_resumedFlag.exchange(false) && m_webcamDS) {
+                    FACELOGIN_INFO(L"Resume detected — rebuilding DirectShow camera");
+                    m_webcamDS->Shutdown();
+                    m_webcamDS.reset();
                 }
-                if (!m_webcamMF) {
-                    m_webcamMF = std::make_unique<WebcamCapture>();
-                    if (!m_webcamMF->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
-                        FACELOGIN_ERROR(L"MF camera init failed on demand");
-                        m_webcamMF.reset();
+                if (!m_webcamDS) {
+                    m_webcamDS = std::make_unique<WebcamCaptureDS>();
+                    if (!m_webcamDS->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
+                        FACELOGIN_ERROR(L"DirectShow camera init failed on demand");
+                        m_webcamDS.reset();
                         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"摄像头不可用"));
                         FlushFileBuffers(m_pipeServer->GetHandle());
                         m_pipeServer->DrainOutput(5000);
                         m_pipeServer->Disconnect();
                         continue;
                     }
-                    FACELOGIN_INFO(L"MF camera initialized on demand for auth");
+                    FACELOGIN_INFO(L"DirectShow camera initialized on demand for auth");
                 }
             }
             ProcessAuthRequest();
-            if (m_webcamMF) {
-                m_webcamMF->Shutdown();
-                m_webcamMF.reset();
+            if (m_webcamDS) {
+                m_webcamDS->Shutdown();
+                m_webcamDS.reset();
                 const auto usage = CurrentProcessResourceUsage();
-                FACELOGIN_INFO(L"MF camera released after auth (handles=%lu)",
+                FACELOGIN_INFO(L"DirectShow camera released after auth (handles=%lu)",
                                usage.handles);
             }
             m_pipeServer->Disconnect();
@@ -935,8 +926,8 @@ void FaceService::Stop() {
         m_pipeServer->RequestShutdown();
     }
     StopModelWorker();
-    if (!m_isServiceMode && m_webcamMF) {
-        m_webcamMF->Shutdown();
+    if (!m_isServiceMode && m_webcamDS) {
+        m_webcamDS->Shutdown();
     }
     if (m_pipeServer) {
         m_pipeServer->Close();
@@ -1208,7 +1199,7 @@ bool FaceService::ProcessAuthRequest() {
 
     AuthPipelineCallbacks callbacks;
     callbacks.grabFrame = [this](FrameImage& frame) {
-        return m_webcamMF && m_webcamMF->GrabFrame(frame);
+        return m_webcamDS && m_webcamDS->GrabFrame(frame);
     };
     callbacks.isCancelled = [this]() {
         return !m_running;
@@ -1337,8 +1328,8 @@ bool FaceService::ProcessAuthRequest() {
     WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
     FACELOGIN_INFO(L"UserLoggedIn=1 written after auth success");
 
-    if (m_webcamMF) {
-        m_webcamMF->Shutdown();
+    if (m_webcamDS) {
+        m_webcamDS->Shutdown();
     }
     m_pipeServer->DrainOutput(5000);
     return true;

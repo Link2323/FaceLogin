@@ -1,10 +1,7 @@
-// Production camera lifecycle probe for both service backends.
+// Production DirectShow camera lifecycle probe.
 //
 // Examples:
-//   CameraLifecycleTest --backend dshow --mode inproc --cycles 100 --settle-ms 500
-//   CameraLifecycleTest --backend mf    --mode child  --cycles 100 --settle-ms 500
-#include "camera_backend.h"
-#include "webcam_capture.h"
+//   CameraLifecycleTest --mode child --cycles 100 --settle-ms 500
 #include "webcam_capture_dshow.h"
 
 #include <windows.h>
@@ -24,12 +21,9 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-using facelogin::auth_worker::CameraBackend;
-
 enum class RunMode { InProcess, Child };
 
 struct Options {
-    CameraBackend backend = CameraBackend::DirectShow;
     RunMode mode = RunMode::InProcess;
     int cycles = 10;
     int settleMs = 500;
@@ -55,12 +49,7 @@ bool ParseInt(const wchar_t* text, int minimum, int maximum, int& value) {
 bool ParseOptions(int argc, wchar_t** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
-        if (arg == L"--backend" && i + 1 < argc) {
-            const std::wstring value = argv[++i];
-            if (value == L"dshow") options.backend = CameraBackend::DirectShow;
-            else if (value == L"mf") options.backend = CameraBackend::MediaFoundation;
-            else return false;
-        } else if (arg == L"--mode" && i + 1 < argc) {
+        if (arg == L"--mode" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"inproc") options.mode = RunMode::InProcess;
             else if (value == L"child") options.mode = RunMode::Child;
@@ -125,23 +114,20 @@ void PrintMetrics(const char* record, int cycle, const ProcessMetrics& metrics) 
               << static_cast<double>(metrics.workingSetBytes) / kMiB << "\n";
 }
 
-std::vector<facelogin::CameraDeviceInfo> Enumerate(CameraBackend backend) {
-    return backend == CameraBackend::DirectShow
-        ? facelogin::WebcamCaptureDS::ListCameras()
-        : facelogin::WebcamCapture::ListCameras();
+std::vector<facelogin::CameraDeviceInfo> Enumerate() {
+    return facelogin::WebcamCaptureDS::ListCameras();
 }
 
-bool RunOneCameraCycle(const Options& options, int cycle) {
+bool RunOneCameraCycle(const Options&, int cycle) {
     const auto enumStart = Clock::now();
-    const auto devices = Enumerate(options.backend);
+    const auto devices = Enumerate();
     const auto enumDone = Clock::now();
     if (devices.empty()) {
         std::cerr << "camera enumeration returned no devices at cycle " << cycle << "\n";
         return false;
     }
 
-    auto camera = facelogin::CreateCameraBackend(options.backend);
-    if (!camera) return false;
+    auto camera = std::make_unique<facelogin::WebcamCaptureDS>();
     const auto activateStart = Clock::now();
     if (!camera->Initialize(640, 480, L"")) {
         std::cerr << "camera initialization failed at cycle " << cycle << "\n";
@@ -163,7 +149,7 @@ bool RunOneCameraCycle(const Options& options, int cycle) {
     }
 
     const auto shutdownStart = Clock::now();
-    camera->RequestShutdown();
+    camera->Pause();
     camera->Shutdown();
     camera.reset();
     const auto shutdownDone = Clock::now();
@@ -171,7 +157,7 @@ bool RunOneCameraCycle(const Options& options, int cycle) {
     ProcessMetrics metrics;
     if (!ReadProcessMetrics(metrics)) return false;
     std::cout << "camera_cycle cycle=" << cycle
-              << " backend=" << (options.backend == CameraBackend::DirectShow ? "dshow" : "mf")
+              << " backend=dshow"
               << " enum_ms=" << std::fixed << std::setprecision(1)
               << Milliseconds(enumStart, enumDone)
               << " activate_ms=" << Milliseconds(activateStart, activateDone)
@@ -197,13 +183,11 @@ std::wstring CurrentExecutablePath() {
     return std::wstring(path.data(), length);
 }
 
-bool RunChildCycle(const Options& options, int cycle) {
+bool RunChildCycle(const Options&, int cycle) {
     const std::wstring executable = CurrentExecutablePath();
     if (executable.empty()) return false;
-    const wchar_t* backend = options.backend == CameraBackend::DirectShow
-        ? L"dshow" : L"mf";
-    std::wstring command = L"\"" + executable + L"\" --backend " + backend +
-        L" --single-cycle " + std::to_wstring(cycle);
+    std::wstring command = L"\"" + executable + L"\" --single-cycle " +
+        std::to_wstring(cycle);
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
@@ -243,8 +227,7 @@ bool RunChildCycle(const Options& options, int cycle) {
 }
 
 void Usage() {
-    std::cerr << "usage: CameraLifecycleTest --backend dshow|mf "
-                 "--mode inproc|child --cycles N --settle-ms N\n";
+    std::cerr << "usage: CameraLifecycleTest --mode inproc|child --cycles N --settle-ms N\n";
 }
 
 } // namespace

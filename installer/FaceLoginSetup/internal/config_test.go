@@ -28,9 +28,6 @@ func TestEnsureConfigDefaultsUsesProductionAuthenticationDefaults(t *testing.T) 
 	if got := cfg["anti_spoof_threshold"]; got != defaultAntiSpoofThreshold {
 		t.Fatalf("fresh-install anti_spoof_threshold = %v, want %.3f", got, defaultAntiSpoofThreshold)
 	}
-	if got := cfg["camera_backend"]; got != defaultCameraBackend {
-		t.Fatalf("fresh-install camera_backend = %v, want %q", got, defaultCameraBackend)
-	}
 	if got := cfg["liveness_method"]; got != "antispoof" {
 		t.Fatalf("fresh-install liveness_method = %v, want antispoof", got)
 	}

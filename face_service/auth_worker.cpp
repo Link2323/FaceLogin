@@ -2,7 +2,7 @@
 
 #include "auth_pipeline.h"
 #include "auth_worker_protocol.h"
-#include "camera_backend.h"
+#include "webcam_capture_dshow.h"
 #include "onnx_models.h"
 #include "performance_affinity.h"
 #include "../common/data_path.h"
@@ -24,7 +24,6 @@
 namespace facelogin {
 namespace {
 
-using auth_worker::CameraBackend;
 using auth_worker::Channel;
 using auth_worker::Message;
 using auth_worker::MessageType;
@@ -163,9 +162,8 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     }
     Logger::Instance().SetLogFile(dataDir + L"\\log\\auth_worker.log");
     Logger::Instance().SetMinLevel(LogLevel::Info);
-    FACELOGIN_INFO(L"=== Authentication worker starting (pid=%lu, backend=%u) ===",
-                   GetCurrentProcessId(),
-                   static_cast<unsigned int>(config.cameraBackend));
+    FACELOGIN_INFO(L"=== Authentication worker starting (pid=%lu, DirectShow) ===",
+                   GetCurrentProcessId());
 
     auto models = LoadModels(dataDir + L"\\models", config);
     if (!models || !models->detector || !models->recognizer || !models->antiSpoof) {
@@ -173,13 +171,9 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         return ERROR_FILE_NOT_FOUND;
     }
 
-    // Constructing the MF wrapper performs MFStartup only. Neither backend
-    // activates a camera device until initializeCamera() is called below.
-    auto camera = CreateCameraBackend(config.cameraBackend);
-    if (!camera) {
-        SendFatal(channel, L"摄像头后端配置无效，请使用密码登录");
-        return ERROR_INVALID_DATA;
-    }
+    // DirectShow graph construction does not activate a device until
+    // initializeCamera() runs after AUTH_START.
+    auto camera = std::make_unique<WebcamCaptureDS>();
     bool cameraReady = false;
     const auto initializeCamera = [&camera, &cameraReady, &config]() {
         if (cameraReady) return true;
@@ -189,7 +183,7 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
 
     const auto releaseCamera = [&camera, &cameraReady]() {
         if (!cameraReady) return;
-        camera->RequestShutdown();
+        camera->Pause();
         camera->Shutdown();
         cameraReady = false;
         LogWorkerResources(L"camera released");

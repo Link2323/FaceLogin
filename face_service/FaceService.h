@@ -11,7 +11,7 @@
 #include "liveness_types.h"
 #include "onnx_models.h"
 #include "auth_worker_client.h"
-#include "webcam_capture.h"
+#include "webcam_capture_dshow.h"
 #include "pipe_server.h"
 #include "credential_store.h"
 #include "../common/config_util.h"
@@ -110,7 +110,7 @@ private:
 
     // Components
     std::unique_ptr<PipeServer> m_pipeServer;
-    std::unique_ptr<WebcamCapture> m_webcamMF; // standalone only
+    std::unique_ptr<WebcamCaptureDS> m_webcamDS; // standalone only
     std::unique_ptr<CredentialStore> m_store;
 
     // Configuration
@@ -121,7 +121,7 @@ private:
     bool m_isServiceMode = false;  // set by ServiceMain
 
     // Set when the system resumes from sleep/hibernate (PBT_APMRESUMESUSPEND).
-    // Standalone MF can survive resume while its USB source reader is stale;
+    // Standalone capture can survive resume while its camera graph is stale;
     // force a fresh camera init on the next standalone auth. Service mode
     // always creates a new disposable child, so it has no retained camera.
     std::atomic<bool> m_resumedFlag{false};

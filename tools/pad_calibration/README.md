@@ -96,10 +96,8 @@ validation must use new sessions (ideally another day and additional people)
 with `--split validation`; frames from a tuning session are correlated and are
 not a valid holdout set.
 
-Media Foundation capture matches enrollment/standalone operation. Before any
-production threshold is adopted, repeat the validation through the lock-screen
-service's DirectShow camera path by adding `--backend ds`. Use a separate CSV
-for DS validation so backend-specific distributions cannot be mixed silently.
+The tool uses the same DirectShow capture path as enrollment, standalone, and
+the lock-screen service, so its captures are directly representative.
 
 The CSV contains biometric-derived scores and metadata. Keep it local, restrict
 access, and delete it when calibration is complete.

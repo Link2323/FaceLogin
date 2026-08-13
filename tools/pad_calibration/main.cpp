@@ -1,5 +1,4 @@
 #include "onnx_models.h"
-#include "webcam_capture.h"
 #include "webcam_capture_dshow.h"
 #include "logger.h"
 #include "config_util.h"
@@ -29,7 +28,6 @@
 namespace fs = std::filesystem;
 using facelogin::OnnxAntiSpoof;
 using facelogin::OnnxDetector;
-using facelogin::WebcamCapture;
 using facelogin::WebcamCaptureDS;
 using facelogin::MiniFasEvaluator;
 using facelogin::FrameImage;
@@ -49,7 +47,6 @@ struct Options {
     fs::path padModelsDir;
     fs::path dataDir;
     std::wstring cameraDevice;
-    std::wstring cameraBackend = L"mf";
     int count = 50;
     int warmupFrames = 10;
     int attemptSize = 5;
@@ -74,7 +71,6 @@ void PrintUsage() {
         << L"      [--output <csv>] [--count 50]\n"
         << L"      [--attempt-size 5] [--warmup 10] [--max-seconds 180]\n"
         << L"      [--camera-device <symbolic-link>] [--rotation <0|90|180|270>]\n"
-        << L"      [--backend <mf|ds>]\n"
         << L"      [--low-light-enhance <0|1>]\n\n"
         << L"      [--validate-models-only]\n\n"
         << L"      [--benchmark-iterations <count>] (with --validate-models-only)\n\n"
@@ -131,10 +127,6 @@ bool ParseArgs(int argc, wchar_t* argv[], Options& options) {
         } else if (arg == L"--camera-device") {
             auto v = read(); if (!v) return false; options.cameraDevice = *v;
             options.cameraExplicit = true;
-        } else if (arg == L"--backend") {
-            auto v = read();
-            if (!v || (*v != L"mf" && *v != L"ds")) return false;
-            options.cameraBackend = *v;
         } else if (arg == L"--count") {
             auto v = read(); if (!v || !ParsePositiveInt(*v, options.count)) return false;
         } else if (arg == L"--warmup") {
@@ -430,8 +422,7 @@ struct CsvWriter {
             "frame_in_attempt,accepted_index,camera_frame,status,production_score,"
             "minifas_v2_score,minifas_v1se_score,minifas_ensemble_score,"
             "minifas_v2_sha256,minifas_v1se_sha256,det_score,face_width,face_height,"
-            "frame_width,frame_height,low_light_enhance,camera_rotation,"
-            "camera_backend,frame_hash";
+            "frame_width,frame_height,low_light_enhance,camera_rotation,frame_hash";
         std::error_code ec;
         const bool needsHeader = !fs::exists(m_path, ec) || fs::file_size(m_path, ec) == 0;
         if (m_path.has_parent_path()) fs::create_directories(m_path.parent_path(), ec);
@@ -479,7 +470,7 @@ struct CsvWriter {
         m_out << ',' << std::fixed << std::setprecision(2)
               << faceWidth << ',' << faceHeight << ',' << frameWidth << ',' << frameHeight << ','
               << (options.lowLightEnhance ? 1 : 0) << ',' << options.cameraRotation
-              << ',' << Csv(options.cameraBackend) << ',' << frameHash << "\r\n";
+              << ',' << frameHash << "\r\n";
         m_out.flush();
     }
 
@@ -642,21 +633,15 @@ int wmain(int argc, wchar_t* argv[]) {
         return 4;
     }
 
-    WebcamCapture cameraMf;
-    WebcamCaptureDS cameraDs;
+    WebcamCaptureDS camera;
     const auto initializeCamera = [&]() {
-        return options.cameraBackend == L"ds"
-            ? cameraDs.Initialize(1280, 720, options.cameraDevice)
-            : cameraMf.Initialize(1280, 720, options.cameraDevice);
+        return camera.Initialize(1280, 720, options.cameraDevice);
     };
     const auto grabFrame = [&](FrameImage& output) {
-        return options.cameraBackend == L"ds"
-            ? cameraDs.GrabFrame(output)
-            : cameraMf.GrabFrame(output);
+        return camera.GrabFrame(output);
     };
     const auto shutdownCamera = [&]() {
-        if (options.cameraBackend == L"ds") cameraDs.Shutdown();
-        else cameraMf.Shutdown();
+        camera.Shutdown();
     };
     if (!initializeCamera()) {
         std::wcerr << L"Failed to open camera. Close FaceLoginConsole and other camera apps first.\n";
@@ -668,7 +653,7 @@ int wmain(int argc, wchar_t* argv[]) {
                << L"Condition: " << options.condition << L"\n"
                << L"Production config: rotation=" << options.cameraRotation
                << L", low-light-enhance=" << (options.lowLightEnhance ? L"on" : L"off") << L"\n"
-               << L"Camera backend: " << options.cameraBackend << L"\n"
+               << L"Camera backend: DirectShow\n"
                << L"PAD models: " << padDir.wstring() << L"\n"
                << L"Output: " << options.output << L"\n"
                << L"Keep exactly one face in view. Starting warm-up...\n";

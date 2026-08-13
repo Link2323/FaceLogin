@@ -222,7 +222,6 @@ void Channel::Close() {
 
 std::vector<uint8_t> EncodeConfig(const WorkerConfig& config) {
     PayloadWriter writer;
-    writer.WriteU32(static_cast<uint32_t>(config.cameraBackend));
     writer.WriteI32(config.cameraRotation);
     writer.WriteFloat(config.antiSpoofThreshold);
     writer.WriteI32(config.authTimeoutSeconds);
@@ -233,26 +232,22 @@ std::vector<uint8_t> EncodeConfig(const WorkerConfig& config) {
 
 bool DecodeConfig(const std::vector<uint8_t>& payload, WorkerConfig& config) {
     PayloadReader reader(payload);
-    uint32_t backend = 0;
     int32_t rotation = 0;
     int32_t timeout = 0;
     uint32_t lowLight = 0;
-    if (!reader.ReadU32(backend) || !reader.ReadI32(rotation) ||
+    if (!reader.ReadI32(rotation) ||
         !reader.ReadFloat(config.antiSpoofThreshold) || !reader.ReadI32(timeout) ||
         !reader.ReadU32(lowLight) ||
         !reader.ReadWString(config.cameraDevice) ||
         !reader.Done()) {
         return false;
     }
-    if ((backend != static_cast<uint32_t>(CameraBackend::DirectShow) &&
-         backend != static_cast<uint32_t>(CameraBackend::MediaFoundation)) ||
-        (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) ||
+    if ((rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) ||
         !std::isfinite(config.antiSpoofThreshold) ||
         config.antiSpoofThreshold < 0.281f || config.antiSpoofThreshold > 0.50f ||
         timeout < 1 || timeout > 60 || lowLight > 1) {
         return false;
     }
-    config.cameraBackend = static_cast<CameraBackend>(backend);
     config.cameraRotation = rotation;
     config.authTimeoutSeconds = timeout;
     config.lowLightEnhance = lowLight != 0;

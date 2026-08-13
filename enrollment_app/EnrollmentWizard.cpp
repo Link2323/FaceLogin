@@ -278,7 +278,7 @@ EnrollmentWizard::EnrollmentWizard() {
                    m_sid.empty() ? L"<empty>" : m_sid.c_str(),
                    m_accountType.c_str());
 
-    m_webcam     = std::make_unique<WebcamCapture>();
+    m_webcam     = std::make_unique<WebcamCaptureDS>();
     m_store.SetDataDir(m_dataDir);
 
     m_config = LoadConfig(m_dataDir);
@@ -383,7 +383,7 @@ bool EnrollmentWizard::StartPreview() {
                 // GrabFrame self-shuts down after repeated failures, which is
                 // common when a camera is taken over during lock/resume.
                 // Rebuild it here with a bounded retry budget so the preview
-                // recovers without spinning forever on a dead SourceReader.
+                // recovers without spinning forever on a dead capture graph.
                 if (!m_webcam->IsInitialized() && m_frameRunning) {
                     if (++reinitAttempts > 3) {
                         FACELOGIN_ERROR(L"Preview camera re-init exceeded limit");
@@ -444,12 +444,12 @@ void EnrollmentWizard::StopPreview() {
     m_frameRunning = false;
     m_capturing = false;
 
-    // Interrupt a blocked ReadSample first, but keep COM references alive until
-    // the worker threads have exited. Releasing the reader before join would
-    // race with GrabFrame; waiting for join before requesting shutdown can
+    // Pause the DirectShow graph first, but keep COM references alive until
+    // the worker threads have exited. Releasing the graph before join would
+    // race with GrabFrame; waiting for join before pausing can
     // hang the UI when the camera was taken over by LogonUI.
     if (m_webcam)
-        m_webcam->RequestShutdown();
+        m_webcam->Pause();
 
     if (m_captureThread.joinable())
         m_captureThread.join();
@@ -1630,7 +1630,7 @@ bool EnrollmentWizard::AutoRepairEmptyUpnOnStartup() {
 // ============================================================================
 
 std::string EnrollmentWizard::GetCameraList() {
-    auto devices = WebcamCapture::ListCameras();
+    auto devices = WebcamCaptureDS::ListCameras();
     std::ostringstream js;
     js << "[";
     for (size_t i = 0; i < devices.size(); i++) {

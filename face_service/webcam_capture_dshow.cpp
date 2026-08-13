@@ -10,34 +10,24 @@
 namespace facelogin {
 
 // ============================================================================
-// DevicePath compatibility between the MF and DShow backends
+// Legacy DevicePath compatibility
 // ============================================================================
 
-// Media Foundation (Console enrollment) and DirectShow (lock-screen service)
-// report the same camera with DIFFERENT symbolic-link GUIDs in the DevicePath:
-//
-//   MF:  \?\usb#vid_04f2&pid_b5c5&mi_00#...{e5323777-f976-4f5b-9b55-b94699c46e44}\global
-//   DShow: \?\usb#vid_04f2&pid_b5c5&mi_00#...{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global
-//
-// MF uses MF_DEVSOURCE_CATEGORY (e5323777-...); DShow uses
-// CLSID_VideoInputDeviceCategory (65e8773d-...). Everything else is identical.
-// The user picks a camera in the Console (MF) and we save that DevicePath; at
-// lock-screen the service (DShow) must recognize it, so we rewrite the MF GUID
-// to the DShow GUID before comparing.
-static const wchar_t kMfCategoryGuid[] = L"e5323777-f976-4f5b-9b55-b94699c46e44";
+// Older releases could persist a symbolic link using this former category
+// GUID. DirectShow uses CLSID_VideoInputDeviceCategory instead. The rest of
+// the symbolic link remains identical, so translate the old GUID while users
+// migrate to the single DirectShow camera path.
+static const wchar_t kLegacyCategoryGuid[] = L"e5323777-f976-4f5b-9b55-b94699c46e44";
 static const wchar_t kDsCategoryGuid[] = L"65e8773d-8f56-11d0-a3b9-00a0c9223196";
 
-// Converts an MF symbolic-link DevicePath (as saved by the Console) into the
-// equivalent DShow DevicePath. If the input already uses the DShow GUID (or
-// has no category GUID), it is returned unchanged.
-static std::wstring MfPathToDsPath(const std::wstring& mfPath) {
-    if (mfPath.find(kMfCategoryGuid) == std::wstring::npos) {
-        return mfPath;  // not an MF category path — leave as-is
+static std::wstring LegacyPathToDsPath(const std::wstring& path) {
+    if (path.find(kLegacyCategoryGuid) == std::wstring::npos) {
+        return path;
     }
-    std::wstring ds = mfPath;
+    std::wstring ds = path;
     size_t pos = 0;
-    while ((pos = ds.find(kMfCategoryGuid, pos)) != std::wstring::npos) {
-        ds.replace(pos, wcslen(kMfCategoryGuid), kDsCategoryGuid);
+    while ((pos = ds.find(kLegacyCategoryGuid, pos)) != std::wstring::npos) {
+        ds.replace(pos, wcslen(kLegacyCategoryGuid), kDsCategoryGuid);
         pos += wcslen(kDsCategoryGuid);
     }
     return ds;
@@ -47,31 +37,34 @@ static std::wstring MfPathToDsPath(const std::wstring& mfPath) {
 // Static COM helpers
 // ============================================================================
 
-bool   WebcamCaptureDS::s_comInitialized = false;
-int    WebcamCaptureDS::s_comRefCount    = 0;
-std::mutex WebcamCaptureDS::s_comMutex;
+thread_local bool WebcamCaptureDS::s_comOwned = false;
+thread_local int  WebcamCaptureDS::s_comRefCount = 0;
 
 bool WebcamCaptureDS::InitializeCOM() {
-    std::lock_guard<std::mutex> lock(s_comMutex);
-    if (!s_comInitialized) {
+    if (s_comRefCount == 0) {
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (FAILED(hr)) {
+        if (hr == RPC_E_CHANGED_MODE) {
+            // WebView2 initializes FaceLoginConsole's UI thread as STA. Do
+            // not try to change it to MTA: DirectShow operates correctly in
+            // that existing apartment, which remains owned by the UI host.
+            FACELOGIN_INFO(L"DS using existing COM apartment");
+        } else if (FAILED(hr)) {
             FACELOGIN_ERROR(L"DS CoInitializeEx(COINIT_MULTITHREADED) failed: 0x%08X", hr);
             return false;
+        } else {
+            s_comOwned = true;
         }
-        s_comInitialized = true;
     }
     s_comRefCount++;
     return true;
 }
 
 void WebcamCaptureDS::ShutdownCOM() {
-    std::lock_guard<std::mutex> lock(s_comMutex);
     if (s_comRefCount > 0) {
         s_comRefCount--;
-        if (s_comRefCount == 0 && s_comInitialized) {
+        if (s_comRefCount == 0 && s_comOwned) {
             CoUninitialize();
-            s_comInitialized = false;
+            s_comOwned = false;
         }
     }
 }
@@ -186,12 +179,9 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
         return false;
     }
 
-    // First pass: match the configured device by DevicePath.
-    // The configured path was saved by the Console, which enumerates via
-    // Media Foundation — its DevicePath carries the MF category GUID. DShow
-    // reports the same camera with the DShow category GUID, so compare against
-    // BOTH the raw configured path and its DShow-equivalent form.
-    const std::wstring dsDevicePath = MfPathToDsPath(devicePath);
+    // First pass: match the configured device by DevicePath. Compare both the
+    // configured value and its DirectShow equivalent for legacy configurations.
+    const std::wstring dsDevicePath = LegacyPathToDsPath(devicePath);
     IMoniker* pMatch = nullptr;
     IMoniker* pFirst = nullptr;
     IMoniker* pMoniker = nullptr;

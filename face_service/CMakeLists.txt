@@ -5,10 +5,8 @@ add_executable(FaceLoginService
     auth_worker.cpp
     auth_worker_client.cpp
     auth_worker_protocol.cpp
-    camera_backend.cpp
     onnx_models.cpp
     performance_affinity.cpp
-    webcam_capture.cpp
     webcam_capture_dshow.cpp
     pipe_server.cpp
     credential_store.cpp
@@ -18,10 +16,6 @@ target_link_libraries(FaceLoginService PRIVATE
     facelogin_common
 
     onnxruntime::onnxruntime
-    mfplat
-    mf
-    mfreadwrite
-    mfuuid
     strmiids
     advapi32
     ole32

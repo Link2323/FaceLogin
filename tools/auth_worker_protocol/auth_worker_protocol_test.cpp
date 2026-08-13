@@ -27,11 +27,10 @@ std::vector<float> UnitEmbedding() {
     return std::vector<float>(kEmbeddingDimension, value);
 }
 
-std::vector<uint8_t> MakeConfigPayload(uint32_t backend, int32_t rotation,
+std::vector<uint8_t> MakeConfigPayload(int32_t rotation,
                                        float threshold, int32_t timeout,
                                        uint32_t lowLight) {
     facelogin::auth_worker::PayloadWriter writer;
-    writer.WriteU32(backend);
     writer.WriteI32(rotation);
     writer.WriteFloat(threshold);
     writer.WriteI32(timeout);
@@ -43,7 +42,6 @@ std::vector<uint8_t> MakeConfigPayload(uint32_t backend, int32_t rotation,
 void TestConfigRoundTrip() {
     using namespace facelogin::auth_worker;
     WorkerConfig input;
-    input.cameraBackend = CameraBackend::MediaFoundation;
     input.cameraRotation = 270;
     input.antiSpoofThreshold = 0.381f;
     input.authTimeoutSeconds = 23;
@@ -53,27 +51,20 @@ void TestConfigRoundTrip() {
     WorkerConfig output;
     const auto encoded = EncodeConfig(input);
     Check(DecodeConfig(encoded, output), "valid worker configuration decodes");
-    Check(output.cameraBackend == input.cameraBackend &&
-          output.cameraRotation == input.cameraRotation &&
+    Check(output.cameraRotation == input.cameraRotation &&
           std::fabs(output.antiSpoofThreshold - input.antiSpoofThreshold) < 0.0001f &&
           output.authTimeoutSeconds == input.authTimeoutSeconds &&
           output.lowLightEnhance == input.lowLightEnhance &&
           output.cameraDevice == input.cameraDevice,
           "worker configuration round trip preserves every field");
 
-    Check(!DecodeConfig(MakeConfigPayload(99, 0, 0.281f, 15, 0), output),
-          "unknown camera backend is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(static_cast<uint32_t>(CameraBackend::DirectShow),
-                                          45, 0.281f, 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(45, 0.281f, 15, 0), output),
           "invalid camera rotation is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(static_cast<uint32_t>(CameraBackend::DirectShow),
-                                          0, std::numeric_limits<float>::quiet_NaN(), 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, std::numeric_limits<float>::quiet_NaN(), 15, 0), output),
           "non-finite PAD threshold is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(static_cast<uint32_t>(CameraBackend::DirectShow),
-                                          0, 0.280f, 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.280f, 15, 0), output),
           "below-calibration PAD threshold is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(static_cast<uint32_t>(CameraBackend::DirectShow),
-                                          0, 0.281f, 15, 2), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.281f, 15, 2), output),
           "invalid low-light flag is rejected");
 
     auto truncated = encoded;
