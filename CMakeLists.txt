@@ -17,16 +17,13 @@ add_compile_definitions(
 
 # Global compiler options
 if(MSVC)
-    add_compile_options(/W4 /WX-)
-    # /MP (compiler multiprocess mode) is unreliable on VS 18 / MSVC 19.5x —
-    # it can leave cl.exe permanently idle. Keep /MP for older toolsets only.
-    if(MSVC_VERSION LESS 1950)
-        add_compile_options(/MP)
-    else()
-        # VS 18 (VS 2026): disable /MP plus the Tracker and error telemetry that
-        # orphan cl.exe at zero CPU. These project-global switches are written
-        # into each .vcxproj and honored by MSBuild, so no command-line
-        # --parallel 1 is needed (verified 2026-08-09 with a clean rebuild).
+    add_compile_options(/W4 /WX- /MP)
+    # VS 18 (VS 2026): /MP used to orphan cl.exe at zero CPU while the MSBuild
+    # Tracker was enabled. With TrackFileAccess=false + ErrorReporting=None
+    # (below) /MP is stable (re-verified 2026-08-13 with repeated clean
+    # rebuilds). These project-global switches are written into each .vcxproj
+    # and honored by MSBuild.
+    if(NOT MSVC_VERSION LESS 1950)
         list(APPEND CMAKE_VS_GLOBALS
             "ErrorReporting=None"
             "TrackFileAccess=false"

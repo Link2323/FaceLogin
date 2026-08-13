@@ -28,9 +28,22 @@ target_include_directories(FaceLoginConsole PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/webview2/include
 )
 
+# WebView2LoaderStatic.lib is gitignored (*.lib) and not committed, so a
+# fresh clone would fail at link time with LNK1181. Fail at configure time
+# with an actionable restore command instead.
+set(WEBVIEW2_LOADER_STATIC_LIB
+    ${CMAKE_CURRENT_SOURCE_DIR}/webview2/lib/WebView2LoaderStatic.lib)
+if(NOT EXISTS "${WEBVIEW2_LOADER_STATIC_LIB}")
+    message(FATAL_ERROR
+        "WebView2LoaderStatic.lib is missing (restore once from NuGet):
+"
+        "  powershell -ExecutionPolicy Bypass -File "
+        "${CMAKE_SOURCE_DIR}/scripts/restore_webview2.ps1")
+endif()
+
 # Link WebView2 loader static library
 target_link_libraries(FaceLoginConsole PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/webview2/lib/WebView2LoaderStatic.lib
+    ${WEBVIEW2_LOADER_STATIC_LIB}
 )
 
 # WebView2Loader is statically linked (WebView2LoaderStatic.lib) — no DLL needed
