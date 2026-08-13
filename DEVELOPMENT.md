@@ -2,7 +2,7 @@
 
 本文件只回答三件事：**改什么先看哪里、必须联查什么、最低怎么验证**。不要从头通读；先查任务路由，再按需打开一个模块文档或契约。
 
-> 实现核对基线：`aa19490`（2026-08-09）。代码、构建结果和测试结果是事实源；文档冲突时，在同一任务中修正文档。安装包清单与构建命令以 [`docs/BUILD.md`](docs/BUILD.md) 为准。
+> 实现核对基线：2026-08 worker 隔离工作树。代码、构建结果和测试结果是事实源；文档冲突时，在同一任务中修正文档。安装包清单与构建命令以 [`docs/BUILD.md`](docs/BUILD.md) 为准。
 
 ## 使用方式
 
@@ -18,11 +18,12 @@
 
 | 改动目标 | 代码入口 | 联查文档 | 最低验证 |
 |---|---|---|---|
-| 认证循环、活体、识别、超时 | `face_service/FaceService.cpp`、`face_service/onnx_models.*` | [`face-service.md`](docs/modules/face-service.md)；终态变化再读 IPC 契约 | Release 构建 + standalone |
-| 摄像头/Session 0 | `face_service/webcam_capture.*`、`face_service/webcam_capture_dshow.*`、`face_service/camera_types.h` | [`face-service.md`](docs/modules/face-service.md) | MF standalone + DirectShow 服务路径 |
-| IPC 字段、终态、缓冲区 | `common/ipc_protocol.*`、`face_service/pipe_server.*`、`credential_provider/pipe_client.*` | [`ipc.md`](docs/contracts/ipc.md) | 两端构建 + 格式/断开/超长消息 |
-| 人脸匹配、多人脸、`users.dat` | `face_service/credential_store.*`、`enrollment_app/EnrollmentWizard.*`、`credential_provider/FaceLoginProvider.cpp`（header） | [`users-dat.md`](docs/contracts/users-dat.md) | 保存/重载/匹配 + V1–V3 读取 |
-| 锁屏磁贴、COM、LSA、卡死 | `credential_provider/FaceLoginCredential.*`、`credential_provider/FaceLoginProvider.*`、`credential_provider/pipe_client.*` | [`windows-clients.md`](docs/modules/windows-clients.md)；消息问题再读 IPC 契约 | Release 构建 + 锁屏登录/解锁 |
+| 认证循环、活体、识别、超时 | `face_service/FaceService.cpp`、`auth_pipeline.*`、`auth_worker*`、`onnx_models.*` | [`face-service.md`](docs/modules/face-service.md)、[`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | Release 构建 + `AuthWorkerProtocolTest` + `ModelIntegrityTest` + `AuthWorkerLifecycleTest` + 锁屏 |
+| worker 启动、私有 IPC、Job/超时 | `face_service/auth_worker_client.*`、`auth_worker_protocol.*`、`main.cpp` | [`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | 两个 AuthWorker 测试 + 进程/Job 故障注入 |
+| 摄像头/Session 0 | `face_service/camera_backend.*`、`webcam_capture.*`、`webcam_capture_dshow.*`、`auth_worker.cpp` | [`face-service.md`](docs/modules/face-service.md) | `CameraLifecycleTest` 两后端 child 100 轮 + 服务 Session 0 A/B |
+| IPC 字段、终态、缓冲区 | `common/ipc_protocol.*`、`face_service/pipe_server.*`、`credential_provider/pipe_client.*` | [`ipc.md`](docs/contracts/ipc.md) | 两端构建 + `IpcProtocolTest` + 断开/超长消息 |
+| 人脸匹配、多人脸、`users.dat` | `face_service/credential_store.*`、`enrollment_app/EnrollmentWizard.*`、`credential_provider/FaceLoginProvider.cpp`（header） | [`users-dat.md`](docs/contracts/users-dat.md) | `CredentialStoreTest` + 保存/重载/匹配 |
+| 锁屏磁贴、COM、LSA、卡死 | `credential_provider/FaceLoginCredential.*`、`credential_provider/auth_interaction_policy.h`、`credential_provider/FaceLoginProvider.*`、`credential_provider/pipe_client.*` | [`windows-clients.md`](docs/modules/windows-clients.md)；消息问题再读 IPC 契约 | Release 构建 + `CredentialProviderInteractionPolicyTest` + 锁屏登录/解锁 |
 | 注册、人脸管理、WebView2 | `enrollment_app/EnrollmentWizard.*`、`enrollment_app/WebviewHost.*`、`enrollment_app/index.html` | [`windows-clients.md`](docs/modules/windows-clients.md)；落盘变化再读 users.dat 契约 | Release 构建 + 管理员 GUI |
 | DataPath、日志、配置 | `common/data_path.*`、`face_service/FaceService.cpp`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp`、`enrollment_app/main.cpp`、`enrollment_app/EnrollmentWizard.cpp`、`installer/FaceLoginSetup/app.go`、`installer/FaceLoginSetup/internal/com.go`、`installer/FaceLoginSetup/internal/security.go` | 本文“路径与配置” | 三个 C++ 组件 + 安装器均检查 |
 | 安装、卸载、ACL、部署资源 | `installer/FaceLoginSetup/app.go`、`installer/FaceLoginSetup/internal/`、`installer/FaceLoginSetup/resources/` | [`installer.md`](docs/modules/installer.md)、[`docs/BUILD.md`](docs/BUILD.md) | 在 Setup 目录 `go test ./...` + 资源白名单 |
@@ -55,6 +56,7 @@
 - 安装/卸载与 ACL 生命周期：[`docs/modules/installer.md`](docs/modules/installer.md)
 - 安装包载荷白名单（唯一事实源）：[`docs/BUILD.md`](docs/BUILD.md)
 - 命名管道线格式：[`docs/contracts/ipc.md`](docs/contracts/ipc.md)
+- 父服务/认证 worker 私有线格式：[`docs/contracts/auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md)
 - `users.dat` V1–V4：[`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)
 
 <a id="sec-paths"></a>
@@ -67,6 +69,7 @@
 ├── data/config.json
 ├── data/users.dat
 ├── log/service.log
+├── log/auth_worker.log
 ├── log/credential_provider.log
 ├── log/enrollment.log
 └── models/*.onnx

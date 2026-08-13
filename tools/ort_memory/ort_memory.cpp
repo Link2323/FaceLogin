@@ -16,9 +16,13 @@
 //   settle_ms   sleep after bundle destruction before sampling (default 200)
 //
 // Output: one CSV row per round:
-//   round,load_infer_ms,private_mib,wss_mib,handles,threads
+//   round,load_infer_ms,private_mib,wss_mib,commit_priv_mib,
+//   largest_region_mib,heap_inuse_mib,handles,threads
 // The load_infer_ms column lets the arena A/B also compare per-round auth
 // cost (the model load + one inference each is most of an auth's CPU cost).
+// commit_priv_mib / largest_region_mib / heap_inuse_mib pin down the source
+// of the residual private bytes: committed-but-free heap segment space vs
+// live allocations (see SampleProcess).
 #include "onnx_models.h"
 #include "../common/frame_image.h"
 
@@ -76,6 +80,9 @@ DWORD ProcessThreadCount() {
 struct Sample {
     double privateMiB = 0.0;
     double wssMiB = 0.0;
+    double committedPrivateMiB = 0.0;  // sum of MEM_COMMIT|MEM_PRIVATE regions
+    double largestRegionMiB = 0.0;     // single largest committed private region
+    double heapInUseMiB = 0.0;         // live bytes in the default process heap
     DWORD handles = 0;
     DWORD threads = 0;
 };
@@ -92,6 +99,36 @@ Sample SampleProcess() {
         s.privateMiB = static_cast<double>(counters.PrivateUsage) / kMiB;
         s.wssMiB = static_cast<double>(counters.WorkingSetSize) / kMiB;
     }
+
+    // Enumerate the virtual address space: total committed private bytes and
+    // the single largest committed private region. A ~32 MiB heap segment the
+    // Windows heap has committed but not returned shows up here as one large
+    // MEM_PRIVATE|MEM_COMMIT region whose size stays roughly constant while
+    // the "live" heap bytes (HeapWalk below) barely change — the signature of
+    // a committed heap high-water that no in-process API can return.
+    MEMORY_BASIC_INFORMATION mbi = {};
+    for (unsigned char* p = nullptr;
+         VirtualQuery(p, &mbi, sizeof(mbi)) != 0;
+         p += mbi.RegionSize) {
+        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE) {
+            s.committedPrivateMiB += static_cast<double>(mbi.RegionSize) / kMiB;
+            if (mbi.RegionSize > s.largestRegionMiB) {
+                s.largestRegionMiB = static_cast<double>(mbi.RegionSize) / kMiB;
+            }
+        }
+    }
+
+    // Live (BUSY) allocation bytes in the default process heap — the space
+    // actually owned by malloc/ORT right now, as opposed to committed-but-free
+    // segment space.
+    PROCESS_HEAP_ENTRY entry = {};
+    size_t inUse = 0;
+    HANDLE heap = GetProcessHeap();
+    while (HeapWalk(heap, &entry)) {
+        if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY) inUse += entry.cbData;
+    }
+    s.heapInUseMiB = static_cast<double>(inUse) / kMiB;
+
     s.threads = ProcessThreadCount();
     return s;
 }
@@ -132,9 +169,12 @@ int main(int argc, char** argv) {
     // Force the process-lifetime Envs to exist once (as in production) so
     // round 1 captures their cost, not a later-round surprise.
     const Sample pre = SampleProcess();
-    std::cout << "round,load_infer_ms,private_mib,wss_mib,handles,threads\n";
+    std::cout << "round,load_infer_ms,private_mib,wss_mib,commit_priv_mib,"
+                 "largest_region_mib,heap_inuse_mib,handles,threads\n";
     std::cout << "pre,0," << pre.privateMiB << "," << pre.wssMiB << ","
-              << pre.handles << "," << pre.threads << "\n";
+              << pre.committedPrivateMiB << "," << pre.largestRegionMiB << ","
+              << pre.heapInUseMiB << "," << pre.handles << "," << pre.threads
+              << "\n";
 
     const facelogin::FrameImage frame = BlankFrame();
     facelogin::FrameImage chip(64, 64);
@@ -177,7 +217,9 @@ int main(int argc, char** argv) {
         Sleep(settleMs);  // let the heap settle before sampling
         const Sample s = SampleProcess();
         std::cout << round << "," << loadInferMs << "," << s.privateMiB << ","
-                  << s.wssMiB << "," << s.handles << "," << s.threads << "\n";
+                  << s.wssMiB << "," << s.committedPrivateMiB << ","
+                  << s.largestRegionMiB << "," << s.heapInUseMiB << ","
+                  << s.handles << "," << s.threads << "\n";
     }
     return 0;
 }

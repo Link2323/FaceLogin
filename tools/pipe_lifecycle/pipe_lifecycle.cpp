@@ -12,10 +12,12 @@
 //   iterations  total create/close cycles (default 1000)
 //   warmup      cycles to skip before the private-bytes baseline (default 100)
 //
-// Pass criteria (review item #9, P2):
+// Pass criteria:
 //   1. After every Close(), PipeServer::OutstandingAclAllocations() == 0.
 //   2. Private bytes at the final cycle vs the warmup cycle grow by <= 1 MiB
 //      (headroom for heap fragmentation; the fix itself leaks nothing).
+//   3. A pending connection wait exits in under one second when the service
+//      control path calls RequestShutdown().
 //
 // Uses a distinct test pipe name, so it runs even while the FaceLogin service
 // is up (the service's single instance of ipc::PIPE_NAME would otherwise make
@@ -23,8 +25,11 @@
 #include "pipe_server.h"
 
 #include <cstdlib>
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <limits>
+#include <thread>
 
 #include <windows.h>
 #include <psapi.h>
@@ -59,6 +64,33 @@ size_t PrivateUsageBytes() {
     return 0;
 }
 
+bool VerifyStopCancelsPipeWait() {
+    facelogin::PipeServer server;
+    std::atomic<bool> waitResult{true};
+    const auto started = std::chrono::steady_clock::now();
+    std::thread waiter([&server, &waitResult]() {
+        waitResult.store(server.WaitForClient(30000));
+    });
+
+    Sleep(100);
+    server.RequestShutdown();
+    waiter.join();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    server.Close();
+
+    if (waitResult.load() || elapsed > 1000 ||
+        facelogin::PipeServer::OutstandingAclAllocations() != 0) {
+        std::cerr << "FAIL: shutdown pipe wait result=" << waitResult.load()
+                  << " elapsed_ms=" << elapsed
+                  << " outstanding_acl="
+                  << facelogin::PipeServer::OutstandingAclAllocations() << "\n";
+        return false;
+    }
+    std::cout << "shutdown_wait_ms=" << elapsed << "\n";
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -74,6 +106,8 @@ int main(int argc, char** argv) {
         std::cerr << "warmup must be < iterations\n";
         return 2;
     }
+
+    if (!VerifyStopCancelsPipeWait()) return 1;
 
     // A distinct pipe name so the tool runs even while the FaceLogin service
     // is up (the service holds a single instance of ipc::PIPE_NAME while it
