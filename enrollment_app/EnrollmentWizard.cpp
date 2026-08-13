@@ -1044,25 +1044,12 @@ bool EnrollmentWizard::ValidatePassword(const std::wstring& password) {
 
 bool EnrollmentWizard::SaveEnrollment(const std::wstring& password,
                                       const std::wstring& label) {
-    return SaveEnrollmentImpl(password, /*passwordless=*/false, label);
-}
-
-bool EnrollmentWizard::SaveEnrollmentNoPassword(const std::wstring& label) {
-    // Re-verify the current session identity before allowing a passwordless
-    // save — the user must be the logged-on owner of this account.
-    std::wstring tokenSid = GetCurrentProcessUserSid();
-    if (tokenSid.empty() || tokenSid != m_sid) {
-        FACELOGIN_ERROR(L"Passwordless enrollment refused: token SID %s != enrolled SID %s",
-                        tokenSid.c_str(), m_sid.c_str());
-        return false;
-    }
-    FACELOGIN_INFO(L"Passwordless enrollment confirmed for %s (session identity match)",
-                   m_username.c_str());
-    return SaveEnrollmentImpl(L"", /*passwordless=*/true, label);
+    return SaveEnrollmentImpl(password, label);
 }
 
 // Returns the SID of the currently logged-on session identity (the process
-// token's user), used as the "self" proof for passwordless enrollment.
+// token's user), used to authorize face-management operations for the current
+// logged-on account.
 std::wstring EnrollmentWizard::GetCurrentProcessUserSid() {
     HANDLE hToken = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
@@ -1086,48 +1073,7 @@ std::wstring EnrollmentWizard::GetCurrentProcessUserSid() {
     return result;
 }
 
-// Detect whether the enrolled account is passwordless (no password — PIN/Hello
-// only). Layered, conservative:
-//   1. The current session identity must be the enrolled account.
-//   2. Empty-password LogonUser succeeds → definitely passwordless.
-//   3. NetUserGetInfo(23) shows an empty SAM password → passwordless.
-//   4. MSA that we can't auto-confirm → 2 (UI checkbox lets the user confirm).
-int EnrollmentWizard::GetPasswordlessState() const {
-    // 1) Session identity must be the account being enrolled.
-    std::wstring tokenSid = GetCurrentProcessUserSid();
-    if (tokenSid.empty() || tokenSid != m_sid) {
-        return 0;
-    }
-
-    // 2) Empty-password LogonUser probe.
-    HANDLE hToken = nullptr;
-    BOOL okEmpty = LogonUserW(m_username.c_str(), L".", L"",
-                              LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &hToken);
-    if (okEmpty && hToken) { CloseHandle(hToken); return 1; }
-    if (IsMsaUpn(m_upn)) {
-        okEmpty = LogonUserW(m_upn.c_str(), L".", L"",
-                             LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &hToken);
-        if (okEmpty && hToken) { CloseHandle(hToken); return 1; }
-    }
-
-    // 3) NetUserGetInfo(1003): SAM password field empty → passwordless.
-    // (USER_INFO_1003 exposes the SAM password; 23 does not include it.)
-    USER_INFO_1003* ui1003 = nullptr;
-    if (NetUserGetInfo(nullptr, m_username.c_str(), 1003,
-                       reinterpret_cast<LPBYTE*>(&ui1003)) == NERR_Success && ui1003) {
-        bool noPw = (ui1003->usri1003_password == nullptr ||
-                     ui1003->usri1003_password[0] == L'\0');
-        NetApiBufferFree(ui1003);
-        if (noPw) return 1;
-    }
-    // Local accounts: SAM password non-empty → has a password.
-    if (m_accountType != "msa") return 0;
-
-    // 4) MSA: SAM doesn't reflect the online password; can't auto-confirm.
-    return 2;
-}
-
-bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool passwordless,
+bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
                                           const std::wstring& label) {
     // Saving is a separate COM entry point, so do not trust the UI to call it
     // only after a completed capture.  A fresh, successful PAD proof is
@@ -1278,24 +1224,21 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
         uint32_t newFaceId = 0;
         if (idx >= m_store.GetUsers().size()) {
             // First face for this account — protect the password now.
-            std::vector<uint8_t> protectedPassword;
-            if (passwordless) {
-                protectedPassword = { facelogin::kPasswordlessSentinelByte };
-                FACELOGIN_INFO(L"Storing passwordless enrollment (sentinel) for %s",
-                               m_username.c_str());
-            } else {
-                protectedPassword = DpapiUtil::Protect(
-                    reinterpret_cast<const uint8_t*>(password.c_str()),
-                    static_cast<UINT>(password.size() * sizeof(wchar_t)));
-                if (protectedPassword.empty()) { FACELOGIN_ERROR(L"DPAPI encryption failed"); return false; }
+            if (password.empty()) {
+                FACELOGIN_ERROR(L"Enrollment refused: a Windows account password is required");
+                return false;
             }
+            std::vector<uint8_t> protectedPassword = DpapiUtil::Protect(
+                reinterpret_cast<const uint8_t*>(password.c_str()),
+                static_cast<UINT>(password.size() * sizeof(wchar_t)));
+            if (protectedPassword.empty()) { FACELOGIN_ERROR(L"DPAPI encryption failed"); return false; }
             if (!m_store.AddFace(m_username, m_upn, m_sid, protectedPassword, ef, groupLabel, &newFaceId)) {
                 FACELOGIN_ERROR(L"Failed to create enrollment for %s", m_username.c_str());
                 return false;
             }
         } else {
             // Append a face to an existing account. AddFace ignores the password
-            // argument here, so the stored password/sentinel is preserved.
+            // argument here, so the stored password is preserved.
             if (m_store.GetUsers()[idx].faces.size() >= facelogin::kMaxFacesPerUser) {
                 FACELOGIN_ERROR(L"Cannot append: %s already has %zu faces (max %zu)",
                                 m_username.c_str(), m_store.GetUsers()[idx].faces.size(),
@@ -1307,9 +1250,8 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
                 return false;
             }
         }
-        FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D%s, angle=%ls)",
-                       m_username.c_str(), newFaceId, ef.size(),
-                       passwordless ? L", passwordless" : L"", g.label);
+        FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D, angle=%ls)",
+                       m_username.c_str(), newFaceId, ef.size(), g.label);
     }
 
     if (!m_store.SaveDatabase()) { FACELOGIN_ERROR(L"Failed to save database"); return false; }
@@ -1356,15 +1298,15 @@ std::string EnrollmentWizard::GetFacesJson() {
 
 bool EnrollmentWizard::SaveEnrollmentAppend(const std::wstring& label) {
     // The appended face belongs to the logged-on session owner — the session
-    // token SID must match the enrolled account (same self-proof as the
-    // passwordless flow). No password is required for an append.
+    // token SID must match the enrolled account. No password is required for
+    // an append because the stored password is retained.
     std::wstring tokenSid = GetCurrentProcessUserSid();
     if (tokenSid.empty() || tokenSid != m_sid) {
         FACELOGIN_ERROR(L"Face append refused: token SID %s != enrolled SID %s",
                         tokenSid.c_str(), m_sid.c_str());
         return false;
     }
-    return SaveEnrollmentImpl(L"", /*passwordless=*/false, label);
+    return SaveEnrollmentImpl(L"", label);
 }
 
 bool EnrollmentWizard::DeleteFace(int faceId) {

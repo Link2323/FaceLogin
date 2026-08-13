@@ -82,10 +82,10 @@ void WriteValidV4Record(std::ofstream& file, const std::wstring& username,
     WriteText(file, username);
     WriteText(file, L"");
     WriteText(file, sid);
-    const uint32_t passwordLength = 1;
+    const uint32_t passwordLength = 2;
     Write(file, passwordLength);
-    const uint8_t passwordless = facelogin::kPasswordlessSentinelByte;
-    Write(file, passwordless);
+    const uint8_t encryptedPassword[] = {0x01, 0x02};
+    file.write(reinterpret_cast<const char*>(encryptedPassword), sizeof(encryptedPassword));
     const uint32_t faceCount = 1;
     const uint32_t faceId = 1;
     const uint32_t embeddingLength = 512;
@@ -123,7 +123,7 @@ void TestIdentityMatching() {
 
     auto credential = store.LoadCredentialForSid(L"SID-A", identity ? identity->distance : 0.0f);
     Check(credential && credential->password == L"test-password" &&
-          credential->sid == L"SID-A" && !credential->passwordless,
+          credential->sid == L"SID-A",
           "credential is decrypted only by final SID lookup");
     Check(!store.LoadCredentialForSid(L""), "empty authorized SID fails closed");
     Check(!store.LoadCredentialForSid(L"SID-MISSING"),
@@ -134,25 +134,22 @@ void TestIdentityMatching() {
           "record disappearance between match and release fails closed");
 }
 
-void TestPasswordlessAndThresholds() {
-    facelogin::CredentialStore store;
-    const std::vector<uint8_t> sentinel{facelogin::kPasswordlessSentinelByte};
-    const auto embedding = Basis(0);
-    Check(store.AddFace(L"passwordless", L"", L"SID-P", sentinel, embedding),
-          "passwordless record is added");
-    const auto identity = store.FindBestIdentity(embedding.data(), embedding.size(), 0.80f);
-    Check(identity && identity->passwordless,
-          "identity-only result marks passwordless records before release");
-    const auto credential = store.LoadCredentialForSid(L"SID-P");
-    Check(credential && credential->passwordless && credential->password.empty(),
-          "passwordless credential never materializes plaintext");
-
+void TestThresholds() {
     Check(std::fabs(facelogin::EmbeddingThresholdForDim(0.80f, 512) - 0.80f) < 0.0001f,
           "calibrated 512-D threshold is preserved");
     Check(std::fabs(facelogin::EmbeddingThresholdForDim(0.20f, 512) - 0.80f) < 0.0001f,
           "unsafe-tight 512-D threshold returns safe default");
     Check(std::fabs(facelogin::EmbeddingThresholdForDim(1.20f, 512) - 1.00f) < 0.0001f,
           "unsafe-loose 512-D threshold is clamped");
+}
+
+void TestPasswordBlobValidation() {
+    facelogin::CredentialStore store;
+    const auto embedding = Basis(0);
+    Check(!store.AddFace(L"invalid", L"", L"SID-I", {}, embedding),
+          "empty password blob is rejected");
+    Check(!store.AddFace(L"invalid", L"", L"SID-I", {0x00}, embedding),
+          "single-byte legacy sentinel is rejected");
 }
 
 void TestV4RoundTripAndReload() {
@@ -255,7 +252,8 @@ void TestMalformedReloadIsTransactional() {
 
 int wmain() {
     TestIdentityMatching();
-    TestPasswordlessAndThresholds();
+    TestThresholds();
+    TestPasswordBlobValidation();
     TestV4RoundTripAndReload();
     TestUnsupportedVersionsAreRejected();
     TestMalformedReloadIsTransactional();

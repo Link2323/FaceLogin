@@ -56,17 +56,6 @@ public:
     // empty — the backend falls back to L"脸N").
     bool SaveEnrollment(const std::wstring& password, const std::wstring& label = L"");
 
-    // Passwordless account support (MSA accounts with no password — PIN/Hello
-    // only). Returns:
-    //   0 = account has a password (or detection inconclusive but likely has one)
-    //   1 = confirmed passwordless (auto-skip the password screen)
-    //   2 = MSA, cannot auto-confirm — UI offers a checkbox for the user to confirm
-    int GetPasswordlessState() const;
-    // Save enrollment with no password (uses the current logged-on session
-    // identity as the "self" proof). Stores a passwordless sentinel.
-    // label names this face (empty → L"脸N").
-    bool SaveEnrollmentNoPassword(const std::wstring& label = L"");
-
     // Multi-face management (1.3.0). The current account can enroll several
     // faces; each save appends one face instead of replacing the old one.
     // Number of faces enrolled for the current account (0 = not enrolled).
@@ -111,9 +100,7 @@ public:
     // WITHOUT validating or re-encrypting the password (no input needed).
     // Faces and the stored password are preserved; the lock-screen credential
     // then packs with domain\username instead of the misattributed email.
-    // This is also the only self-heal for passwordless local accounts, whose
-    // full refresh always fails because RefreshAccountIdentity requires a
-    // non-empty password. Returns false unless the record is in state 1.
+    // Returns false unless the record is in state 1.
     bool ClearStaleAccountUpn();
 
     // One-shot startup repair: if the current session is an MSA (per
@@ -160,7 +147,7 @@ private:
     std::string EncodeJPEGBase64(const FrameImage& frame);
     std::string FacesToJson(const std::vector<facelogin::FaceWithKps>& faces);
 
-    bool SaveEnrollmentImpl(const std::wstring& password, bool passwordless,
+    bool SaveEnrollmentImpl(const std::wstring& password,
                             const std::wstring& label);
     static std::wstring GetCurrentProcessUserSid();
 

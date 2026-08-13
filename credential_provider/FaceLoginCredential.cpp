@@ -256,13 +256,6 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
         return S_OK;
     }
 
-    // Blocked (passwordless notice shown): keep showing the notice — do not
-    // auto-restart authentication on re-enumeration (would loop forever).
-    if (m_state == State::Blocked) {
-        FACELOGIN_INFO(L"Advise: blocked (passwordless notice), skipping auth restart");
-        return S_OK;
-    }
-
     // A terminal failure must remain inert until the user explicitly clicks
     // the retry command. LogonUI may call Advise again for reasons unrelated
     // to FaceLogin; restarting GetLastInputInfo polling here would interpret
@@ -419,11 +412,6 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
                 return SHStrDupW(m_statusText.c_str(), ppwsz);
             }
             return SHStrDupW(L"人脸识别失败，请重试或使用密码登录", ppwsz);
-        case State::Blocked:
-            // Passwordless account notice (set by OnPipeResponse / polling).
-            return SHStrDupW(m_statusText.empty() ?
-                             L"该账号无密码，人脸识别无法用于解锁，请使用 PIN/Hello 登录" :
-                             m_statusText.c_str(), ppwsz);
         case State::Error:
             // Show the specific error message from the service (e.g. anti-spoof
             // rejection) if one was received; otherwise the generic fallback.
@@ -543,13 +531,6 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
         return S_OK;
     }
 
-    // Blocked (passwordless account): show the notice, finish without
-    // submitting credentials so the tile never hangs.
-    if (m_state == State::Blocked) {
-        *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
-        return S_OK;
-    }
-
     // If we're in Error state, service is not available — don't block login
     if (m_state == State::Error) {
         *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
@@ -623,16 +604,6 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
             }
             else if (result.status == facelogin::ipc::AuthResult::Status::Error) {
                 FACELOGIN_WARN(L"Auth error: %s", result.errorMessage.c_str());
-                // Passwordless account: show the notice in-place and finish.
-                if (result.errorMessage == facelogin::ipc::MSG_PASSWORDLESS_NOTICE) {
-                    m_statusText = result.errorMessage;
-                    m_state = State::Blocked;
-                    if (m_pCredentialEvents) {
-                        m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
-                    }
-                    *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
-                    return S_OK;
-                }
                 // Surface the service's specific error on the lock screen.
                 if (!result.errorMessage.empty()) {
                     m_statusText = result.errorMessage;
@@ -996,16 +967,6 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             return;
         } else if (result.status == facelogin::ipc::AuthResult::Status::Error) {
             FACELOGIN_WARN(L"OnPipeResponse: Auth error: %s", result.errorMessage.c_str());
-            // Passwordless account: show the notice in-place and stop — do NOT
-            // trigger re-enumeration or submit any credentials.
-            if (result.errorMessage == facelogin::ipc::MSG_PASSWORDLESS_NOTICE) {
-                m_statusText = result.errorMessage;
-                m_state = State::Blocked;
-                if (m_pCredentialEvents) {
-                    m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
-                }
-                return;
-            }
             // Surface the service's specific error (e.g. "检测到攻击，请使用真实人脸")
             // on the lock screen instead of the generic "service unavailable".
             PresentRetryableFailure(

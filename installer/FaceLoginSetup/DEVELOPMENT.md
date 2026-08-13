@@ -2,7 +2,7 @@
 
 FaceLogin 图形化安装/卸载程序（Wails v2 + Vue 3 + Go）。
 
-本文档面向后续维护者，重点说明如何**发布新版本**时正确使用两个可扩展机制：**自定义操作执行** 与 **新版本公告弹窗**。
+本文档面向后续维护者，重点说明构建、资源同步与安装流程。
 
 ---
 
@@ -11,10 +11,8 @@ FaceLogin 图形化安装/卸载程序（Wails v2 + Vue 3 + Go）。
 1. [项目结构](#项目结构)
 2. [构建与运行](#构建与运行)
 3. [发布新版本的检查清单](#发布新版本的检查清单)
-4. [机制一：自定义操作执行（Config Upgrade）](#机制一自定义操作执行)
-5. [机制二：新版本公告弹窗（Upgrade Notice）](#机制二新版本公告弹窗)
-6. [安装流程（后端 Install 各步骤）](#安装流程)
-7. [注册表键](#注册表键)
+4. [安装流程（后端 Install 各步骤）](#安装流程)
+5. [注册表键](#注册表键)
 
 ---
 
@@ -22,13 +20,12 @@ FaceLogin 图形化安装/卸载程序（Wails v2 + Vue 3 + Go）。
 
 ```
 FaceLoginSetup/
-├── main.go                  # 入口：提权、per-release 自定义动作区、Wails 启动
+├── main.go                  # 入口：提权、Wails 启动
 ├── app.go                   # App 结构体：绑定到前端的方法（Install/Uninstall/...）
 ├── wails.json               # Wails 项目配置（输出名、平台）
 ├── go.mod / go.sum
 ├── internal/                # 与前端无关的后端逻辑
-│   ├── config.go            # 机制一：配置升级（强制同步默认参数）
-│   ├── notice.go            # 机制二：新版本公告弹窗
+│   ├── config.go            # 当前配置默认值与首次安装创建
 │   ├── com.go               # COM DLL 注册/注销
 │   ├── scm.go               # Windows 服务安装/停止/删除
 │   ├── extract.go           # 内嵌资源解压（resources/ → 安装目录）
@@ -37,7 +34,7 @@ FaceLoginSetup/
 ├── resources/               # 内嵌资源：exe/dll/模型/dll 依赖（编译时打包）
 └── frontend/                # Vue 3 + Tailwind 前端
     └── src/
-        ├── App.vue          # 全部 UI 逻辑（含公告弹窗）
+        ├── App.vue          # 全部 UI 逻辑
         ├── main.ts / style.css
         └── wailsjs/         # 自动生成的 Go ↔ JS 绑定（勿手改）
 ```
@@ -69,9 +66,8 @@ wails build -clean -platform windows/amd64
 每次发布新版本安装包时，按此顺序操作：
 
 1. **编译最新 C++ 产物**，并同步到 `resources/`（见下）。
-2. **决定本版本是否需要机制一 / 机制二**，在 `main.go` 的自定义动作区开启对应开关。
-3. `wails build -clean -platform windows/amd64` 重新打包。
-4. （可选）验证：把安装包放到一个已安装旧版的环境跑升级，确认弹窗/参数同步行为符合预期。
+2. `wails build -clean -platform windows/amd64` 重新打包。
+3. （可选）验证：把安装包放到一个已安装旧版的环境跑安装，确认替换和卸载路径可用。
 
 ### C++ 产物同步
 
@@ -89,69 +85,6 @@ wails build -clean -platform windows/amd64
 | `models/MiniFASNetV1SE.onnx` | `assets/models/`（构建 Console 时自动复制并由安装器校验 SHA-256） |
 
 > **`FaceLoginConsole.exe` 的构建目标直接输出到 `resources/`**，并从 `assets/models/` 自动准备全部四个运行时模型；服务 EXE 和凭据 DLL 仍需手动复制。`resources/models/` 是生成物，不应直接维护。改 C++ 代码后务必核对时间戳，避免把旧二进制打进安装包。
-
----
-
-## 新版本公告弹窗
-
-**用途**：用户使用新版本安装包做**升级安装**（已装过旧版）成功后，弹出一个"更新说明"弹窗。**首次全新安装不弹**。
-
-### 相关文件
-
-- 声明/逻辑：`internal/notice.go`
-- 开关与内容：`main.go` 自定义动作区
-- 前端渲染：`frontend/src/App.vue`（`showNotice` / `noticeLines`）
-- 前端触发：`app.go` 的 `GetUpgradeNotice()`（绑定到前端）
-
-### 工作原理（三层判断）
-
-```
-① 开关        main.go: NoticeEnabled = true，且 NoticeVersion/Title 非空
-② 升级场景    后端 GetUpgradeNotice() 检查 InstallPath 注册表 + 目录存在 → 判定"已安装"
-③ 安装成功    前端只在 Install() 返回 success 后查询公告
-```
-
-| 场景 | 结果 |
-|---|---|
-| 升级安装 + 成功 + 本版本开启公告 | ✅ 弹窗 |
-| 首次安装（无旧版本） | ❌ 不弹（②拦截） |
-| 安装失败 | ❌ 不弹（③拦截） |
-| 本版本未开启公告 | ❌ 不弹（①拦截） |
-
-### 如何为某版本启用
-
-```go
-// main.go — 自定义动作区
-internal.NoticeEnabled  = true
-internal.NoticeVersion  = "1.1.0"            // 弹窗右上角版本徽标
-internal.NoticeTitle    = "FaceLogin 1.1.0 更新说明"  // 标题
-// 正文：每行一个 \n 分隔，前端渲染为一条条圆点列表
-internal.NoticeBody     = "升级后请重新录入人脸，以适配新识别引擎\n" +
-                           "修复了旧版数据不兼容导致解锁失败的问题\n" +
-                           "优化了冷启动识别速度"
-```
-
-### 前端数据流
-
-```js
-// App.vue — doInstall() 内，安装成功后
-if (result.success && alreadyInstalled.value) {
-  const n = await GetUpgradeNotice()
-  if (n && n.title) {
-    notice.value = n
-    showNotice.value = true
-  }
-}
-```
-
-`noticeLines` 为 computed 属性，将 `notice.body` 按 `\n` 拆分为数组并过滤空行，模板中逐条渲染。
-
-### 注意事项
-
-- **正文每行一个要点**，用 `\n` 分隔；空行会被前端过滤。
-- 弹窗内容存在**安装包二进制内**（Go 字符串），改文案后必须重新 `wails build`。
-- 下个版本不需要弹窗时，把 `NoticeEnabled` 置 `false` 即可，旧公告不会残留。
-- 判断"是否升级"目前基于 `InstallPath` 注册表 + 目录存在性。如需精确到"从某版本起才提示"，可扩展为对比已安装版本号（当前未实现）。
 
 ---
 

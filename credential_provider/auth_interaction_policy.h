@@ -9,8 +9,7 @@ enum class AuthState {
     Authenticating,
     Ready,
     Failed,
-    Error,
-    Blocked
+    Error
 };
 
 constexpr bool IsRetryableFailure(AuthState state) noexcept {

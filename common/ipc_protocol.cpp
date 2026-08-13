@@ -73,16 +73,6 @@ AuthResult ParseAuthMessage(const std::wstring& message) {
         return result;
     }
 
-    if (message == MSG_AUTH_NO_FACE) {
-        result.status = AuthResult::Status::NoFace;
-        return result;
-    }
-
-    if (message == MSG_AUTH_CANCELLED) {
-        result.status = AuthResult::Status::Cancelled;
-        return result;
-    }
-
     if (message.starts_with(MSG_AUTH_ERROR_PREFIX)) {
         result.status = AuthResult::Status::Error;
         result.errorMessage = message.substr(wcslen(MSG_AUTH_ERROR_PREFIX));

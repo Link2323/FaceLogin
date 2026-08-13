@@ -222,20 +222,13 @@ body{
       <label>SID</label>
       <input type="text" id="fld-sid" readonly>
     </div>
-    <div class="field" id="pwd-pass-field">
+    <div class="field">
       <label id="fld-pass-label">Windows 密码</label>
       <input type="password" id="fld-pass" placeholder="输入你的登录密码" autofocus>
     </div>
     <div class="field">
       <label>给这张脸命名</label>
       <input type="text" id="fld-face-label" placeholder="可留空，默认如“脸1”" maxlength="32">
-    </div>
-    <div class="field" id="field-skip-pass" style="display:none">
-      <label style="text-transform:none;display:flex;gap:8px;align-items:center;font-size:12px">
-        <input type="checkbox" id="fld-skip-pass">
-        <span id="fld-skip-pass-label">该账号没有密码（仅使用 PIN/Hello），跳过密码录入</span>
-      </label>
-      <p class="dim">无密码账号无法用于人脸解锁，人脸识别只能完成录入。</p>
     </div>
     <p class="dim">你的密码将使用 DPAPI 加密，仅存储在本机。</p>
     <div style="display:flex;gap:8px;margin-top:8px">
@@ -884,29 +877,6 @@ function finishCapture() {
     }
   } catch(e) {}
 
-  // Passwordless account detection: state 1 = confirmed (auto-skip),
-  // state 2 = MSA that can't auto-confirm (user confirms via checkbox),
-  // state 0 = has a password (normal flow).
-  try {
-    var st = H.GetPasswordlessState();
-    var skipField = document.getElementById('field-skip-pass');
-    var skipChk = document.getElementById('fld-skip-pass');
-    var passField = document.getElementById('pwd-pass-field');
-    if (st === 1) {
-      skipField.style.display = 'flex';
-      skipChk.checked = true;
-      skipChk.disabled = true;
-      document.getElementById('fld-skip-pass-label').textContent = '已检测到该账号无密码，将跳过密码录入。';
-      if (passField) passField.style.display = 'none';
-    } else if (st === 2) {
-      skipField.style.display = 'flex';
-      skipChk.checked = false;
-      skipChk.disabled = false;
-    } else {
-      skipField.style.display = 'none';
-      skipChk.checked = false;
-    }
-  } catch(e) {}
   document.getElementById('fld-pass').focus();
 }
 
@@ -1225,10 +1195,8 @@ function onPwdCancel() {
 }
 
 function onSave() {
-  var skip = false;
-  try { skip = document.getElementById('fld-skip-pass').checked; } catch(e) {}
   var pass = document.getElementById('fld-pass').value;
-  if (!skip && !pass) { showBanner('pwd', '请输入密码。', 'error'); return; }
+  if (!pass) { showBanner('pwd', '请输入密码。', 'error'); return; }
 
   var btn = document.getElementById('btn-save');
   var spinner = document.getElementById('save-spinner');
@@ -1240,14 +1208,9 @@ function onSave() {
     var ok = false;
     var label = '';
     try { label = document.getElementById('fld-face-label').value.trim(); } catch(e) {}
-    if (skip) {
-      // Passwordless account — use the current logged-on session identity.
-      try { ok = H.SaveEnrollmentNoPassword(label); } catch(e) { ok = false; }
-    } else {
-      try { ok = H.ValidatePassword(pass); } catch(e) {}
-      if (ok) {
-        try { ok = H.SaveEnrollment(pass, label); } catch(e) { ok = false; }
-      }
+    try { ok = H.ValidatePassword(pass); } catch(e) {}
+    if (ok) {
+      try { ok = H.SaveEnrollment(pass, label); } catch(e) { ok = false; }
     }
 
     btn.disabled = false;

@@ -808,22 +808,6 @@ void FaceService::Run() {
                           m_matchThreshold, m_antiSpoofThreshold,
                           m_config.camera_rotation);
         }
-        else if (request == ipc::MSG_GET_LOGS) {
-            auto lines = Logger::Instance().GetRecentLogs(500);
-            std::wstring resp(ipc::MSG_GET_LOGS_OK_PREFIX);
-            for (size_t i = 0; i < lines.size(); i++) {
-                if (i > 0) resp += L"\x1E"; // ASCII record separator
-                // Escape backslashes and the separator char itself
-                std::wstring safe = lines[i];
-                // Remove trailing \r\n from each line
-                while (!safe.empty() && (safe.back() == L'\r' || safe.back() == L'\n'))
-                    safe.pop_back();
-                resp += safe;
-            }
-            m_pipeServer->WriteMessage(resp);
-            m_pipeServer->Disconnect();
-            FACELOGIN_DEBUG(L"Sent %zu log lines to client", lines.size());
-        }
         else if (request == ipc::MSG_AUTH_REQUEST) {
             if (m_isServiceMode) {
                 // Service mode owns no camera/ONNX objects. The preloaded
@@ -867,10 +851,6 @@ void FaceService::Run() {
                 FACELOGIN_INFO(L"DirectShow camera released after auth (handles=%lu)",
                                usage.handles);
             }
-            m_pipeServer->Disconnect();
-        }
-        else if (request == ipc::MSG_PING) {
-            m_pipeServer->WriteMessage(ipc::MSG_PONG);
             m_pipeServer->Disconnect();
         }
         else {
@@ -985,12 +965,6 @@ bool FaceService::ProcessWorkerAuthRequest() {
                         return BindingDecision{BindingDecisionKind::Reject,
                                                L"身份数据无效，请使用密码登录并重新录入人脸"};
                     }
-                    if (identity->passwordless) {
-                        FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock",
-                                       identity->username.c_str());
-                        return BindingDecision{BindingDecisionKind::Reject,
-                                               ipc::MSG_PASSWORDLESS_NOTICE};
-                    }
                     initialSid = identity->sid;
                     lockedIdentity = std::move(identity);
                     return BindingDecision{BindingDecisionKind::Accept, {}};
@@ -1048,13 +1022,11 @@ bool FaceService::ProcessWorkerAuthRequest() {
 
     auto credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
                                                      lockedIdentity->distance);
-    if (!credential || credential->passwordless) {
+    if (!credential) {
         MarkAuthWorkerConsumed(true);
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            credential && credential->passwordless
-                ? ipc::MSG_PASSWORDLESS_NOTICE
-                : L"账户凭据不可用，请使用密码登录"));
+            L"账户凭据不可用，请使用密码登录"));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
         SecureClearMatchPassword(credential);
@@ -1193,13 +1165,6 @@ bool FaceService::ProcessAuthRequest() {
                 return BindingDecision{BindingDecisionKind::Reject,
                                        L"身份数据无效，请使用密码登录并重新录入人脸"};
             }
-            if (identity->passwordless) {
-                FACELOGIN_WARN(L"Matched passwordless account '%s' — face login cannot unlock",
-                               identity->username.c_str());
-                return BindingDecision{BindingDecisionKind::Reject,
-                                       ipc::MSG_PASSWORDLESS_NOTICE};
-            }
-
             initialSid = identity->sid;
             lockedIdentity = std::move(identity);
             FACELOGIN_INFO(L"Identity locked: %s (distance=%.4f) [1/3]",
@@ -1255,12 +1220,10 @@ bool FaceService::ProcessAuthRequest() {
 
     auto credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
                                                      lockedIdentity->distance);
-    if (!credential || credential->passwordless) {
+    if (!credential) {
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            credential && credential->passwordless
-                ? ipc::MSG_PASSWORDLESS_NOTICE
-                : L"账户凭据不可用，请使用密码登录"));
+            L"账户凭据不可用，请使用密码登录"));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
         SecureClearMatchPassword(credential);

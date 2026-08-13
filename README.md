@@ -59,7 +59,7 @@ flowchart TB
     LogonUI -->|"COM 接口"| CP
     CP -->|"命名管道"| Svc
     Svc -->|"凭据回传"| CP
-    Console -->|"RELOAD_DB / GET_LOGS"| Svc
+    Console -->|"RELOAD_DB / CONFIG_RELOAD"| Svc
     Console --> Storage
     Svc --> Storage
 

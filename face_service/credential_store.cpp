@@ -116,10 +116,7 @@ bool CredentialStore::LoadDatabase() {
         // Password
         uint32_t passLen = 0;
         file.read(reinterpret_cast<char*>(&passLen), sizeof(passLen));
-        // passLen 0 or 1 is valid: 0 = empty (defensive), 1 = passwordless
-        // sentinel byte. Old versions only accepted >= 1; a 0-length record
-        // would have failed their check, so we accept both here.
-        if (passLen > 4096) {
+        if (passLen < 2 || passLen > 4096) {
             FACELOGIN_ERROR(L"Invalid password length: %u", passLen);
             return false;
         }
@@ -335,6 +332,11 @@ bool CredentialStore::AddFace(const std::wstring& username,
     }
 
     // Account not found → create it with the given password and first face.
+    if (encryptedPassword.size() < 2) {
+        FACELOGIN_WARN(L"AddFace rejected: missing or invalid encrypted password for %s",
+                       username.c_str());
+        return false;
+    }
     if (m_users.size() >= kMaxUsers) {
         FACELOGIN_WARN(L"AddFace rejected: database has %zu users (max %zu)",
                        m_users.size(), kMaxUsers);
@@ -364,6 +366,11 @@ bool CredentialStore::UpdateAccountIdentity(size_t idx,
                                             const std::vector<uint8_t>& encryptedPassword) {
     if (idx >= m_users.size()) {
         FACELOGIN_WARN(L"UpdateAccountIdentity: index %zu out of range", idx);
+        return false;
+    }
+    if (encryptedPassword.size() < 2) {
+        FACELOGIN_WARN(L"UpdateAccountIdentity: missing or invalid encrypted password for %s",
+                       username.c_str());
         return false;
     }
 
@@ -565,7 +572,6 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
         best.upn = m_users[bestIdx].upn;
         best.sid = m_users[bestIdx].sid;
         best.username = m_users[bestIdx].username;
-        best.passwordless = IsPasswordlessRecord(m_users[bestIdx].encryptedPassword);
         return best;
     }
 
@@ -591,11 +597,6 @@ std::optional<CredentialStore::MatchResult> CredentialStore::LoadCredentialForSi
     result.upn = it->upn;
     result.sid = it->sid;
     result.username = it->username;
-
-    if (IsPasswordlessRecord(it->encryptedPassword)) {
-        result.passwordless = true;
-        return result;
-    }
 
     auto plain = DpapiUtil::Unprotect(it->encryptedPassword);
     if (!plain.empty()) {

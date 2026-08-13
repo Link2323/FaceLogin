@@ -294,18 +294,16 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"GetAccountType") *ids = 19;
     else if (n == L"GetLatestFrameAndFaces") *ids = 20;
     else if (n == L"GetCameraList") *ids = 21;
-    else if (n == L"IsPasswordlessState") *ids = 22;
-    else if (n == L"SaveEnrollmentNoPassword") *ids = 23;
-    else if (n == L"GetFaceCount") *ids = 24;
-    else if (n == L"GetFacesJson") *ids = 25;
-    else if (n == L"SaveEnrollmentAppend") *ids = 26;
-    else if (n == L"DeleteFace") *ids = 27;
-    else if (n == L"ClearAllFaces") *ids = 28;
-    else if (n == L"RenameFace") *ids = 29;
-    else if (n == L"CheckAccountTypeChanged") *ids = 30;
-    else if (n == L"RefreshAccountIdentity") *ids = 31;
-    else if (n == L"GetCaptureStatus") *ids = 32;
-    else if (n == L"ClearStaleAccountUpn") *ids = 33;
+    else if (n == L"GetFaceCount") *ids = 22;
+    else if (n == L"GetFacesJson") *ids = 23;
+    else if (n == L"SaveEnrollmentAppend") *ids = 24;
+    else if (n == L"DeleteFace") *ids = 25;
+    else if (n == L"ClearAllFaces") *ids = 26;
+    else if (n == L"RenameFace") *ids = 27;
+    else if (n == L"CheckAccountTypeChanged") *ids = 28;
+    else if (n == L"RefreshAccountIdentity") *ids = 29;
+    else if (n == L"GetCaptureStatus") *ids = 30;
+    else if (n == L"ClearStaleAccountUpn") *ids = 31;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -417,35 +415,29 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
         case 20: if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces()); break;
         case 21: if (res) *res = MakeStr(m_wizard->GetCameraList()); break;
-        case 22: if (res) *res = MakeInt(m_wizard->GetPasswordlessState()); break;
-        case 23: {
-            std::wstring label = OptionalArg(p, 0);  // first JS arg: face label
-            if (res) *res = MakeBool(m_wizard->SaveEnrollmentNoPassword(label));
-            break;
-        }
-        case 24: if (res) *res = MakeInt(m_wizard->GetFaceCount()); break;
-        case 25: if (res) *res = MakeStr(m_wizard->GetFacesJson()); break;
-        case 26: {
+        case 22: if (res) *res = MakeInt(m_wizard->GetFaceCount()); break;
+        case 23: if (res) *res = MakeStr(m_wizard->GetFacesJson()); break;
+        case 24: {
             std::wstring label = OptionalArg(p, 0);  // face label
             if (res) *res = MakeBool(m_wizard->SaveEnrollmentAppend(label));
             break;
         }
-        case 27: {
+        case 25: {
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             if (p->rgvarg[0].vt != VT_I4) return DISP_E_TYPEMISMATCH;
             if (res) *res = MakeBool(m_wizard->DeleteFace(p->rgvarg[0].lVal));
             break;
         }
-        case 28: if (res) *res = MakeBool(m_wizard->ClearAllFaces()); break;
-        case 29: {
+        case 26: if (res) *res = MakeBool(m_wizard->ClearAllFaces()); break;
+        case 27: {
             if (p->cArgs < 2) return DISP_E_BADPARAMCOUNT;
             if (p->rgvarg[1].vt != VT_I4) return DISP_E_TYPEMISMATCH;
             std::wstring label = OptionalArg(p, 0);
             if (res) *res = MakeBool(m_wizard->RenameFace(p->rgvarg[1].lVal, label));
             break;
         }
-        case 30: if (res) *res = MakeStr(m_wizard->CheckAccountTypeChanged()); break;
-        case 31: {
+        case 28: if (res) *res = MakeStr(m_wizard->CheckAccountTypeChanged()); break;
+        case 29: {
             // Single argument (password), so rgvarg[0] is it — no reverse-order
             // ambiguity. Same access pattern as case 6.
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
@@ -453,8 +445,8 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             if (res) *res = MakeBool(m_wizard->RefreshAccountIdentity(pass));
             break;
         }
-        case 32: if (res) *res = MakeStr(m_wizard->GetCaptureStatus()); break;
-        case 33: if (res) *res = MakeBool(m_wizard->ClearStaleAccountUpn()); break;
+        case 30: if (res) *res = MakeStr(m_wizard->GetCaptureStatus()); break;
+        case 31: if (res) *res = MakeBool(m_wizard->ClearStaleAccountUpn()); break;
         default: return DISP_E_MEMBERNOTFOUND;
         }
         return S_OK;

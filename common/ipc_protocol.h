@@ -22,35 +22,20 @@ constexpr DWORD AUTH_TIMEOUT_SECONDS = 15;
 constexpr wchar_t MSG_AUTH_REQUEST[] = L"AUTH_REQUEST";
 constexpr wchar_t MSG_AUTH_SUCCESS_PREFIX[] = L"AUTH_SUCCESS:";
 constexpr wchar_t MSG_AUTH_TIMEOUT[] = L"AUTH_TIMEOUT";
-constexpr wchar_t MSG_AUTH_NO_FACE[] = L"AUTH_NO_FACE";
 constexpr wchar_t MSG_AUTH_ERROR_PREFIX[] = L"AUTH_ERROR:";
-constexpr wchar_t MSG_AUTH_CANCELLED[] = L"AUTH_CANCELLED";
 constexpr wchar_t MSG_STATUS_PREFIX[] = L"STATUS:";
 constexpr wchar_t MSG_RELOAD_DB[] = L"RELOAD_DB";
 constexpr wchar_t MSG_RELOAD_OK[] = L"RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD[] = L"CONFIG_RELOAD";
 constexpr wchar_t MSG_CONFIG_RELOAD_OK[] = L"CONFIG_RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD_ERROR[] = L"CONFIG_RELOAD_ERROR";
-constexpr wchar_t MSG_GET_LOGS[] = L"GET_LOGS";
-constexpr wchar_t MSG_GET_LOGS_OK_PREFIX[] = L"GET_LOGS_OK:";
-constexpr wchar_t MSG_PING[] = L"PING";
-constexpr wchar_t MSG_PONG[] = L"PONG";
-
-// Sent via AUTH_ERROR when the matched account is passwordless (MSA with no
-// password — PIN/Hello only). Face login cannot unlock such an account (no
-// password to submit to LSA), so the service degrades to this notice.
-// "该账号无密码，人脸识别无法用于解锁，请使用 PIN/Hello 登录"
-constexpr wchar_t MSG_PASSWORDLESS_NOTICE[] =
-    L"该账号无密码，人脸识别无法用于解锁，请使用 PIN/Hello 登录";
 
 // Parsed authentication result
 struct AuthResult {
     enum class Status {
         Success,
         Timeout,
-        NoFace,
-        Error,
-        Cancelled
+        Error
     };
 
     Status status = Status::Error;
@@ -67,9 +52,7 @@ struct AuthResult {
 //   "AUTH_SUCCESS:SID:UPN:USERNAME:PASSWORD"
 //   "AUTH_SUCCESS:SID::DOMAIN\\USER:PASSWORD"  (no UPN, e.g. local account)
 //   "AUTH_TIMEOUT"
-//   "AUTH_NO_FACE"
 //   "AUTH_ERROR:some error message"
-//   "AUTH_CANCELLED"
 AuthResult ParseAuthMessage(const std::wstring& message);
 
 // Build a success message to send through the pipe.

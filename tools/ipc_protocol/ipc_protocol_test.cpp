@@ -70,13 +70,6 @@ void TestTerminalMessages() {
     Check(facelogin::ipc::ParseAuthMessage(L"AUTH_TIMEOUT").status ==
               AuthResult::Status::Timeout,
           "timeout terminal parses");
-    Check(facelogin::ipc::ParseAuthMessage(L"AUTH_NO_FACE").status ==
-              AuthResult::Status::NoFace,
-          "no-face compatibility terminal parses");
-    Check(facelogin::ipc::ParseAuthMessage(L"AUTH_CANCELLED").status ==
-              AuthResult::Status::Cancelled,
-          "cancelled compatibility terminal parses");
-
     const std::wstring errorMessage =
         facelogin::ipc::BuildAuthErrorMessage(L"camera unavailable");
     const AuthResult error = facelogin::ipc::ParseAuthMessage(errorMessage);

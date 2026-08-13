@@ -75,16 +75,6 @@ inline constexpr size_t kMaxUsers = 5;
 // rejects when the account already has this many faces.
 inline constexpr size_t kMaxFacesPerUser = 3;
 
-// Passwordless account: the encryptedPassword field holds a single sentinel
-// byte instead of a DPAPI blob. (An empty vector is also treated as
-// passwordless, as a defensive fallback.)
-inline constexpr uint8_t kPasswordlessSentinelByte = 0x00;
-inline bool IsPasswordlessRecord(const std::vector<uint8_t>& encryptedPassword) {
-    return encryptedPassword.empty() ||
-           (encryptedPassword.size() == 1 &&
-            encryptedPassword[0] == kPasswordlessSentinelByte);
-}
-
 // One enrolled face for a user account (V4). Each face carries a per-account
 // id and a user-given label (defaults to L"脸N" where N = id). New ids reuse
 // the smallest free slot (deleting #2 then re-adding gives #2 again), keeping
@@ -99,7 +89,7 @@ struct UserRecord {
     std::wstring username;
     std::wstring upn;      // UserPrincipalName (e.g. "john@outlook.com")
     std::wstring sid;      // Security Identifier (e.g. "S-1-5-21-...")
-    std::vector<uint8_t> encryptedPassword;  // DPAPI encrypted (or passwordless sentinel)
+    std::vector<uint8_t> encryptedPassword;  // DPAPI encrypted
     std::vector<FaceRecord> faces;           // one or more enrolled faces (V4)
 };
 
@@ -204,7 +194,6 @@ public:
         std::wstring username;
         std::wstring upn;
         std::wstring sid;
-        bool         passwordless = false;
         float        distance = 0.0f;
     };
 
@@ -213,7 +202,6 @@ public:
         std::wstring upn;
         std::wstring sid;
         std::wstring password;  // Decrypted — zero after use!
-        bool         passwordless = false;  // true: no password stored, must NOT submit LSA creds
         float distance;
     };
     // probeDim is the number of floats in probeEmbedding (128 for dlib,
