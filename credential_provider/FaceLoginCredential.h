@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "pipe_client.h"
+#include "auth_interaction_policy.h"
 
 // Forward declarations
 class FaceLoginProvider;
@@ -75,15 +76,7 @@ public:
                               CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon) override;
 
 private:
-    // State enum
-    enum class State {
-        Waiting,
-        Authenticating,
-        Ready,
-        Failed,
-        Error,
-        Blocked  // Passwordless account: show notice, never submit creds
-    };
+    using State = facelogin::credential_provider::AuthState;
 
     // Switch to the password credential provider (fallback)
     HRESULT SwitchToPasswordProvider();
@@ -106,6 +99,13 @@ private:
     // Pipe callbacks — called from background read thread
     void OnPipeResponse(bool success, const std::wstring& message);
     void OnPipeStatus(const std::wstring& message);
+
+    // Freeze passive input triggering after any terminal, retryable failure.
+    // The status and explicit retry command are updated in-place so LogonUI
+    // does not re-enumerate the tile and disturb password entry.
+    void PresentRetryableFailure(State failureState,
+                                 const std::wstring& statusText);
+    void StartExplicitRetry();
 
     LONG m_refCount = 1;
     FaceLoginProvider* m_pProvider = nullptr;

@@ -263,6 +263,16 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
         return S_OK;
     }
 
+    // A terminal failure must remain inert until the user explicitly clicks
+    // the retry command. LogonUI may call Advise again for reasons unrelated
+    // to FaceLogin; restarting GetLastInputInfo polling here would interpret
+    // password-entry keystrokes as face retries and repeatedly steal focus.
+    if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
+        FACELOGIN_INFO(L"Advise: terminal failure requires explicit retry; "
+                       L"input detection remains disabled");
+        return S_OK;
+    }
+
     // Guard: if we're already authenticating and have a live pipe,
     // don't create a second connection.
     if (m_state == State::Authenticating && m_pipeClient && m_pipeClient->IsConnected()) {
@@ -282,7 +292,10 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     // GetSerialization() to retrieve ready credentials.
     bool credUI = m_pProvider ? m_pProvider->IsCredUI() : false;
     FACELOGIN_INFO(L"Advise: credUI=%d, m_pProvider=%p", credUI, m_pProvider);
-    m_state = State::Waiting;
+    if (!facelogin::credential_provider::ShouldStartInputDetection(m_state)) {
+        FACELOGIN_INFO(L"Advise: state does not permit passive input detection");
+        return S_OK;
+    }
     m_waitingStartTick = GetTickCount();
     FACELOGIN_INFO(L"Advise: baseline tick = %lu", m_waitingStartTick);
     StartInputDetectionThread();
@@ -365,8 +378,10 @@ STDMETHODIMP FaceLoginCredential::GetFieldState(
         *pcpfs = CPFS_HIDDEN;
         break;
 
-    case 3: // Command link — visible when not selected
-        *pcpfs = CPFS_DISPLAY_IN_DESELECTED_TILE;
+    case 3: // Retry is explicit after failure; otherwise retain password link.
+        *pcpfs = facelogin::credential_provider::IsRetryableFailure(m_state)
+            ? CPFS_DISPLAY_IN_SELECTED_TILE
+            : CPFS_DISPLAY_IN_DESELECTED_TILE;
         break;
 
     default:
@@ -424,7 +439,11 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
         return SHStrDupW(L"", ppwsz);
 
     case 3: // Command link
-        return SHStrDupW(L"切换到密码登录", ppwsz);
+        return SHStrDupW(
+            facelogin::credential_provider::IsRetryableFailure(m_state)
+                ? L"重新尝试人脸识别"
+                : L"切换到密码登录",
+            ppwsz);
 
     default:
         return E_INVALIDARG;
@@ -486,6 +505,11 @@ STDMETHODIMP FaceLoginCredential::SetComboBoxSelectedValue(DWORD dwFieldID, DWOR
 
 STDMETHODIMP FaceLoginCredential::CommandLinkClicked(DWORD dwFieldID) {
     if (dwFieldID == 3) {
+        if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
+            FACELOGIN_INFO(L"User explicitly requested face authentication retry");
+            StartExplicitRetry();
+            return S_OK;
+        }
         FACELOGIN_INFO(L"User clicked 'Switch to password login'");
         SwitchToPasswordProvider();
         return S_OK;
@@ -543,7 +567,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
     // Without this check, the CP stays in Authenticating forever.
     if (m_pipeClient && !m_pipeClient->IsConnected()) {
         FACELOGIN_WARN(L"Pipe disconnected while waiting for auth response");
-        m_state = State::Error;
+        PresentRetryableFailure(State::Error, L"人脸登录服务连接已断开");
         *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
         return S_OK;
     }
@@ -555,12 +579,12 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
         if (m_authStartTime == 0) {
             m_authStartTime = now;
         } else {
-            // 20-second hard timeout for auth (15s service timeout + 5s grace)
+            // Preserve the established public-auth timeout: 15s service
+            // window plus 5s grace for pipe delivery/serialization.
             const LONGLONG AUTH_TIMEOUT_100NS = 200000000LL;
             if (now - m_authStartTime > AUTH_TIMEOUT_100NS) {
                 FACELOGIN_WARN(L"Auth timed out waiting for service response");
-                m_statusText = L"识别超时，请重试";
-                m_state = State::Failed;
+                PresentRetryableFailure(State::Failed, L"识别超时，请重试");
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
             }
@@ -593,8 +617,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
             }
             else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
                 FACELOGIN_INFO(L"Auth timeout");
-                m_statusText = L"识别超时，请重试";
-                m_state = State::Failed;
+                PresentRetryableFailure(State::Failed, L"识别超时，请重试");
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
             }
@@ -614,7 +637,11 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
                 if (!result.errorMessage.empty()) {
                     m_statusText = result.errorMessage;
                 }
-                m_state = State::Error;
+                PresentRetryableFailure(
+                    State::Error,
+                    result.errorMessage.empty()
+                        ? L"人脸登录服务不可用"
+                        : result.errorMessage);
                 *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
                 return S_OK;
             }
@@ -664,9 +691,14 @@ STDMETHODIMP FaceLoginCredential::ReportResult(
         FACELOGIN_WARN(L"Authentication failed: status=0x%08X, substatus=0x%08X",
                       ntsStatus, ntsSubstatus);
 
-        // Reset for retry
-        m_state = State::Waiting;
-        m_password.clear();
+        // A rejected stored credential is terminal for this face attempt.
+        // Returning to Waiting would re-enable passive input detection after
+        // LogonUI re-advises the tile and could again consume password-entry
+        // keystrokes as face retries. Require an explicit retry instead.
+        facelogin::SecureClearWString(m_password);
+        PresentRetryableFailure(
+            State::Failed,
+            L"Windows 拒绝了保存的凭据，请使用密码登录并重新录入人脸");
 
         if (m_pipeClient) {
             m_pipeClient.reset();
@@ -696,7 +728,11 @@ void FaceLoginCredential::StartAuth() {
     m_pipeClient = std::make_unique<facelogin::PipeClient>();
 
     if (m_pipeClient->Connect()) {
-        m_pipeClient->SendMessage(facelogin::ipc::MSG_AUTH_REQUEST);
+        if (!m_pipeClient->SendMessage(facelogin::ipc::MSG_AUTH_REQUEST)) {
+            FACELOGIN_WARN(L"Failed to send authentication request");
+            PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+            return;
+        }
 
         // Push "正在识别..." immediately so the tile does not keep showing the
         // previous content (last round's failure text or the idle prompt)
@@ -718,7 +754,7 @@ void FaceLoginCredential::StartAuth() {
         FACELOGIN_INFO(L"Pipe connected, auth request sent");
     } else {
         FACELOGIN_WARN(L"Failed to connect to face service pipe");
-        m_state = State::Error;
+        PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
     }
 }
 
@@ -896,6 +932,11 @@ HRESULT FaceLoginCredential::PackCredentials(
 // ============================================================================
 
 HRESULT FaceLoginCredential::SwitchToPasswordProvider() {
+    // Set the terminal state before notifying LogonUI. CredentialsChanged may
+    // synchronously cause UnAdvise/Advise; Advise must already see Failed so
+    // it cannot restart passive face authentication.
+    m_state = State::Failed;
+
     // Signal LogonUI to re-enumerate credentials
     // The user can then select the password provider
     if (m_pProviderEvents) {
@@ -905,8 +946,6 @@ HRESULT FaceLoginCredential::SwitchToPasswordProvider() {
     // Also return NO_CREDENTIAL_FINISHED to deselect our tile
     // This causes LogonUI to show other providers
     // (Actually done in GetSerialization via state change)
-    m_state = State::Failed;
-
     return S_OK;
 }
 
@@ -947,15 +986,14 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
                 SetEvent(m_hCredsReady);
             }
             // Ask LogonUI to call GetSerialization again right away
-            TriggerReEnumeration();
+            if (facelogin::credential_provider::ShouldReenumerateAfterTerminal(m_state)) {
+                TriggerReEnumeration();
+            }
             return;
         } else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
             FACELOGIN_INFO(L"OnPipeResponse: Auth timeout");
-            m_statusText = L"识别超时，请重试";
-            m_state = State::Failed;
-            if (m_pCredentialEvents) {
-                m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
-            }
+            PresentRetryableFailure(State::Failed, L"识别超时，请重试");
+            return;
         } else if (result.status == facelogin::ipc::AuthResult::Status::Error) {
             FACELOGIN_WARN(L"OnPipeResponse: Auth error: %s", result.errorMessage.c_str());
             // Passwordless account: show the notice in-place and stop — do NOT
@@ -970,16 +1008,68 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             }
             // Surface the service's specific error (e.g. "检测到攻击，请使用真实人脸")
             // on the lock screen instead of the generic "service unavailable".
-            if (!result.errorMessage.empty()) {
-                m_statusText = result.errorMessage;
-            }
-            m_state = State::Error;
+            PresentRetryableFailure(
+                State::Error,
+                result.errorMessage.empty()
+                    ? L"人脸登录服务不可用"
+                    : result.errorMessage);
+            return;
         }
     } else {
         FACELOGIN_WARN(L"OnPipeResponse: Read failed — server disconnected?");
-        m_state = State::Error;
+        PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+        return;
     }
-    TriggerReEnumeration();
+}
+
+void FaceLoginCredential::PresentRetryableFailure(
+    State failureState,
+    const std::wstring& statusText) {
+    if (!facelogin::credential_provider::IsRetryableFailure(failureState)) {
+        FACELOGIN_ERROR(L"PresentRetryableFailure called with non-failure state=%d",
+                        static_cast<int>(failureState));
+        return;
+    }
+
+    m_state = failureState;
+    m_authStartTime = 0;
+    m_statusText = statusText.empty() ? L"人脸识别失败，请重试或使用密码登录"
+                                      : statusText;
+
+    // Update the selected tile in-place. In particular, do not call
+    // CredentialsChanged: that causes UnAdvise/Advise and used to restart the
+    // global input watcher while the user was typing a password.
+    if (m_pCredentialEvents) {
+        m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+        m_pCredentialEvents->SetFieldString(this, 3, L"重新尝试人脸识别");
+        m_pCredentialEvents->SetFieldState(this, 3, CPFS_DISPLAY_IN_SELECTED_TILE);
+    }
+    FACELOGIN_INFO(L"Terminal failure shown in-place; passive retry disabled");
+}
+
+void FaceLoginCredential::StartExplicitRetry() {
+    if (!facelogin::credential_provider::IsRetryableFailure(m_state)) {
+        return;
+    }
+
+    // The previous read thread has already delivered its terminal response.
+    // Destroying the client joins that completed thread and guarantees the new
+    // request cannot reuse a terminal pipe connection.
+    m_pipeClient.reset();
+    m_authStartTime = 0;
+    m_statusText = L"正在识别...";
+    m_state = State::Waiting;
+
+    if (m_pCredentialEvents) {
+        m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+        m_pCredentialEvents->SetFieldString(this, 3, L"切换到密码登录");
+        m_pCredentialEvents->SetFieldState(this, 3, CPFS_DISPLAY_IN_DESELECTED_TILE);
+    }
+
+    // This path is intentionally direct. Re-enabling passive key/mouse polling
+    // would again make password input ambiguous; clicking the command is the
+    // explicit user intent to retry face authentication.
+    StartAuth();
 }
 
 // ============================================================================
