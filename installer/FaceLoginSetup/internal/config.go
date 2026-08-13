@@ -6,6 +6,12 @@ import (
 	"os"
 )
 
+const (
+	defaultMatchThreshold     = 0.80
+	defaultAntiSpoofThreshold = 0.281
+	defaultCameraBackend      = "dshow"
+)
+
 // ConfigUpgradeEnabled is the version-scoped switch for running config
 // "upgrade actions" during install.
 //
@@ -26,7 +32,7 @@ var ConfigUpgradeEnabled = false
 // verbatim on upgrade. Declared per-release; this release enforces the
 // threshold defaults that changed in v1.0.1.
 var ConfigUpgradeForcedDefaults = map[string]any{
-	"anti_spoof_threshold": 0.281,
+	"anti_spoof_threshold": defaultAntiSpoofThreshold,
 	"liveness_method":      "antispoof",
 }
 
@@ -52,10 +58,11 @@ func EnsureConfigDefaults(configPath string) error {
 			"recognition_model":    "onnx",
 			"detector":             "scrfd",
 			"liveness_method":      "antispoof",
-			"match_threshold":      0.30,
-			"anti_spoof_threshold": 0.281,
+			"match_threshold":      defaultMatchThreshold,
+			"anti_spoof_threshold": defaultAntiSpoofThreshold,
 			"low_light_enhance":    false,
 			"camera_rotation":      0,
+			"camera_backend":       defaultCameraBackend,
 		}
 	}
 

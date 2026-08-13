@@ -126,7 +126,8 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "  "; jsonWriteString(ss, "anti_spoof_threshold"); ss << ": " << cfg.anti_spoof_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_rotation"); ss << ": " << cfg.camera_rotation << ",\n";
-    ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << "\n";
+    ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << ",\n";
+    ss << "  "; jsonWriteString(ss, "camera_backend"); ss << ": "; jsonWriteString(ss, cfg.camera_backend); ss << "\n";
     ss << "}\n";
     return ss.str();
 }
@@ -174,6 +175,13 @@ AppConfig ConfigFromJson(const std::string& json) {
     cfg.camera_rotation = rotation;
     auto cam = jsonGetString(json, "camera_device");
     if (!cam.empty()) cfg.camera_device = cam;
+    auto backend = jsonGetString(json, "camera_backend");
+    if (!backend.empty() && backend != "dshow" && backend != "mf") {
+        FACELOGIN_WARN(L"Invalid camera_backend=%hs in config, falling back to dshow",
+                       backend.c_str());
+    } else if (!backend.empty()) {
+        cfg.camera_backend = backend;
+    }
     return cfg;
 }
 
@@ -211,10 +219,11 @@ AppConfig LoadConfig(const std::wstring& dataDir) {
     file.close();
 
     AppConfig cfg = ConfigFromJson(buf.str());
-    FACELOGIN_INFO(L"Loaded config.json: rec=%hs det=%hs live=%hs thr=%.2f camera=%hs rotation=%d",
+    FACELOGIN_INFO(L"Loaded config.json: rec=%hs det=%hs live=%hs thr=%.2f camera=%hs backend=%hs rotation=%d",
                   cfg.recognition_model.c_str(), cfg.detector.c_str(),
                   LivenessMethodToString(cfg.liveness_method).c_str(),
                   cfg.match_threshold, cfg.camera_device.c_str(),
+                  cfg.camera_backend.c_str(),
                   cfg.camera_rotation);
     return cfg;
 }

@@ -19,6 +19,9 @@ struct AppConfig {
     // intentionally keeps the raw preprocessing used during calibration.
     bool           low_light_enhance      = false;
     std::string    camera_device          = "";          // device symbolic link; empty = first camera
+    // Service-only camera backend. DirectShow remains the compatibility
+    // default for Session 0. "mf" is an explicit, reversible A/B selection.
+    std::string    camera_backend         = "dshow";
     // Camera rotation in degrees clockwise. Valid: 0, 90, 180, 270.
     // Use when the camera is physically mounted in a non-standard
     // orientation (e.g., vertical PC mount / sideways webcam).

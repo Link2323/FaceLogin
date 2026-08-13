@@ -914,18 +914,98 @@ std::string EnrollmentWizard::GetCaptureStatus() {
     return js.str();
 }
 
-// Notify the FaceLogin service to reload the user database after a write.
-static void NotifyServiceReload() {
-    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_WRITE, 0, nullptr,
-                               OPEN_EXISTING, 0, nullptr);
-    if (hPipe != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        std::wstring msg(ipc::MSG_RELOAD_DB);
-        msg.push_back(L'\0');
-        WriteFile(hPipe, msg.c_str(), static_cast<DWORD>(msg.size() * sizeof(wchar_t)),
-                  &written, nullptr);
+// Notify the FaceLogin service to reload the user database after a write and
+// keep the connection alive until the service acknowledges RELOAD_OK.  A
+// fire-and-forget client can connect, write, and close between two iterations
+// of the service's cancellable ConnectNamedPipe polling loop. Windows reports
+// that case as ERROR_NO_DATA and the unread message is lost, leaving the
+// service's in-memory store stale even though users.dat was saved correctly.
+static bool NotifyServiceReload() {
+    constexpr DWORD kAttempts = 5;
+    constexpr DWORD kBusyWaitMs = 1000;
+    constexpr DWORD kReplyTimeoutMs = 5000;
+
+    DWORD lastError = ERROR_SUCCESS;
+    for (DWORD attempt = 1; attempt <= kAttempts; ++attempt) {
+        HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_READ | GENERIC_WRITE,
+                                   0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hPipe == INVALID_HANDLE_VALUE) {
+            lastError = GetLastError();
+            if (lastError == ERROR_PIPE_BUSY) {
+                WaitNamedPipeW(ipc::PIPE_NAME, kBusyWaitMs);
+                continue;
+            }
+            FACELOGIN_ERROR(L"Database reload connection failed (attempt %lu/%lu): %lu",
+                            attempt, kAttempts, lastError);
+            break;
+        }
+
+        DWORD readMode = PIPE_READMODE_MESSAGE;
+        SetNamedPipeHandleState(hPipe, &readMode, nullptr, nullptr);
+
+        std::wstring message(ipc::MSG_RELOAD_DB);
+        message.push_back(L'\0');
+        const DWORD expectedBytes =
+            static_cast<DWORD>(message.size() * sizeof(wchar_t));
+        DWORD written = 0;
+        const BOOL writeOk = WriteFile(hPipe, message.c_str(), expectedBytes,
+                                       &written, nullptr);
+        if (!writeOk || written != expectedBytes) {
+            lastError = writeOk ? ERROR_WRITE_FAULT : GetLastError();
+            FACELOGIN_WARN(L"Database reload write failed (attempt %lu/%lu): %lu",
+                           attempt, kAttempts, lastError);
+            CloseHandle(hPipe);
+            Sleep(50);
+            continue;
+        }
+
+        DWORD bytesAvailable = 0;
+        bool pipeBroken = false;
+        for (DWORD waited = 0; waited < kReplyTimeoutMs; waited += 25) {
+            if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
+                lastError = GetLastError();
+                pipeBroken = true;
+                break;
+            }
+            if (bytesAvailable > 0) break;
+            Sleep(25);
+        }
+
+        if (!pipeBroken && bytesAvailable > 0) {
+            wchar_t responseBuffer[64] = {};
+            DWORD bytesRead = 0;
+            if (ReadFile(hPipe, responseBuffer,
+                         static_cast<DWORD>(sizeof(responseBuffer) - sizeof(wchar_t)),
+                         &bytesRead, nullptr) && bytesRead > 0) {
+                size_t responseLength = bytesRead / sizeof(wchar_t);
+                while (responseLength > 0 &&
+                       responseBuffer[responseLength - 1] == L'\0') {
+                    --responseLength;
+                }
+                const std::wstring response(responseBuffer, responseLength);
+                CloseHandle(hPipe);
+                if (response == ipc::MSG_RELOAD_OK) {
+                    FACELOGIN_INFO(L"Service confirmed database reload");
+                    return true;
+                }
+                FACELOGIN_ERROR(L"Service rejected database reload: %s",
+                                response.c_str());
+                return false;
+            }
+            lastError = GetLastError();
+        } else if (!pipeBroken) {
+            lastError = ERROR_TIMEOUT;
+        }
+
+        FACELOGIN_WARN(L"Database reload acknowledgement failed (attempt %lu/%lu): %lu",
+                       attempt, kAttempts, lastError);
         CloseHandle(hPipe);
+        Sleep(50);
     }
+
+    FACELOGIN_ERROR(L"users.dat was saved but the service did not confirm reload: %lu",
+                    lastError);
+    return false;
 }
 
 std::string EnrollmentWizard::GetUserSid() const {
@@ -1247,17 +1327,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
 
     if (!m_store.SaveDatabase()) { FACELOGIN_ERROR(L"Failed to save database"); return false; }
 
-    // Notify service to reload database
-    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_WRITE, 0, nullptr,
-                               OPEN_EXISTING, 0, nullptr);
-    if (hPipe != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        std::wstring msg(ipc::MSG_RELOAD_DB);
-        msg.push_back(L'\0');
-        WriteFile(hPipe, msg.c_str(), static_cast<DWORD>(msg.size() * sizeof(wchar_t)),
-                  &written, nullptr);
-        CloseHandle(hPipe);
-    }
+    const bool reloadConfirmed = NotifyServiceReload();
 
     // Capture buffer consumed — reset it so the next capture starts clean.
     // Without this, a re-capture of the same angle would see the leftover
@@ -1266,7 +1336,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password, bool pas
     m_angleSampleCounts[0] = m_angleSampleCounts[1] = m_angleSampleCounts[2] = 0;
     m_livenessPassed = false;
     m_livenessChecking = false;
-    return true;
+    return reloadConfirmed;
 }
 
 
@@ -1315,16 +1385,14 @@ bool EnrollmentWizard::DeleteFace(int faceId) {
     m_store.LoadDatabase();
     if (!m_store.DeleteFace(m_sid, static_cast<uint32_t>(faceId))) return false;
     if (!m_store.SaveDatabase()) return false;
-    NotifyServiceReload();
-    return true;
+    return NotifyServiceReload();
 }
 
 bool EnrollmentWizard::ClearAllFaces() {
     m_store.LoadDatabase();
     if (!m_store.ClearAllFaces(m_sid)) return false;
     if (!m_store.SaveDatabase()) return false;
-    NotifyServiceReload();
-    return true;
+    return NotifyServiceReload();
 }
 
 bool EnrollmentWizard::RenameFace(int faceId, const std::wstring& label) {
@@ -1332,8 +1400,7 @@ bool EnrollmentWizard::RenameFace(int faceId, const std::wstring& label) {
     m_store.LoadDatabase();
     if (!m_store.RenameFace(m_sid, static_cast<uint32_t>(faceId), label)) return false;
     if (!m_store.SaveDatabase()) return false;
-    NotifyServiceReload();
-    return true;
+    return NotifyServiceReload();
 }
 
 // Detect a stale account-type record (symmetric MSA ↔ local). We never trust
@@ -1455,12 +1522,12 @@ bool EnrollmentWizard::RefreshAccountIdentity(const std::wstring& password) {
         return false;
     }
 
-    NotifyServiceReload();
+    const bool reloadConfirmed = NotifyServiceReload();
     FACELOGIN_INFO(L"RefreshAccountIdentity: refreshed identity of %s (UPN=%s%s, faces preserved)",
                    m_username.c_str(),
                    newUpn.empty() ? L"<cleared>" : newUpn.c_str(),
                    state == 2 ? L", MSA" : L", local");
-    return true;
+    return reloadConfirmed;
 }
 
 // Dismiss path for the stale-account prompt. Unlike RefreshAccountIdentity
@@ -1506,10 +1573,10 @@ bool EnrollmentWizard::ClearStaleAccountUpn() {
         return false;
     }
 
-    NotifyServiceReload();
+    const bool reloadConfirmed = NotifyServiceReload();
     FACELOGIN_INFO(L"ClearStaleAccountUpn: cleared stale MSA UPN for %s (faces=%zu, password untouched)",
                    rec.username.c_str(), rec.faces.size());
-    return true;
+    return reloadConfirmed;
 }
 
 bool EnrollmentWizard::AutoRepairEmptyUpnOnStartup() {
@@ -1555,8 +1622,7 @@ bool EnrollmentWizard::AutoRepairEmptyUpnOnStartup() {
         FACELOGIN_ERROR(L"AutoRepairEmptyUpnOnStartup: save failed");
         return false;
     }
-    NotifyServiceReload();
-    return true;
+    return NotifyServiceReload();
 }
 
 // ============================================================================
@@ -1640,7 +1706,10 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
 
         if (writeOk && written == expectedBytes) {
             DWORD bytesAvailable = 0;
-            for (DWORD waited = 0; waited < 10000; waited += 50) {
+            // A service-mode CONFIG_RELOAD can replace a preloaded worker so
+            // the selected camera backend takes effect before acknowledging.
+            // Allow its bounded startup handshake to complete.
+            for (DWORD waited = 0; waited < 25000; waited += 50) {
                 if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
                     break;
                 }

@@ -357,6 +357,15 @@ body{
     </div>
 
     <div class="field">
+      <label>锁屏摄像头后端 (实验性 A/B)</label>
+      <select id="cfg-camera-backend">
+        <option value="dshow">DirectShow（默认，Session 0 兼容模式）</option>
+        <option value="mf">Media Foundation（仅用于对比测试）</option>
+      </select>
+      <p class="dim" style="margin-top:4px;font-size:11px">只改变锁屏认证子进程；录入预览仍使用 Media Foundation。若 MF 不能打开相机，切回 DirectShow 并重新锁屏测试。</p>
+    </div>
+
+    <div class="field">
       <label>活体检测 (Liveness Method)</label>
       <select id="cfg-liveness" onchange="onLivenessChange()">
         <option value="antispoof">反欺诈 (Anti-Spoof)</option>
@@ -624,6 +633,7 @@ function loadSettings() {
     document.getElementById('cfg-liveness').value = cfg.liveness_method || 'antispoof';
     document.getElementById('cfg-rotation').value = String(cfg.camera_rotation || 0);
     document.getElementById('cfg-low-light').checked = !!cfg.low_light_enhance;
+    document.getElementById('cfg-camera-backend').value = cfg.camera_backend === 'mf' ? 'mf' : 'dshow';
 
     // Populate the camera dropdown from the enumerated devices.
     var camSel = document.getElementById('cfg-camera');
@@ -676,7 +686,8 @@ function onSaveSettings() {
     anti_spoof_threshold: parseFloat(document.getElementById('cfg-antispoof-threshold').value),
     low_light_enhance: document.getElementById('cfg-low-light').checked,
     camera_rotation: parseInt(document.getElementById('cfg-rotation').value) || 0,
-    camera_device: document.getElementById('cfg-camera').value
+    camera_device: document.getElementById('cfg-camera').value,
+    camera_backend: document.getElementById('cfg-camera-backend').value
   };
   try {
     var ok = H.SetConfig(JSON.stringify(cfg));

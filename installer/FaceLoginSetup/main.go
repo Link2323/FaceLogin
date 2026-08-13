@@ -57,7 +57,7 @@ func main() {
 	//
 	//   internal.ConfigUpgradeEnabled = true   // A: sync thresholds
 	//   internal.ConfigUpgradeForcedDefaults = map[string]any{
-	//       "match_threshold":      0.30,   // threshold changed in this release
+	//       "match_threshold":      0.80,   // calibrated 512-D production default
 	//       "anti_spoof_threshold": 0.281,
 	//   }
 	//
