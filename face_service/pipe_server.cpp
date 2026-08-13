@@ -141,7 +141,8 @@ bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
     m_hPipe = CreateNamedPipeW(
         name,
         PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT |
+            PIPE_REJECT_REMOTE_CLIENTS,
         1,                                          // Max 1 instance
         ipc::PIPE_BUFFER_SIZE,
         ipc::PIPE_BUFFER_SIZE,
@@ -166,9 +167,9 @@ bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
     return true;
 }
 
-bool PipeServer::WaitForClient(DWORD timeoutMs) {
+bool PipeServer::WaitForClient(DWORD timeoutMs, const wchar_t* pipeName) {
     if (m_shutdownRequested.load()) return false;
-    if (!CreatePipeInstance(timeoutMs)) return false;
+    if (!CreatePipeInstance(timeoutMs, pipeName)) return false;
 
     constexpr DWORD kPollIntervalMs = 25;
     DWORD waited = 0;
@@ -249,14 +250,28 @@ bool PipeServer::ReadMessage(std::wstring& outMessage, DWORD timeoutMs) {
         return false;
     }
 
-    // If we timed out with no data, treat as disconnect (caller will clean up).
+    // Polling window exhausted. Re-check once: a message that arrived just as
+    // the window closed must still be read, but a connected-and-silent client
+    // must NOT fall through to the synchronous ReadFile below — that would
+    // block forever and let one client hold the single pipe instance hostage
+    // (all later unlock attempts fail). Return a timeout instead; the caller
+    // disconnects and accepts the next client.
     DWORD bytesAvailAfter = 0, totalBytesAfter = 0;
     if (!PeekNamedPipe(m_hPipe, nullptr, 0, nullptr, &bytesAvailAfter, &totalBytesAfter)) {
         DWORD err = GetLastError();
         if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA ||
             err == ERROR_PIPE_NOT_CONNECTED) {
-            m_connected = false;
+            FACELOGIN_INFO(L"Pipe broken by client at read deadline");
+        } else {
+            FACELOGIN_ERROR(L"PeekNamedPipe failed at read deadline: %lu", err);
         }
+        m_connected = false;
+        return false;
+    }
+    if (bytesAvailAfter == 0) {
+        // Client is alive but silent past the deadline. Keep m_connected so
+        // the caller can Disconnect() cleanly; never block on ReadFile.
+        FACELOGIN_WARN(L"ReadMessage timed out after %lu ms with no data", timeoutMs);
         return false;
     }
 
@@ -270,6 +285,11 @@ bool PipeServer::ReadMessage(std::wstring& outMessage, DWORD timeoutMs) {
         DWORD err = GetLastError();
         if (err == ERROR_BROKEN_PIPE) {
             FACELOGIN_INFO(L"Pipe broken by client");
+        } else if (err == ERROR_MORE_DATA) {
+            // Message larger than the fixed buffer; the protocol has no
+            // fragmentation. Fail closed and let the caller disconnect.
+            FACELOGIN_ERROR(L"ReadMessage: message exceeds %u bytes; "
+                            L"closing connection", ipc::PIPE_BUFFER_SIZE);
         } else if (!result) {
             FACELOGIN_ERROR(L"ReadFile failed: %lu", err);
         }

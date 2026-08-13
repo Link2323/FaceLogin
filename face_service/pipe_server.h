@@ -12,7 +12,8 @@ namespace facelogin {
 // Uses synchronous I/O for message reads/writes. Connection acceptance is
 // polled in PIPE_NOWAIT mode so a service-stop request is never held hostage
 // by a synchronous ConnectNamedPipe call.
-// Security: SYSTEM + Administrators + current interactive user can connect.
+// Security: SYSTEM + Administrators + current interactive user can connect;
+// PIPE_REJECT_REMOTE_CLIENTS rejects remote clients at the transport level.
 
 class PipeServer {
 public:
@@ -25,8 +26,11 @@ public:
 
     // Create the named pipe and wait for a client connection. The wait is
     // bounded by timeoutMs and observes RequestShutdown() at short intervals.
-    // Returns true when a client has connected.
-    bool WaitForClient(DWORD timeoutMs = 30000);
+    // pipeName overrides ipc::PIPE_NAME (dev/test tools only, to avoid
+    // colliding with a live service's single instance); nullptr = production
+    // name. Returns true when a client has connected.
+    bool WaitForClient(DWORD timeoutMs = 30000,
+                       const wchar_t* pipeName = nullptr);
 
     // Create the named pipe instance (security descriptor + handle) WITHOUT
     // blocking for a client. Separated from WaitForClient so the create→close
