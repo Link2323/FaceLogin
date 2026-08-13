@@ -62,6 +62,7 @@ private:
     int m_height = 720;
     bool m_initialized = false;
     bool m_isNV12 = true;
+    bool m_mfRefHeld = false;
     // Consecutive GrabFrame failures. When a camera stalls after system resume
     // (low-power recovery), ReadSample keeps failing on a stale SourceReader;
     // after kMaxConsecutiveFailures we self-shutdown so the caller re-inits.

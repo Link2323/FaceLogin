@@ -95,6 +95,7 @@ public:
 
     static bool InitializeCOM();
     static void ShutdownCOM();
+    static std::vector<CameraDeviceInfo> ListCameras();
 
 private:
     static bool   s_comInitialized;

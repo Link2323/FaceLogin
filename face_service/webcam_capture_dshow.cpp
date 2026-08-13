@@ -3,6 +3,7 @@
 #include <oaidl.h>
 #include <oleauto.h>
 #include <new>
+#include <utility>
 
 #pragma comment(lib, "strmiids.lib")
 
@@ -251,6 +252,62 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
     // initialized" line at the end of Initialize() is the INFO-level summary.
     FACELOGIN_DEBUG(L"DS: found video capture device");
     return true;
+}
+
+std::vector<CameraDeviceInfo> WebcamCaptureDS::ListCameras() {
+    std::vector<CameraDeviceInfo> devices;
+    if (!InitializeCOM()) return devices;
+
+    ICreateDevEnum* devEnum = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
+                                  CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&devEnum));
+    if (FAILED(hr)) {
+        ShutdownCOM();
+        return devices;
+    }
+
+    IEnumMoniker* enumerator = nullptr;
+    hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory,
+                                        &enumerator, 0);
+    devEnum->Release();
+    if (FAILED(hr) || !enumerator) {
+        ShutdownCOM();
+        return devices;
+    }
+
+    IMoniker* moniker = nullptr;
+    ULONG fetched = 0;
+    while (enumerator->Next(1, &moniker, &fetched) == S_OK && fetched == 1) {
+        IPropertyBag* bag = nullptr;
+        if (SUCCEEDED(moniker->BindToStorage(nullptr, nullptr,
+                                             IID_PPV_ARGS(&bag)))) {
+            CameraDeviceInfo info;
+            VARIANT value;
+            VariantInit(&value);
+            if (SUCCEEDED(bag->Read(L"DevicePath", &value, nullptr)) &&
+                value.vt == VT_BSTR && value.bstrVal) {
+                info.devicePath = value.bstrVal;
+            }
+            VariantClear(&value);
+            VariantInit(&value);
+            if (SUCCEEDED(bag->Read(L"FriendlyName", &value, nullptr)) &&
+                value.vt == VT_BSTR && value.bstrVal) {
+                info.friendlyName = value.bstrVal;
+            }
+            VariantClear(&value);
+            bag->Release();
+            if (!info.devicePath.empty() || !info.friendlyName.empty()) {
+                devices.push_back(std::move(info));
+            }
+        }
+        moniker->Release();
+        moniker = nullptr;
+        fetched = 0;
+    }
+    enumerator->Release();
+    ShutdownCOM();
+    return devices;
 }
 
 // ============================================================================

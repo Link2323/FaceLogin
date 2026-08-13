@@ -70,10 +70,12 @@ bool WebcamCapture::Initialize(int preferredWidth, int preferredHeight,
         FACELOGIN_ERROR(L"Failed to initialize Media Foundation");
         return false;
     }
+    m_mfRefHeld = true;
 
     if (!FindCamera(devicePath, &m_pSource)) {
         FACELOGIN_ERROR(L"No webcam found%s", devicePath.empty() ? L"" : L" for configured device");
         ShutdownMF();
+        m_mfRefHeld = false;
         return false;
     }
 
@@ -85,6 +87,7 @@ bool WebcamCapture::Initialize(int preferredWidth, int preferredHeight,
         m_pSource->Release();
         m_pSource = nullptr;
         ShutdownMF();
+        m_mfRefHeld = false;
         return false;
     }
 
@@ -94,6 +97,7 @@ bool WebcamCapture::Initialize(int preferredWidth, int preferredHeight,
         m_pSource->Release();
         m_pSource = nullptr;
         ShutdownMF();
+        m_mfRefHeld = false;
         return false;
     }
 
@@ -471,6 +475,10 @@ void WebcamCapture::Shutdown() {
         m_pSource = nullptr;
     }
     m_initialized = false;
+    if (m_mfRefHeld) {
+        ShutdownMF();
+        m_mfRefHeld = false;
+    }
 }
 
 } // namespace facelogin
