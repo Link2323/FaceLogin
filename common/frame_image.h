@@ -423,10 +423,6 @@ inline void ExtractChip(const FrameImage& src, const FaceRect& rect,
             const long top = static_cast<long>(std::floor(sy));
             const double lr_frac = sx - left;
             const double tb_frac = sy - top;
-#ifdef EXTRACTCHIP_DEBUG
-            std::fprintf(stderr, "MYSAMPLE %d %d %.17g %.17g %ld %ld\n",
-                         r, c, sx, sy, left, top);
-#endif
 
             // dlib interpolate_bilinear strict in-range rule: the full 2×2
             // neighborhood must lie inside the source; otherwise black.
