@@ -73,19 +73,16 @@ AuthPipelineResult AuthPipeline::Run() {
                        m_config.antiSpoofThreshold, totalChecks, passRequired);
 
         const auto livenessStart = std::chrono::steady_clock::now();
-        int passCount = 0;
+        LivenessTiming timing{livenessStart};
         int totalChecked = 0;
         unsigned int bindingCount = 0;
         bool havePrevRect = false;
         FaceRect prevRect;
-        bool anyFaceSeen = false;
         bool livenessInferenceError = false;
         bool identityRejected = false;
         bool failFastEmpty = false;
         bool failFastAttack = false;
         std::wstring identityError;
-        auto noFaceStart = livenessStart;
-        auto noPassStart = livenessStart;
 
         while (totalChecked < totalChecks) {
             if (m_callbacks.isCancelled()) {
@@ -105,11 +102,10 @@ AuthPipelineResult AuthPipeline::Run() {
                 result.timedOut = true;
                 return result;
             }
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - livenessStart).count() >= 8) {
+            if (timing.WindowExpired(now)) {
                 break;
             }
-            if (!anyFaceSeen &&
-                std::chrono::duration<double>(now - noFaceStart).count() >= 2.5) {
+            if (timing.ShouldFailEmptyScene(now)) {
                 FACELOGIN_INFO(L"No face detected within 2.5s — failing fast (empty scene)");
                 failFastEmpty = true;
                 break;
@@ -127,10 +123,10 @@ AuthPipelineResult AuthPipeline::Run() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }
-            anyFaceSeen = true;
+            const auto faceNow = std::chrono::steady_clock::now();
+            timing.OnFaceDetected(faceNow);
 
-            if (passCount == 0 &&
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - noPassStart).count() >= 2.0) {
+            if (timing.ShouldFailPersistentAttack(faceNow)) {
                 FACELOGIN_INFO(L"PAD persistently below threshold for 2s — failing fast (likely attack)");
                 failFastAttack = true;
                 break;
@@ -200,17 +196,16 @@ AuthPipelineResult AuthPipeline::Run() {
             prevRect = faceRect;
             havePrevRect = true;
             if (score >= m_config.antiSpoofThreshold) {
-                ++passCount;
-                noPassStart = std::chrono::steady_clock::now();
+                timing.OnPadScore(true);
             }
             FACELOGIN_DEBUG(L"Anti-spoof frame %d: score=%.3f (pass=%d)",
-                            totalChecked, score, passCount);
+                            totalChecked, score, timing.PassCount());
             std::this_thread::sleep_for(std::chrono::milliseconds(60));
         }
 
         const bool livenessPassed = !failFastEmpty && !failFastAttack &&
             !livenessInferenceError && !identityRejected &&
-            totalChecked == totalChecks && passCount >= passRequired && bindingCount == 3;
+            totalChecked == totalChecks && timing.PassCount() >= passRequired && bindingCount == 3;
         if (livenessPassed) {
             FACELOGIN_INFO(L"Liveness passed — tail anchor bound, authentication evidence complete");
             result.succeeded = true;
@@ -218,12 +213,12 @@ AuthPipelineResult AuthPipeline::Run() {
         }
 
         FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
-                       passCount, totalChecked, passRequired);
+                       timing.PassCount(), totalChecked, passRequired);
         if (livenessInferenceError) {
             result.errorMessage = L"活体检测模块异常，请使用密码登录";
         } else if (identityRejected) {
             result.errorMessage = identityError;
-        } else if (!anyFaceSeen) {
+        } else if (!timing.AnyFaceSeen()) {
             result.errorMessage = L"未检测到人脸";
         } else {
             result.errorMessage = L"未通过活体检测，请使用真实人脸";
