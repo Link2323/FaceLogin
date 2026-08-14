@@ -9,6 +9,7 @@
 #include <condition_variable>
 
 #include "liveness_types.h"
+#include "model_failure.h"
 #include "onnx_models.h"
 #include "auth_worker_client.h"
 #include "webcam_capture_dshow.h"
@@ -94,7 +95,7 @@ private:
     void RequestModelLoad(const wchar_t* reason);
     void RequestModelUnload(const wchar_t* reason);
     std::shared_ptr<InferenceModels> AcquireModelsForAuth();
-    std::shared_ptr<InferenceModels> LoadInferenceModels(bool& padIntegrityFailed);
+    std::shared_ptr<InferenceModels> LoadInferenceModels(ModelLoadFailure& failureReason);
     std::shared_ptr<AuthWorkerClient> AcquireAuthWorkerForAuth();
     std::shared_ptr<AuthWorkerClient> LoadAuthenticationWorker(const AppConfig& config,
                                                                 std::wstring& errorMessage);
@@ -150,13 +151,13 @@ private:
     uint64_t m_loadedWorkerConfigGeneration = 0;
     unsigned int m_activeModelUsers = 0;
 
-    // True only when the mandatory anti-spoof (PAD) model failed an integrity
-    // (SHA-256) check — i.e. the file was tampered/corrupted, not merely a load
-    // error. Lets ProcessAuthRequest tell the user "可能被篡改" instead of the
-    // generic "模块不可用" so a tamper is visible on the lock screen, not just
-    // in the log. Cleared when a complete bundle loads successfully or is
-    // intentionally returned to the unlocked idle state.
-    std::atomic<bool> m_padIntegrityFailed{false};
+    // Why the last model load failed, at category level: which model failed
+    // an integrity (SHA-256) check vs a plain load error. Lets the lock
+    // screen say "可能被篡改，重新安装" instead of a generic load error so a
+    // tamper is visible, not just logged. Cleared when a complete bundle
+    // loads successfully or the unlocked idle state intentionally drops the
+    // models.
+    std::atomic<ModelLoadFailure> m_modelLoadFailure{ModelLoadFailure::None};
     std::thread m_modelWorkerThread;
     std::mutex m_modelMutex;
     std::condition_variable m_modelCv;

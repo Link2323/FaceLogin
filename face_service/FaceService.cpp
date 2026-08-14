@@ -369,8 +369,8 @@ bool FaceService::Initialize() {
 // ============================================================================
 
 std::shared_ptr<FaceService::InferenceModels>
-FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
-    padIntegrityFailed = false;
+FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
+    failureReason = ModelLoadFailure::None;
     FACELOGIN_INFO(L"Loading inference models in background...");
 
     auto models = std::make_shared<InferenceModels>();
@@ -379,10 +379,12 @@ FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
     models->detector = std::make_unique<OnnxDetector>();
     const std::wstring detectorPath = m_modelsDir + L"\\det_10g_gnkps.onnx";
     if (!VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector")) {
+        failureReason = ModelLoadFailure::DetectorIntegrity;
         FACELOGIN_ERROR(L"SCRFD detector integrity check failed — face detection unavailable");
         return {};
     }
     if (!models->detector->Initialize(detectorPath)) {
+        failureReason = ModelLoadFailure::Load;
         FACELOGIN_ERROR(L"SCRFD detector failed to load — face detection unavailable");
         return {};
     }
@@ -393,10 +395,12 @@ FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
     const std::wstring recognizerPath = m_modelsDir + L"\\w600k_r50.onnx";
     if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
                               L"InsightFace w600k_r50 recognizer")) {
+        failureReason = ModelLoadFailure::RecognizerIntegrity;
         FACELOGIN_ERROR(L"ONNX recognizer integrity check failed — recognition unavailable");
         return {};
     }
     if (!models->recognizer->Initialize(recognizerPath)) {
+        failureReason = ModelLoadFailure::Load;
         FACELOGIN_ERROR(L"ONNX recognizer failed to load — recognition unavailable");
         return {};
     }
@@ -409,12 +413,13 @@ FaceService::LoadInferenceModels(bool& padIntegrityFailed) {
     const std::wstring miniFasV1SePath = m_modelsDir + L"\\MiniFASNetV1SE.onnx";
     if (!VerifyModelIntegrity(miniFasV2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") ||
         !VerifyModelIntegrity(miniFasV1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)")) {
-        padIntegrityFailed = true;
+        failureReason = ModelLoadFailure::PadIntegrity;
         FACELOGIN_ERROR(L"Anti-spoof model integrity check failed — authentication "
                         L"will remain disabled (fail-closed)");
         return {};
     }
     if (!models->antiSpoof->Initialize(miniFasV2Path, miniFasV1SePath)) {
+        failureReason = ModelLoadFailure::Load;
         FACELOGIN_ERROR(L"Anti-spoof model unavailable — authentication will remain disabled");
         return {};
     }
@@ -571,7 +576,7 @@ void FaceService::ModelWorkerLoop() {
             if (m_isServiceMode) workerToRelease = std::move(m_authWorker);
             else modelsToRelease = std::move(m_models);
             m_modelState = ModelState::Unloaded;
-            m_padIntegrityFailed.store(false);
+            m_modelLoadFailure.store(ModelLoadFailure::None);
             m_modelCv.notify_all();
             lock.unlock();
             modelsToRelease.reset();
@@ -596,7 +601,7 @@ void FaceService::ModelWorkerLoop() {
         lock.unlock();
 
         const auto loadStart = std::chrono::steady_clock::now();
-        bool padIntegrityFailed = false;
+        ModelLoadFailure loadFailure = ModelLoadFailure::None;
         std::shared_ptr<InferenceModels> loaded;
         std::shared_ptr<AuthWorkerClient> loadedWorker;
         std::wstring workerError;
@@ -618,7 +623,7 @@ void FaceService::ModelWorkerLoop() {
             if (m_isServiceMode) {
                 loadedWorker = LoadAuthenticationWorker(workerConfigSnapshot, workerError);
             }
-            else loaded = LoadInferenceModels(padIntegrityFailed);
+            else loaded = LoadInferenceModels(loadFailure);
         } catch (const std::exception& e) {
             if (m_isServiceMode) {
                 FACELOGIN_ERROR(L"Authentication worker launcher threw: %hs", e.what());
@@ -636,7 +641,7 @@ void FaceService::ModelWorkerLoop() {
         } else if (m_isServiceMode && loadedWorker && m_modelsWanted) {
             m_authWorker = loadedWorker;
             m_modelState = ModelState::Ready;
-            m_padIntegrityFailed.store(false);
+            m_modelLoadFailure.store(ModelLoadFailure::None);
             m_workerLoadError.clear();
             m_loadedWorkerConfigGeneration = workerConfigGeneration;
             published = true;
@@ -644,14 +649,14 @@ void FaceService::ModelWorkerLoop() {
             loaded->recognizer->SetLowLightEnhance(m_modelLowLightEnhance);
             m_models = loaded;
             m_modelState = ModelState::Ready;
-            m_padIntegrityFailed.store(false);
+            m_modelLoadFailure.store(ModelLoadFailure::None);
             published = true;
         } else if (!m_modelsWanted) {
             m_modelState = ModelState::Unloaded;
-            m_padIntegrityFailed.store(false);
+            m_modelLoadFailure.store(ModelLoadFailure::None);
         } else {
             m_modelState = ModelState::Failed;
-            m_padIntegrityFailed.store(padIntegrityFailed);
+            m_modelLoadFailure.store(loadFailure);
             if (m_isServiceMode) {
                 m_workerLoadError = workerError.empty()
                     ? L"认证工作进程启动失败，请使用密码登录"
@@ -1096,9 +1101,9 @@ bool FaceService::ProcessAuthRequest() {
     auto models = AcquireModelsForAuth();
     if (!models) {
         FACELOGIN_ERROR(L"Required models not loaded — cannot authenticate");
-        const wchar_t* loadError = m_padIntegrityFailed.load()
-            ? L"活体模型完整性校验失败，文件可能被篡改或损坏，请使用密码登录并重新安装 FaceLogin"
-            : L"服务模型加载失败，请使用密码登录并检查模型文件";
+        const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
+        const wchar_t* loadError = ModelLoadFailureMessage(
+            loadFailure == ModelLoadFailure::None ? ModelLoadFailure::Load : loadFailure);
         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(loadError));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);
@@ -1114,9 +1119,9 @@ bool FaceService::ProcessAuthRequest() {
     }
     if (!models->antiSpoof->IsInitialized()) {
         FACELOGIN_ERROR(L"Authentication refused: anti-spoof model is unavailable");
-        const wchar_t* message = m_padIntegrityFailed.load()
-            ? L"活体模型完整性校验失败，文件可能被篡改或损坏，请使用密码登录并重新安装 FaceLogin"
-            : L"活体检测模块不可用，请使用密码登录并检查模型文件";
+        const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
+        const wchar_t* message = ModelLoadFailureMessage(
+            loadFailure == ModelLoadFailure::None ? ModelLoadFailure::Load : loadFailure);
         m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(message));
         FlushFileBuffers(m_pipeServer->GetHandle());
         m_pipeServer->DrainOutput(5000);

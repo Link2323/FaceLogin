@@ -1,4 +1,5 @@
 #include "sha256_util.h"
+#include "model_failure.h"
 
 #include <windows.h>
 
@@ -39,9 +40,43 @@ private:
     std::filesystem::path m_path;
 };
 
+// Lock-screen copy for a failed model bundle must be category-specific
+// (detector/recognizer/PAD integrity vs a plain load error), actionable,
+// and identical for the worker and standalone paths (single mapping source).
+void TestModelFailureMessages() {
+    using facelogin::ModelLoadFailure;
+    const std::wstring detector =
+        facelogin::ModelLoadFailureMessage(ModelLoadFailure::DetectorIntegrity);
+    const std::wstring recognizer =
+        facelogin::ModelLoadFailureMessage(ModelLoadFailure::RecognizerIntegrity);
+    const std::wstring pad =
+        facelogin::ModelLoadFailureMessage(ModelLoadFailure::PadIntegrity);
+    const std::wstring load =
+        facelogin::ModelLoadFailureMessage(ModelLoadFailure::Load);
+    const std::wstring none =
+        facelogin::ModelLoadFailureMessage(ModelLoadFailure::None);
+
+    Check(detector.find(L"检测模型完整性校验失败") == 0 &&
+              detector.find(L"重新安装 FaceLogin") != std::wstring::npos,
+          "detector integrity copy names the category and the reinstall action");
+    Check(recognizer.find(L"识别模型完整性校验失败") == 0 &&
+              recognizer.find(L"重新安装 FaceLogin") != std::wstring::npos,
+          "recognizer integrity copy names the category and the reinstall action");
+    Check(pad.find(L"活体模型完整性校验失败") == 0 &&
+              pad.find(L"重新安装 FaceLogin") != std::wstring::npos,
+          "PAD integrity copy names the category and the reinstall action");
+    Check(load.find(L"认证模型加载失败") == 0 && load == none,
+          "generic load copy covers Load and unknown reasons");
+    Check(detector != recognizer && detector != pad && detector != load &&
+              recognizer != pad && recognizer != load && pad != load,
+          "each failure category has distinct lock-screen copy");
+}
+
 } // namespace
 
 int main() {
+    TestModelFailureMessages();
+
     TemporaryFile file;
     {
         std::ofstream output(file.Path(), std::ios::binary | std::ios::trunc);

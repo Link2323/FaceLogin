@@ -4,6 +4,7 @@
 #include "auth_worker_protocol.h"
 #include "webcam_capture_dshow.h"
 #include "onnx_models.h"
+#include "model_failure.h"
 #include "performance_affinity.h"
 #include "../common/data_path.h"
 #include "../common/logger.h"
@@ -62,11 +63,14 @@ bool SendFatal(Channel& channel, const std::wstring& message) {
 }
 
 std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
-                                         const WorkerConfig& config) {
+                                         const WorkerConfig& config,
+                                         ModelLoadFailure& failure) {
     auto models = std::make_unique<WorkerModels>();
+    failure = ModelLoadFailure::Load;
 
     const std::wstring detectorPath = modelsDir + L"\\det_10g_gnkps.onnx";
     if (!VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector")) {
+        failure = ModelLoadFailure::DetectorIntegrity;
         return {};
     }
     models->detector = std::make_unique<OnnxDetector>();
@@ -75,6 +79,7 @@ std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
     const std::wstring recognizerPath = modelsDir + L"\\w600k_r50.onnx";
     if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
                               L"InsightFace w600k_r50 recognizer")) {
+        failure = ModelLoadFailure::RecognizerIntegrity;
         return {};
     }
     models->recognizer = std::make_unique<OnnxRecognizer>();
@@ -85,10 +90,12 @@ std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
     const std::wstring v1SePath = modelsDir + L"\\MiniFASNetV1SE.onnx";
     if (!VerifyModelIntegrity(v2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") ||
         !VerifyModelIntegrity(v1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)")) {
+        failure = ModelLoadFailure::PadIntegrity;
         return {};
     }
     models->antiSpoof = std::make_unique<OnnxAntiSpoof>();
     if (!models->antiSpoof->Initialize(v2Path, v1SePath)) return {};
+    failure = ModelLoadFailure::None;
     return models;
 }
 
@@ -165,9 +172,10 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     FACELOGIN_INFO(L"=== Authentication worker starting (pid=%lu, DirectShow) ===",
                    GetCurrentProcessId());
 
-    auto models = LoadModels(dataDir + L"\\models", config);
+    ModelLoadFailure modelFailure = ModelLoadFailure::Load;
+    auto models = LoadModels(dataDir + L"\\models", config, modelFailure);
     if (!models || !models->detector || !models->recognizer || !models->antiSpoof) {
-        SendFatal(channel, L"认证模型加载失败，请使用密码登录");
+        SendFatal(channel, ModelLoadFailureMessage(modelFailure));
         return ERROR_FILE_NOT_FOUND;
     }
 
