@@ -178,6 +178,9 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         SendFatal(channel, ModelLoadFailureMessage(modelFailure));
         return ERROR_FILE_NOT_FOUND;
     }
+    // Pay ORT's first-run cost (arena/thread-pool/per-shape planning) during
+    // preload, not on the first authenticated frame.
+    WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);
 
     // DirectShow graph construction does not activate a device until
     // initializeCamera() runs after AUTH_START.

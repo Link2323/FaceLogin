@@ -148,4 +148,14 @@ private:
     bool m_initialized = false;
 };
 
+// One throwaway inference per session so ORT's first-run costs (arena growth,
+// thread-pool spin-up, per-input-shape memory planning) are paid during model
+// preload instead of on the first authentication frame. Dummy inputs reuse the
+// exact production input shapes; results are discarded and never influence an
+// auth decision. Warmup failures only log — the auth path stays the fail-closed
+// authority for real inference errors.
+void WarmupInference(OnnxDetector& detector,
+                     OnnxRecognizer& recognizer,
+                     OnnxAntiSpoof& antiSpoof);
+
 } // namespace facelogin

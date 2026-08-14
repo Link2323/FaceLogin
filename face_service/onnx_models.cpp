@@ -4,6 +4,7 @@
 #include <fstream>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <thread>
@@ -700,6 +701,33 @@ float OnnxAntiSpoof::Predict(const FrameImage& image,
     FACELOGIN_DEBUG(L"Dual MiniFAS PAD: V2=%.4f V1SE=%.4f fused=%.4f",
                     v2Score, v1SeScore, fusedScore);
     return fusedScore;
+}
+
+void WarmupInference(OnnxDetector& detector,
+                     OnnxRecognizer& recognizer,
+                     OnnxAntiSpoof& antiSpoof) {
+    const auto start = std::chrono::steady_clock::now();
+
+    // Mid-gray dummies keep low-light enhance a no-op (mean luma 128, well
+    // above the 40 darkness threshold) and reproduce the production tensor
+    // shapes: the 640×480 frame feeds the same 512×512 detector preprocess and
+    // MiniFAS crop path, the 112×112 chip the recognizer input.
+    FrameImage frame(480, 640);
+    std::fill(frame.raw(), frame.raw() + frame.size() * 3, 128);
+    FrameImage chip(112, 112);
+    std::fill(chip.raw(), chip.raw() + chip.size() * 3, 128);
+
+    detector.DetectLargestFace(frame);   // uniform gray — nullopt is expected
+    if (antiSpoof.Predict(frame, FaceRect(220, 140, 419, 339)) < 0.0f) {
+        FACELOGIN_WARN(L"Warmup PAD inference failed");
+    }
+    if (recognizer.ComputeEmbedding(chip).empty()) {
+        FACELOGIN_WARN(L"Warmup recognizer inference failed");
+    }
+
+    FACELOGIN_INFO(L"Inference warmup: %.1f ms",
+                   std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - start).count());
 }
 
 } // namespace facelogin

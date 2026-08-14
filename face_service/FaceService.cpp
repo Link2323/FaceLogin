@@ -425,6 +425,9 @@ FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
     }
 
     FACELOGIN_INFO(L"Anti-spoof models loaded (MiniFASNetV2 + MiniFASNetV1SE)");
+    // Standalone runs inference in this process: warm the sessions during the
+    // background load so the first auth frame doesn't pay ORT's first-run cost.
+    WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);
     FACELOGIN_INFO(L"All inference models loaded");
     return models;
 }
