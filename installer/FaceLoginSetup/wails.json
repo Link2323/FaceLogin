@@ -6,6 +6,12 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "Info": {
+    "productName": "FaceLogin Setup",
+    "productVersion": "1.7.0",
+    "fileVersion": "1.7.0",
+    "fileDescription": "FaceLogin installer"
+  },
   "author": {
     "name": "Sylvan",
     "email": "sylvan@localhost"
