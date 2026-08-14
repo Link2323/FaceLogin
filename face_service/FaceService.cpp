@@ -1139,8 +1139,10 @@ bool FaceService::ProcessAuthRequest() {
     std::wstring initialSid;
 
     AuthPipelineCallbacks callbacks;
-    callbacks.grabFrame = [this](FrameImage& frame) {
-        return m_webcamDS && m_webcamDS->GrabFrame(frame);
+    callbacks.grabFrame = [this](FrameImage& frame, unsigned long long& frameSequence) {
+        frameSequence = 0;
+        if (!m_webcamDS) return false;
+        return m_webcamDS->GrabFrame(frame, &frameSequence);
     };
     callbacks.isCancelled = [this]() {
         return !m_running;

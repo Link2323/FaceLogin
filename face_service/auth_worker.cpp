@@ -240,8 +240,9 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
 
     std::atomic<bool> channelHealthy{true};
     AuthPipelineCallbacks callbacks;
-    callbacks.grabFrame = [&camera](FrameImage& frame) {
-        return camera->GrabFrame(frame);
+    callbacks.grabFrame = [&camera](FrameImage& frame, unsigned long long& frameSequence) {
+        frameSequence = 0;
+        return camera->GrabFrame(frame, &frameSequence);
     };
     callbacks.isCancelled = [&channelHealthy]() { return !channelHealthy.load(); };
     callbacks.isClientDisconnected = []() { return false; };

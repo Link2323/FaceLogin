@@ -1,6 +1,7 @@
 #include "auth_pipeline.h"
 
 #include "../common/logger.h"
+#include "exposure_warmup.h"
 
 #include <algorithm>
 #include <chrono>
@@ -39,8 +40,9 @@ AuthPipelineResult AuthPipeline::Run() {
     try {
         const auto pipelineStart = std::chrono::steady_clock::now();
         bool firstFrameLogged = false;
-        const auto grabFrame = [this, pipelineStart, &firstFrameLogged](FrameImage& frame) {
-            const bool grabbed = m_callbacks.grabFrame(frame);
+        const auto grabFrame = [this, pipelineStart, &firstFrameLogged](
+                                   FrameImage& frame, unsigned long long& frameSequence) {
+            const bool grabbed = m_callbacks.grabFrame(frame, frameSequence);
             if (grabbed && !firstFrameLogged) {
                 firstFrameLogged = true;
                 FACELOGIN_INFO(L"Auth pipeline first valid frame %.1f ms after camera ready",
@@ -50,20 +52,46 @@ AuthPipelineResult AuthPipeline::Run() {
             return grabbed;
         };
 
-        // Let auto-exposure settle. Keep this timing and count identical to
-        // the old in-process path; moving the loop to a worker must not change
-        // PAD timing or the calibrated recognition behavior.
-        FrameImage frame;
-        for (int i = 0; i < 3; ++i) {
+        // Let auto-exposure settle before the first PAD frame. Adaptive gate
+        // (see exposure_warmup.h): sample the mean luma of distinct frames
+        // and proceed once a 2-sample window is stable, or at the 10-sample
+        // cap. A settled scene opens the gate after two distinct frames —
+        // already stricter than the legacy 3-iteration discard, which usually
+        // completed before the camera's first frame — while slow-converging
+        // scenes (cold start, dark room) wait for real stability instead of
+        // proceeding with under-exposed frames. Failed grabs and duplicate
+        // buffered frames (same frame sequence) don't count as samples;
+        // maxAttempts bounds a dead camera. Mean luma is rotation-invariant,
+        // so warmup frames skip RotateFrame. The 10 ms poll pace keeps the
+        // alignment waste to a fresh 30 fps frame at ~5 ms average.
+        const ExposureWarmupConfig warmupConfig;
+        ExposureWarmup warmup(warmupConfig);
+        const auto warmupStart = std::chrono::steady_clock::now();
+        unsigned long long lastSeq = 0;
+        bool haveLastSeq = false;
+        for (int attempts = 0; attempts < warmupConfig.maxAttempts; ++attempts) {
             if (m_callbacks.isCancelled()) {
                 result.cancelled = true;
                 return result;
             }
-            if (grabFrame(frame)) {
-                RotateFrame(frame, m_config.cameraRotation);
+            FrameImage warmFrame;
+            unsigned long long seq = 0;
+            if (!grabFrame(warmFrame, seq) || (haveLastSeq && seq == lastSeq)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            haveLastSeq = true;
+            lastSeq = seq;
+            if (warmup.Feed(MeanLuma(warmFrame))) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        FACELOGIN_INFO(L"Exposure warmup: %d samples, %.0f ms%s",
+                       warmup.Samples(),
+                       std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - warmupStart).count(),
+                       warmup.Settled() ? L" — stable" : L" — cap reached, proceeding");
 
         m_callbacks.reportStatus(L"正在识别...");
         const auto startTime = std::chrono::steady_clock::now();
@@ -112,7 +140,8 @@ AuthPipelineResult AuthPipeline::Run() {
             }
 
             FrameImage asFrame;
-            if (!grabFrame(asFrame)) {
+            unsigned long long asSeq = 0;
+            if (!grabFrame(asFrame, asSeq)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }

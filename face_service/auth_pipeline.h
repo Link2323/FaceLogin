@@ -27,9 +27,12 @@ struct BindingDecision {
 };
 
 struct AuthPipelineCallbacks {
-    // Returns one raw RGB camera frame. AuthPipeline applies cameraRotation
+    // Returns one raw RGB camera frame. frameSequence receives the camera's
+    // monotonic frame counter for that grab; identical consecutive values
+    // mean the same buffered frame was returned again (the exposure warmup
+    // samples only distinct frames). AuthPipeline applies cameraRotation
     // immediately after a successful grab so every stage sees the same image.
-    std::function<bool(FrameImage&)> grabFrame;
+    std::function<bool(FrameImage&, unsigned long long& frameSequence)> grabFrame;
     std::function<bool()> isCancelled;
     std::function<bool()> isClientDisconnected;
     std::function<void(const std::wstring&)> reportStatus;

@@ -104,6 +104,7 @@ STDMETHODIMP WebcamCaptureDS::GrabberCB::BufferCB(double, BYTE* buffer, long len
 
     memcpy(m_parent->m_frameBuffer, buffer, len);
     m_parent->m_frameReady = true;
+    ++m_parent->m_frameSeq;
 
     LeaveCriticalSection(&m_parent->m_frameCs);
     return S_OK;
@@ -492,7 +493,7 @@ void WebcamCaptureDS::Pause() {
     }
 }
 
-bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame) {
+bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame, unsigned long long* frameSequence) {
     if (!m_initialized) return false;
 
     EnterCriticalSection(&m_frameCs);
@@ -525,6 +526,8 @@ bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame) {
             dst.blue  = pixel[0];   // byte 0 of BGR = B
         }
     }
+
+    if (frameSequence) *frameSequence = m_frameSeq;
 
     LeaveCriticalSection(&m_frameCs);
     return true;

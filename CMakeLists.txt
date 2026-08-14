@@ -63,3 +63,4 @@ add_development_tool(tools/credential_provider_policy CredentialProviderInteract
 add_development_tool(tools/model_integrity ModelIntegrityTest)
 add_development_tool(tools/ipc_protocol IpcProtocolTest)
 add_development_tool(tools/liveness_timing LivenessTimingTest)
+add_development_tool(tools/exposure_warmup ExposureWarmupTest)

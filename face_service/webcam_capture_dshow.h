@@ -93,7 +93,13 @@ public:
     bool Initialize(int preferredWidth = 1280, int preferredHeight = 720,
                     const std::wstring& devicePath = L"");
     bool IsInitialized() const { return m_initialized; }
-    bool GrabFrame(FrameImage& outFrame);
+    // frameSequence (optional): receives the sequence number of the frame
+    // that was copied out, read under the same lock as the copy. The counter
+    // is monotonic for the lifetime of the object and is NOT reset by
+    // Pause()/resume — identical consecutive values mean the same buffered
+    // frame was returned again, which callers sampling per-frame statistics
+    // (exposure warmup) use to dedupe.
+    bool GrabFrame(FrameImage& outFrame, unsigned long long* frameSequence = nullptr);
     void Pause();    // stop graph → camera LED off
     void Shutdown();
 
@@ -138,6 +144,7 @@ private:
     BYTE*  m_frameBuffer = nullptr;
     long   m_frameSize   = 0;
     bool   m_frameReady  = false;
+    unsigned long long m_frameSeq = 0;   // bumped per delivered frame; monotonic
     int    m_width       = 1280;
     int    m_height      = 720;
     bool   m_initialized = false;
