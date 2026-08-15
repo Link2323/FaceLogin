@@ -105,13 +105,72 @@ AuthPipelineResult AuthPipeline::Run() {
         int totalChecked = 0;
         unsigned int bindingCount = 0;
         bool havePrevRect = false;
-        FaceRect prevRect;
+        FaceRect prevRect{};
         bool livenessInferenceError = false;
         bool identityRejected = false;
         bool failFastEmpty = false;
         bool failFastAttack = false;
         std::wstring identityError;
 
+        // Software-pipelined frame supply: while PAD(N) runs on its async
+        // thread, the main thread grabs and detects frame N+1 into a single
+        // prefetch slot, so PAD / embedding / binding IPC hide inside the
+        // next frame's capture+detection time. Per-frame verdict logic and
+        // ordering are unchanged; only the schedule moves.
+        struct Prefetch {
+            bool valid = false;
+            FrameImage frame;                       // already rotated
+            unsigned long long seq = 0;
+            std::optional<OnnxDetector::Detection> det;
+            std::chrono::steady_clock::time_point grabWall{};
+        };
+
+        // Pacing invariant (explicit, auditable, stricter than the legacy
+        // implicit "sleep 60 + processing time"): consecutive COUNTED frames
+        // are grabbed >= 60 ms apart with strictly increasing camera sequence
+        // numbers. Discarded frames (empty embedding / Retry / IoU skip) never
+        // move the anchor, so later grabs automatically satisfy the guard.
+        std::chrono::steady_clock::time_point lastCountedWall{};
+        unsigned long long lastCountedSeq = 0;
+        bool haveLastCounted = false;
+        double minCountedGrabIntervalMs = 0.0;
+        bool haveMinInterval = false;
+
+        // Returns false on cancel or grab failure; the caller re-checks
+        // isCancelled() to distinguish. Failed grabs keep the legacy 30 ms
+        // retry pace outside this helper's loop.
+        const auto grabWithPacing = [&](Prefetch& out) {
+            for (;;) {
+                if (m_callbacks.isCancelled()) return false;
+                if (haveLastCounted) {
+                    const auto deadline = lastCountedWall + std::chrono::milliseconds(60);
+                    if (std::chrono::steady_clock::now() < deadline) {
+                        std::this_thread::sleep_until(deadline);
+                        continue;                   // re-check cancel after waking
+                    }
+                }
+                FrameImage frame;
+                unsigned long long seq = 0;
+                if (!grabFrame(frame, seq)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    return false;
+                }
+                // Defensive dedup: the 60 ms guard guarantees a fresh 30 fps
+                // frame mathematically, but a stale buffered frame would
+                // silently violate the strictly-increasing-sequence invariant.
+                if (haveLastCounted && seq <= lastCountedSeq) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    continue;
+                }
+                RotateFrame(frame, m_config.cameraRotation);
+                auto det = m_detector.DetectLargestFace(frame);
+                const auto grabWall = std::chrono::steady_clock::now();
+                out = Prefetch{ true, std::move(frame), seq, std::move(det), grabWall };
+                return true;
+            }
+        };
+
+        Prefetch next;
         while (totalChecked < totalChecks) {
             if (m_callbacks.isCancelled()) {
                 result.cancelled = true;
@@ -139,16 +198,19 @@ AuthPipelineResult AuthPipeline::Run() {
                 break;
             }
 
-            FrameImage asFrame;
-            unsigned long long asSeq = 0;
-            if (!grabFrame(asFrame, asSeq)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                continue;
+            if (!next.valid) {
+                if (!grabWithPacing(next)) {
+                    if (m_callbacks.isCancelled()) {
+                        result.cancelled = true;
+                        return result;
+                    }
+                    continue;                       // grab failure: legacy 30 ms pace already served
+                }
             }
-            RotateFrame(asFrame, m_config.cameraRotation);
+            Prefetch cur = std::move(next);
+            next = Prefetch{};
 
-            auto asDet = m_detector.DetectLargestFace(asFrame);
-            if (!asDet) {
+            if (!cur.det) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }
@@ -161,19 +223,19 @@ AuthPipelineResult AuthPipeline::Run() {
                 break;
             }
 
-            const FaceRect faceRect(static_cast<long>(asDet->x1),
-                                    static_cast<long>(asDet->y1),
-                                    static_cast<long>(asDet->x2),
-                                    static_cast<long>(asDet->y2));
+            const FaceRect faceRect(static_cast<long>(cur.det->x1),
+                                    static_cast<long>(cur.det->y1),
+                                    static_cast<long>(cur.det->x2),
+                                    static_cast<long>(cur.det->y2));
             const bool isAnchor = bindingCount == 0 || totalChecked == totalChecks - 1;
             const bool isConsensusFrame = totalChecked == 2;
 
-            auto scoreFuture = std::async(std::launch::async, [&] {
-                return m_antiSpoof.Predict(asFrame, faceRect);
+            auto scoreFuture = std::async(std::launch::async, [&cur, &faceRect, this] {
+                return m_antiSpoof.Predict(cur.frame, faceRect);
             });
 
             if (isAnchor || isConsensusFrame) {
-                auto embedding = m_recognizer.ComputeEmbedding(asFrame, asDet->kps);
+                auto embedding = m_recognizer.ComputeEmbedding(cur.frame, cur.det->kps);
                 if (embedding.empty()) {
                     scoreFuture.get();
                     std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -214,6 +276,43 @@ AuthPipelineResult AuthPipeline::Run() {
                 }
             }
 
+            // Advance the pacing anchor to the frame being consumed BEFORE
+            // prefetching N+1: the guard for N+1 must measure from frame N,
+            // not the stale N-1 anchor. Optimistic update is safe because
+            // every path from here that skips counting frame N (invalid PAD
+            // score, cancel) terminates the loop outright.
+            if (haveLastCounted) {
+                const double intervalMs = std::chrono::duration<double, std::milli>(
+                    cur.grabWall - lastCountedWall).count();
+                if (!haveMinInterval || intervalMs < minCountedGrabIntervalMs) {
+                    minCountedGrabIntervalMs = intervalMs;
+                    haveMinInterval = true;
+                }
+            }
+            lastCountedWall = cur.grabWall;
+            lastCountedSeq = cur.seq;
+            haveLastCounted = true;
+
+            // Overlap window: PAD(N) is running while the main thread
+            // produces frame N+1's capture+detection. The +1 accounts for
+            // this frame being counted as totalChecked+1; skip prefetch when
+            // it would be the last frame. A wasted prefetch (this frame later
+            // fails on an invalid PAD score) costs CPU only, never latency.
+            if (totalChecked + 1 < totalChecks) {
+                Prefetch candidate;
+                if (grabWithPacing(candidate)) {
+                    next = std::move(candidate);
+                } else if (m_callbacks.isCancelled()) {
+                    // The helper only fails after a cancel check or a grab
+                    // failure; cancel must abort before frame N is counted.
+                    scoreFuture.get();
+                    result.cancelled = true;
+                    return result;
+                }
+                // Grab failure: leave the slot empty — frame N still counts
+                // below, and the next iteration grabs fresh at loop pace.
+            }
+
             const float score = scoreFuture.get();
             if (!std::isfinite(score) || score < 0.0f || score > 1.0f) {
                 FACELOGIN_ERROR(L"Anti-spoof inference returned invalid score: %.4f", score);
@@ -229,7 +328,11 @@ AuthPipelineResult AuthPipeline::Run() {
             }
             FACELOGIN_DEBUG(L"Anti-spoof frame %d: score=%.3f (pass=%d)",
                             totalChecked, score, timing.PassCount());
-            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+
+        if (haveMinInterval) {
+            FACELOGIN_INFO(L"Anti-spoof frame pacing: min grab interval %.1f ms over %d counted frames (guard 60 ms)",
+                           minCountedGrabIntervalMs, totalChecked);
         }
 
         const bool livenessPassed = !failFastEmpty && !failFastAttack &&
