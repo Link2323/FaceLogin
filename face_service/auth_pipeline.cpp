@@ -52,6 +52,35 @@ AuthPipelineResult AuthPipeline::Run() {
             return grabbed;
         };
 
+        // Software-pipelined frame supply: while PAD(N) runs on its async
+        // thread, the main thread grabs and detects frame N+1 into a single
+        // prefetch slot, so PAD / embedding / binding IPC hide inside the
+        // next frame's capture+detection time. Per-frame verdict logic and
+        // ordering are unchanged; only the schedule moves.
+        struct Prefetch {
+            bool valid = false;
+            FrameImage frame;                       // already rotated
+            unsigned long long seq = 0;
+            std::optional<OnnxDetector::Detection> det;
+            std::chrono::steady_clock::time_point grabWall{};
+        };
+
+        // Pre-run SCRFD during exposure warmup: the warmup loop only consumes
+        // mean luma, so an async thread can detect the newest sample for
+        // free. When the gate opens, the freshest frame + detection seeds the
+        // prefetch slot, removing the first serial grab+detect from the
+        // critical path. The seed is a real, distinct, rotated camera frame
+        // and the first counted frame has no pacing anchor yet, so no
+        // invariant is touched. Seeds older than 400 ms (slow dark-room
+        // convergence) are discarded and the loop grabs fresh exactly like
+        // the legacy behavior.
+        constexpr double kSeedMaxAgeMs = 400.0;
+        Prefetch seed;
+        std::future<std::optional<OnnxDetector::Detection>> seedFuture;
+        FrameImage seedFrame;
+        unsigned long long seedSeq = 0;
+        std::chrono::steady_clock::time_point seedWall{};
+
         // Let auto-exposure settle before the first PAD frame. Adaptive gate
         // (see exposure_warmup.h): sample the mean luma of distinct frames
         // and proceed once a 2-sample window is stable, or at the 10-sample
@@ -82,6 +111,22 @@ AuthPipelineResult AuthPipeline::Run() {
             }
             haveLastSeq = true;
             lastSeq = seq;
+            if (seedFuture.valid() &&
+                seedFuture.wait_for(std::chrono::seconds(0))
+                    == std::future_status::ready) {
+                auto seedDet = seedFuture.get();
+                seed = Prefetch{ true, std::move(seedFrame), seedSeq,
+                                 std::move(seedDet), seedWall };
+            }
+            if (!seedFuture.valid()) {
+                seedFrame = warmFrame;               // luma already sampled; copy for detection
+                RotateFrame(seedFrame, m_config.cameraRotation);
+                seedSeq = seq;
+                seedWall = std::chrono::steady_clock::now();
+                seedFuture = std::async(std::launch::async, [this, &seedFrame] {
+                    return m_detector.DetectLargestFace(seedFrame);
+                });
+            }
             if (warmup.Feed(MeanLuma(warmFrame))) {
                 break;
             }
@@ -92,6 +137,19 @@ AuthPipelineResult AuthPipeline::Run() {
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - warmupStart).count(),
                        warmup.Settled() ? L" — stable" : L" — cap reached, proceeding");
+
+        if (seedFuture.valid()) {
+            // Collecting the outstanding detection costs at most what the
+            // loop's first serial detect would have cost — never a regression.
+            auto seedDet = seedFuture.get();
+            seed = Prefetch{ true, std::move(seedFrame), seedSeq,
+                             std::move(seedDet), seedWall };
+        }
+        if (seed.valid && std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - seed.grabWall).count()
+                              > kSeedMaxAgeMs) {
+            seed = Prefetch{};                      // stale seed: grab fresh like the legacy loop
+        }
 
         m_callbacks.reportStatus(L"正在识别...");
         const auto startTime = std::chrono::steady_clock::now();
@@ -111,19 +169,6 @@ AuthPipelineResult AuthPipeline::Run() {
         bool failFastEmpty = false;
         bool failFastAttack = false;
         std::wstring identityError;
-
-        // Software-pipelined frame supply: while PAD(N) runs on its async
-        // thread, the main thread grabs and detects frame N+1 into a single
-        // prefetch slot, so PAD / embedding / binding IPC hide inside the
-        // next frame's capture+detection time. Per-frame verdict logic and
-        // ordering are unchanged; only the schedule moves.
-        struct Prefetch {
-            bool valid = false;
-            FrameImage frame;                       // already rotated
-            unsigned long long seq = 0;
-            std::optional<OnnxDetector::Detection> det;
-            std::chrono::steady_clock::time_point grabWall{};
-        };
 
         // Pacing invariant (explicit, auditable, stricter than the legacy
         // implicit "sleep 60 + processing time"): consecutive COUNTED frames
@@ -170,7 +215,7 @@ AuthPipelineResult AuthPipeline::Run() {
             }
         };
 
-        Prefetch next;
+        Prefetch next = std::move(seed);            // warmup SCRFD pre-run seed, if fresh
         while (totalChecked < totalChecks) {
             if (m_callbacks.isCancelled()) {
                 result.cancelled = true;
