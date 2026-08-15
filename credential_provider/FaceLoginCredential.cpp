@@ -49,12 +49,18 @@
 //   quarantine.
 //
 //   Wave + quiesce. A new input tick starts a wave; once no further tick
-//   arrives for QUIESCE_MS the wave has ended and StartAuth() fires
-//   IMMEDIATELY — the user's single dismiss press is the trigger (trade-off:
-//   there is no way to "just dismiss" without starting face recognition).
-//   QUIESCE_MS is interaction-end detection, NOT switch debounce: it must
-//   stay well above the keyboard auto-repeat interval (~33 ms) and typing
-//   gaps (100–300 ms), so debounce-scale values (10–20 ms) are wrong here.
+//   arrives for QUIESCE_MS AND no key is currently physically held (checked
+//   via GetAsyncKeyState — a held key keeps generating auto-repeat ticks, so
+//   it must never count as a finished wave), the wave has ended and
+//   StartAuth() fires IMMEDIATELY — the user's single dismiss press is the
+//   trigger (trade-off: there is no way to "just dismiss" without starting
+//   face recognition). QUIESCE_MS only needs to clear the keyboard
+//   auto-repeat interval (~33–76 ms observed) and event jitter; the
+//   typing-gap floor that kept it at 200 ms was dropped 2026-08-15: the
+//   waiting view is face-first with no focused password field, typing a
+//   password requires a deliberate tile switch first, and the interaction
+//   policy already guarantees auth starting mid-typing can't interrupt the
+//   input.
 //
 //   State per iteration:
 //     lastInputTick     — highest input timestamp seen so far (>= baseline)
@@ -107,6 +113,16 @@ void FaceLoginCredential::SnapshotBaselineKeys() {
                    m_baselineKeysHeld.empty() ? L"not needed" : L"ARMED");
 }
 
+// True while any key or mouse button is physically held. Used at arm time so
+// a held (auto-repeating) key can never end a wave — its eventual KEYUP
+// restarts the quiet window instead, regardless of the repeat interval.
+static bool AnyKeyPhysicallyDown() {
+    for (int vk = kSnapshotFirstVk; vk <= kSnapshotLastVk; ++vk) {
+        if (GetAsyncKeyState(vk) & 0x8000) return true;
+    }
+    return false;
+}
+
 static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     auto* ctx = static_cast<InputDetectionContext*>(pParam);
     FaceLoginCredential* pCred = ctx->pCred;
@@ -114,8 +130,8 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
 
     FACELOGIN_INFO(L"[InputThread] Started — polling for user input every 50ms");
 
-    const DWORD pollIntervalMs = 50;
-    const DWORD QUIESCE_MS = 200;         // gap that ends an input "wave"
+    const DWORD pollIntervalMs = 25;
+    const DWORD QUIESCE_MS = 100;         // gap that ends an input "wave" (held keys are excluded by the arm-time guard below)
     const DWORD RESIDUE_MARGIN_MS = 150;  // swallow the final KEYUP ticks after residue keys release
     const DWORD RESIDUE_QUARANTINE_CAP_MS = 5000;  // stuck key state must not disable auto-trigger
     const DWORD timeoutSec = 30;
@@ -209,11 +225,13 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
                 armed = false;
             }
 
-            // Arm once the current wave has been quiet for QUIESCE_MS.
-            // lastInputEndWall==0 means we've never seen a post-baseline
-            // input yet, so there's nothing to arm against.
+            // Arm once the current wave has been quiet for QUIESCE_MS AND no
+            // key is physically held (a held key is still generating its
+            // wave). lastInputEndWall==0 means we've never seen a
+            // post-baseline input yet, so there's nothing to arm against.
             if (!armed && lastInputEndWall != 0 &&
-                GetTickCount() - lastInputEndWall >= QUIESCE_MS) {
+                GetTickCount() - lastInputEndWall >= QUIESCE_MS &&
+                !AnyKeyPhysicallyDown()) {
                 armed = true;
                 FACELOGIN_INFO(L"[InputThread] Dismiss wave quiet for %lums — "
                               L"auto-triggering (no second keypress required)",
@@ -230,8 +248,17 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
             }
         }
 
-        // Sleep (alertable so the stop event can wake us)
-        SleepEx(pollIntervalMs, TRUE);
+        // Sleep (alertable so the stop event can wake us). While a wave is
+        // being timed out, wake exactly when the quiet window can complete
+        // instead of drifting up to a full poll interval past it.
+        DWORD sleepMs = pollIntervalMs;
+        if (lastInputEndWall != 0) {
+            const DWORD quietSoFar = GetTickCount() - lastInputEndWall;
+            if (quietSoFar < QUIESCE_MS && QUIESCE_MS - quietSoFar < sleepMs) {
+                sleepMs = QUIESCE_MS - quietSoFar + 1;
+            }
+        }
+        SleepEx(sleepMs, TRUE);
     }
 
     FACELOGIN_INFO(L"[InputThread] Exiting");
