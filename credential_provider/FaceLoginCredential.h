@@ -96,6 +96,12 @@ private:
     void StartInputDetectionThread();
     void StopInputDetectionThread();
 
+    // Snapshot of keys physically held at the baseline moment (called from
+    // Advise, same instant as m_waitingStartTick). Also logs every held key
+    // — the one log line that proves GetAsyncKeyState works inside LogonUI's
+    // secure desktop.
+    void SnapshotBaselineKeys();
+
     // Pipe callbacks — called from background read thread
     void OnPipeResponse(bool success, const std::wstring& message);
     void OnPipeStatus(const std::wstring& message);
@@ -137,6 +143,23 @@ private:
     HANDLE m_hInputThread = nullptr;   // background input-detection thread
     HANDLE m_hInputStop = nullptr;     // event: signal to stop the thread
     bool m_inputThreadRunning = false;
+
+    // Keys (any key or mouse button) still physically held when the
+    // credential view appeared, snapshotted via GetAsyncKeyState() in
+    // Advise() right after m_waitingStartTick. Non-empty means this Advise
+    // happened mid-gesture (e.g. the user holding Win+L through the lock
+    // transition), so the input thread must quarantine the trailing
+    // auto-repeat/KEYUP ticks instead of treating them as a dismiss wave.
+    // Written once before the thread starts (CreateThread establishes the
+    // happens-before), so the thread reads it without a lock.
+    //
+    // Deliberately ANY key, not just lock-hotkey modifiers: Windows clears
+    // the Win modifier's async key state at secure-desktop activation
+    // (observed 2026-08-15: holding Win+L, the snapshot saw 'L' but NOT
+    // LWIN), so a modifier-only fingerprint misses the primary repro — while
+    // a held non-modifier keeps refreshing its state via auto-repeat and is
+    // reliably visible.
+    std::vector<int> m_baselineKeysHeld;
 
     // Synchronization
     HANDLE m_hCredsReady = nullptr;  // Set when auth result received

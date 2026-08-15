@@ -17,7 +17,7 @@
 // Input-detection thread (LOGON + unlock scenarios)
 // ============================================================================
 //
-// Runs as a background thread, polling GetLastInputInfo() every ~200 ms.
+// Runs as a background thread, polling GetLastInputInfo() every 50 ms.
 // When it detects that the user has pressed a key or moved the mouse AFTER
 // the baseline tick (recorded in Advise()), it calls StartAuth() which
 // connects the pipe asynchronously.  Once auth completes, the pipe callback
@@ -25,20 +25,36 @@
 // re-enumerate and call GetSerialization(), which then packs and returns
 // the ready credentials.
 //
-// Trigger algorithm (auto-trigger after dismiss):
-//   The first keypress that dismisses the lock-screen wallpaper generates a
-//   burst of input (KEYDOWN + KEYUP, the latter arriving up to ~500ms after
-//   our baseline recorded between KEYDOWN and KEYUP during DLL load).  We
-//   cannot tell from GetLastInputInfo() whether a tick belongs to that
-//   dismiss-burst or to a later intentional press, so we must wait until the
-//   dismiss-burst has FULLY ended before doing anything -- otherwise the
-//   KEYUP would fire StartAuth() prematurely.
+// Trigger algorithm (residue quarantine + quiesce):
 //
-//   "Fully ended" = no new input for QUIESCE_MS.  Once the dismiss wave goes
-//   quiet, we StartAuth() IMMEDIATELY -- the user does NOT need to press a
-//   second key.  Their single dismiss press is treated as the trigger.
-//   (Trade-off: there is no way to "just dismiss" without starting face
-//   recognition.  Dismissing the lock screen always starts auth.)
+//   Lock-shortcut residue. Lock hotkeys fire MID-GESTURE (Win+L activates on
+//   the L keydown), and holding Win+L past the moment the credential view
+//   appears leaves the trailing auto-repeat/KEYUP ticks landing AFTER the
+//   baseline. GetLastInputInfo() alone cannot tell those ticks from a
+//   genuine dismiss press, so the wave would auto-trigger auth and unlock
+//   the user right back (reproduced 2026-08-15: hold Win+L -> self-unlock
+//   ~2s after lock). Advise() therefore snapshots, via GetAsyncKeyState(),
+//   EVERY key still physically held at baseline — any held key at that
+//   moment means the lock action is still mid-gesture. Note it cannot be a
+//   modifier-only fingerprint: Windows clears the Win modifier's async key
+//   state at secure-desktop activation (observed 2026-08-15: snapshot saw
+//   'L' but NOT LWIN), while a held non-modifier keeps refreshing its state
+//   via auto-repeat and stays visible. When any key was held, this thread
+//   first quarantines the residue: polls until every one is released (capped
+//   at RESIDUE_QUARANTINE_CAP_MS so a stuck key state cannot disable
+//   auto-trigger forever), waits RESIDUE_MARGIN_MS for the final KEYUP tick,
+//   then re-seeds lastInputTick past the whole burst so it can never form a
+//   wave. Mouse/touch locking is release-triggered (the gesture completes
+//   before the lock engages), so it has no structural residue and needs no
+//   quarantine.
+//
+//   Wave + quiesce. A new input tick starts a wave; once no further tick
+//   arrives for QUIESCE_MS the wave has ended and StartAuth() fires
+//   IMMEDIATELY — the user's single dismiss press is the trigger (trade-off:
+//   there is no way to "just dismiss" without starting face recognition).
+//   QUIESCE_MS is interaction-end detection, NOT switch debounce: it must
+//   stay well above the keyboard auto-repeat interval (~33 ms) and typing
+//   gaps (100–300 ms), so debounce-scale values (10–20 ms) are wrong here.
 //
 //   State per iteration:
 //     lastInputTick     — highest input timestamp seen so far (>= baseline)
@@ -56,15 +72,52 @@ struct InputDetectionContext {
     FaceLoginCredential* pCred;
 };
 
+// Keys still held at the baseline moment are the mid-gesture fingerprint of
+// a lock action (see the algorithm comment above). Any key counts — see the
+// Win-cleared observation there for why modifiers alone are not enough.
+static const int kSnapshotFirstVk = 0x01;   // VK_LBUTTON
+static const int kSnapshotLastVk = 0xFE;    // VK_OEM_CLEAR
+
+void FaceLoginCredential::SnapshotBaselineKeys() {
+    std::wstring held;
+    auto appendName = [&held](int vk) {
+        wchar_t name[8];
+        if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) {
+            name[0] = static_cast<wchar_t>(vk);
+            name[1] = L'\0';
+        } else {
+            wsprintfW(name, L"#%02X", vk);
+        }
+        if (!held.empty()) held += L",";
+        held += name;
+    };
+
+    m_baselineKeysHeld.clear();
+    for (int vk = kSnapshotFirstVk; vk <= kSnapshotLastVk; ++vk) {
+        if (GetAsyncKeyState(vk) & 0x8000) {
+            m_baselineKeysHeld.push_back(vk);
+            appendName(vk);
+        }
+    }
+
+    // One log line proving GetAsyncKeyState works in the secure desktop and
+    // showing exactly what was held at baseline.
+    FACELOGIN_INFO(L"Advise: baseline held keys: %s — residue quarantine %s",
+                   held.empty() ? L"(none)" : held.c_str(),
+                   m_baselineKeysHeld.empty() ? L"not needed" : L"ARMED");
+}
+
 static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     auto* ctx = static_cast<InputDetectionContext*>(pParam);
     FaceLoginCredential* pCred = ctx->pCred;
     delete ctx;
 
-    FACELOGIN_INFO(L"[InputThread] Started — polling for user input every 100ms");
+    FACELOGIN_INFO(L"[InputThread] Started — polling for user input every 50ms");
 
-    const DWORD pollIntervalMs = 100;
-    const DWORD QUIESCE_MS = 400;   // gap that ends an input "wave"
+    const DWORD pollIntervalMs = 50;
+    const DWORD QUIESCE_MS = 200;         // gap that ends an input "wave"
+    const DWORD RESIDUE_MARGIN_MS = 150;  // swallow the final KEYUP ticks after residue keys release
+    const DWORD RESIDUE_QUARANTINE_CAP_MS = 5000;  // stuck key state must not disable auto-trigger
     const DWORD timeoutSec = 30;
     DWORD startTick = GetTickCount();
 
@@ -75,6 +128,44 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     DWORD lastInputTick = baseline;     // input-timestamp space (GetLastInputInfo)
     DWORD lastInputEndWall = 0;         // wall-clock space (GetTickCount)
     bool armed = false;                 // current wave has gone quiet
+
+    // Residue quarantine. Keys were still held when this credential appeared
+    // (see the algorithm comment above): without this, their trailing
+    // auto-repeat/KEYUP ticks would read as a dismiss wave and auto-unlock
+    // the user right after they locked. Wait until every one is physically
+    // released, let the final KEYUP land inside the margin, then raise the
+    // seen-input watermark past the whole burst. The 30s idle restart below
+    // never re-quarantines — baseline residue only exists at thread start.
+    if (!pCred->m_baselineKeysHeld.empty()) {
+        const DWORD quarantineStart = GetTickCount();
+        for (;;) {
+            if (WaitForSingleObject(pCred->m_hInputStop, 0) == WAIT_OBJECT_0) {
+                FACELOGIN_INFO(L"[InputThread] Stop event signaled — exiting (residue quarantine)");
+                FACELOGIN_INFO(L"[InputThread] Exiting");
+                pCred->m_inputThreadRunning = false;
+                return 0;
+            }
+            if (GetTickCount() - quarantineStart >= RESIDUE_QUARANTINE_CAP_MS) {
+                FACELOGIN_WARN(L"[InputThread] Residue keys not released within %lums — capping quarantine",
+                               RESIDUE_QUARANTINE_CAP_MS);
+                break;
+            }
+            bool allReleased = true;
+            for (int vk : pCred->m_baselineKeysHeld) {
+                if (GetAsyncKeyState(vk) & 0x8000) { allReleased = false; break; }
+            }
+            if (allReleased) break;
+            SleepEx(pollIntervalMs, TRUE);
+        }
+        SleepEx(RESIDUE_MARGIN_MS, TRUE);
+        LASTINPUTINFO residueLii = {};
+        residueLii.cbSize = sizeof(residueLii);
+        if (GetLastInputInfo(&residueLii) && residueLii.dwTime > lastInputTick) {
+            lastInputTick = residueLii.dwTime;
+        }
+        FACELOGIN_INFO(L"[InputThread] Residue quarantine ended after %lums — residue ticks swallowed",
+                       GetTickCount() - quarantineStart);
+    }
 
     // Loop forever (until the stop event is signaled).  The 30s timeout does
     // NOT kill the thread — it only restarts the idle window so a user who
@@ -291,6 +382,9 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     }
     m_waitingStartTick = GetTickCount();
     FACELOGIN_INFO(L"Advise: baseline tick = %lu", m_waitingStartTick);
+    // Same instant as the baseline tick: capture which lock-shortcut
+    // modifiers are still physically held, before the input thread starts.
+    SnapshotBaselineKeys();
     StartInputDetectionThread();
 
     FACELOGIN_INFO(L"=== Advise EXIT (state=%d) ===", static_cast<int>(m_state));
