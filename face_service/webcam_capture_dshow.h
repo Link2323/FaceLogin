@@ -132,17 +132,6 @@ private:
     bool FindCamera(const std::wstring& devicePath, IBaseFilter** ppFilter);
     bool BuildGraph(IBaseFilter* pCapture, int width, int height);
 
-    // Per-step wall time of the last Initialize(), logged as one INFO line
-    // so slow-machine camera_init can be decomposed from production logs.
-    struct InitTiming {
-        double enumMs = 0.0;      // device enumeration + DevicePath match
-        double bindMs = 0.0;      // BindToObject (driver instantiation)
-        double setFormatMs = 0.0; // IAMStreamConfig::SetFormat
-        double connectMs = 0.0;   // both graph Connect calls
-        double runMs = 0.0;       // IMediaControl::Run
-    };
-    InitTiming m_initTiming;
-
     IGraphBuilder*   m_pGraph        = nullptr;
     IMediaControl*   m_pControl      = nullptr;
     IBaseFilter*     m_pCapture      = nullptr;
