@@ -2,6 +2,7 @@
 #include "../common/logger.h"
 #include <oaidl.h>
 #include <oleauto.h>
+#include <chrono>
 #include <new>
 #include <utility>
 
@@ -136,6 +137,7 @@ static bool GetPin(IBaseFilter* pFilter, PIN_DIRECTION dir, IPin** ppPin) {
 bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
                                  IBaseFilter** ppFilter) {
     *ppFilter = nullptr;
+    const auto enumStart = std::chrono::steady_clock::now();
 
     ICreateDevEnum* pDevEnum = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
@@ -185,6 +187,8 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
         fetched = 0;
     }
     pEnum->Release();
+    m_initTiming.enumMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - enumStart).count();
 
     if (pMatch) {
         pMoniker = pMatch;
@@ -200,7 +204,10 @@ bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
         }
     }
 
+    const auto bindStart = std::chrono::steady_clock::now();
     hr = pMoniker->BindToObject(nullptr, nullptr, IID_IBaseFilter, (void**)ppFilter);
+    m_initTiming.bindMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - bindStart).count();
     // NOTE: do NOT Release pMoniker here. After the loop, pMoniker aliases
     // pFirst/pMatch, which hold their own AddRef'd references and are released
     // below. Releasing pMoniker here would double-release those references
@@ -373,7 +380,11 @@ bool WebcamCaptureDS::BuildGraph(IBaseFilter* pCapture, int width, int height) {
                         pVih->bmiHeader.biWidth  = width;
                         pVih->bmiHeader.biHeight = height;
                         pVih->bmiHeader.biSizeImage = width * height * 3;
+                        const auto setFormatStart = std::chrono::steady_clock::now();
                         hr = pConfig->SetFormat(pmt);
+                        m_initTiming.setFormatMs =
+                            std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - setFormatStart).count();
                         if (SUCCEEDED(hr))
                             FACELOGIN_DEBUG(L"DS: set capture format %dx%d", width, height);
                         else
@@ -407,6 +418,7 @@ bool WebcamCaptureDS::BuildGraph(IBaseFilter* pCapture, int width, int height) {
         }
 
         // Connect capture → grabber
+        const auto connectStart = std::chrono::steady_clock::now();
         hr = m_pGraph->Connect(pCaptureOut, pGrabberIn);
         if (FAILED(hr)) {
             FACELOGIN_ERROR(L"DS Connect(capture→grabber) failed: 0x%08X", hr);
@@ -426,6 +438,8 @@ bool WebcamCaptureDS::BuildGraph(IBaseFilter* pCapture, int width, int height) {
         }
         pGrabberOut->Release();
         pNullIn->Release();
+        m_initTiming.connectMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - connectStart).count();
 
         FACELOGIN_DEBUG(L"DS: graph connected capture→grabber→null");
     }
@@ -470,7 +484,10 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
         return false;
     }
 
+    const auto runStart = std::chrono::steady_clock::now();
     HRESULT hr = m_pControl->Run();
+    m_initTiming.runMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - runStart).count();
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS IMediaControl::Run failed: 0x%08X", hr);
         Shutdown();
@@ -478,7 +495,12 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
     }
 
     m_initialized = true;
-    FACELOGIN_INFO(L"DirectShow webcam initialized: %dx%d RGB24", m_width, m_height);
+    FACELOGIN_INFO(L"DirectShow webcam initialized: %dx%d RGB24 "
+                   L"(enum=%.0f ms, bind=%.0f ms, setFormat=%.0f ms, connect=%.0f ms, run=%.0f ms)",
+                   m_width, m_height,
+                   m_initTiming.enumMs, m_initTiming.bindMs,
+                   m_initTiming.setFormatMs, m_initTiming.connectMs,
+                   m_initTiming.runMs);
     return true;
 }
 
