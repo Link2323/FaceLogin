@@ -29,4 +29,19 @@ constexpr bool ShouldReenumerateAfterTerminal(AuthState state) noexcept {
     return state == AuthState::Ready;
 }
 
+// Deselecting the tile must abort an in-flight recognition and return to the
+// passive waiting state, so the camera is released as soon as the user moves
+// to another sign-in option. Terminal failures keep their state — the
+// explicit-retry rule survives a tile round-trip.
+constexpr bool ShouldAbortAuthOnDeselect(AuthState state) noexcept {
+    return state == AuthState::Authenticating;
+}
+
+// Pipe results that arrive after authentication was aborted (tile
+// deselected, pipe torn down) are stale: they must not overwrite the reset
+// state or push tile text. Only a live round may process responses.
+constexpr bool ShouldProcessPipeResponse(AuthState state) noexcept {
+    return state == AuthState::Authenticating;
+}
+
 } // namespace facelogin::credential_provider

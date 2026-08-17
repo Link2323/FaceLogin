@@ -4,6 +4,8 @@
 
 using facelogin::credential_provider::AuthState;
 using facelogin::credential_provider::IsRetryableFailure;
+using facelogin::credential_provider::ShouldAbortAuthOnDeselect;
+using facelogin::credential_provider::ShouldProcessPipeResponse;
 using facelogin::credential_provider::ShouldReenumerateAfterTerminal;
 using facelogin::credential_provider::ShouldStartInputDetection;
 
@@ -20,6 +22,18 @@ static_assert(!IsRetryableFailure(AuthState::Ready));
 static_assert(ShouldReenumerateAfterTerminal(AuthState::Ready));
 static_assert(!ShouldReenumerateAfterTerminal(AuthState::Failed));
 static_assert(!ShouldReenumerateAfterTerminal(AuthState::Error));
+
+static_assert(ShouldAbortAuthOnDeselect(AuthState::Authenticating));
+static_assert(!ShouldAbortAuthOnDeselect(AuthState::Waiting));
+static_assert(!ShouldAbortAuthOnDeselect(AuthState::Ready));
+static_assert(!ShouldAbortAuthOnDeselect(AuthState::Failed));
+static_assert(!ShouldAbortAuthOnDeselect(AuthState::Error));
+
+static_assert(ShouldProcessPipeResponse(AuthState::Authenticating));
+static_assert(!ShouldProcessPipeResponse(AuthState::Waiting));
+static_assert(!ShouldProcessPipeResponse(AuthState::Ready));
+static_assert(!ShouldProcessPipeResponse(AuthState::Failed));
+static_assert(!ShouldProcessPipeResponse(AuthState::Error));
 
 int main() {
     std::cout << "Credential Provider interaction policy tests passed\n";

@@ -391,16 +391,14 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
         return S_OK;
     }
 
-    // Start a background thread that polls GetLastInputInfo() for new
-    // keyboard/mouse input (the same flow for LOGON and UNLOCK — the
-    // provider no longer auto-triggers on cold boot, which started
-    // recognizing before the user was at the machine and, because every
-    // failed attempt re-enumerated with coldBoot still true, looped
-    // recognition forever on an empty scene).  When input is detected,
-    // the thread calls StartAuth() which connects the pipe
-    // asynchronously. The pipe callback stores credentials and triggers
-    // CredentialsChanged(), causing LogonUI to re-enumerate and call
-    // GetSerialization() to retrieve ready credentials.
+    // Activation lives in SetSelected, NOT here: LogonUI calls Advise for
+    // every credential enumeration — including flows that never select this
+    // tile (the MSA PIN reset wizard reuses the LogonUI credential list) —
+    // and the input watcher polls GLOBAL input, so starting it at Advise let
+    // typing in those flows trigger the camera and interrupt the wizard.
+    // Advise still records the baseline tick and held-key snapshot as early
+    // as possible; SetSelected starts the watcher only when the user
+    // actually lands on this tile.
     bool credUI = m_pProvider ? m_pProvider->IsCredUI() : false;
     FACELOGIN_INFO(L"Advise: credUI=%d, m_pProvider=%p", credUI, m_pProvider);
     if (!facelogin::credential_provider::ShouldStartInputDetection(m_state)) {
@@ -412,7 +410,6 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     // Same instant as the baseline tick: capture which lock-shortcut
     // modifiers are still physically held, before the input thread starts.
     SnapshotBaselineKeys();
-    StartInputDetectionThread();
 
     FACELOGIN_INFO(L"=== Advise EXIT (state=%d) ===", static_cast<int>(m_state));
     return S_OK;
@@ -453,6 +450,18 @@ STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
         *pbAutoLogon = FALSE;
     }
 
+    // The user actually landed on this tile (LogonUI focuses it right after
+    // the Advise pass of the same enumeration round — milliseconds apart),
+    // so starting the passive input watcher here keeps the keypress→auth
+    // latency identical while never listening during flows that only Advise
+    // us (PIN reset wizard, other tiles focused). Re-selecting after a
+    // deselect restarts the watcher the same way.
+    if (facelogin::credential_provider::ShouldStartInputDetection(m_state) &&
+        !m_inputThreadRunning) {
+        FACELOGIN_INFO(L"SetSelected: starting passive input detection");
+        StartInputDetectionThread();
+    }
+
     FACELOGIN_INFO(L"=== SetSelected EXIT (*pbAutoLogon=%d, credUI=%d, state=%d) ===",
                   *pbAutoLogon, static_cast<int>(credUI),
                   static_cast<int>(m_state));
@@ -461,6 +470,27 @@ STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
 
 STDMETHODIMP FaceLoginCredential::SetDeselected() {
     FACELOGIN_INFO(L"=== SetDeselected called (state=%d) ===", static_cast<int>(m_state));
+
+    // The user moved to another sign-in option: stop watching global input,
+    // and if a recognition is in flight, tear the pipe down — the service
+    // observes the client disconnect, aborts the loop and releases the
+    // camera instead of filming until the auth timeout. Order matters: stop
+    // the input thread FIRST (it joins), so a concurrent auto-trigger cannot
+    // start a new pipe after the teardown below.
+    StopInputDetectionThread();
+
+    if (facelogin::credential_provider::ShouldAbortAuthOnDeselect(m_state)) {
+        FACELOGIN_INFO(L"SetDeselected: aborting in-flight authentication");
+        m_pipeClient.reset();
+        m_statusText = L"按下任意按键以开始人脸识别";
+        m_state = State::Waiting;
+        if (m_pCredentialEvents) {
+            m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+        }
+        // Late pipe results are dropped by the ShouldProcessPipeResponse
+        // guard in OnPipeResponse/OnPipeStatus; re-selecting the tile
+        // restarts the watcher through SetSelected.
+    }
     return S_OK;
 }
 
@@ -1042,6 +1072,13 @@ HRESULT FaceLoginCredential::SwitchToPasswordProvider() {
 }
 
 void FaceLoginCredential::OnPipeStatus(const std::wstring& message) {
+    // A deselection may have torn the pipe down mid-flight; a late status
+    // from that round must not overwrite the reset idle prompt.
+    if (!facelogin::credential_provider::ShouldProcessPipeResponse(m_state)) {
+        FACELOGIN_INFO(L"OnPipeStatus: dropped late status in state=%d",
+                       static_cast<int>(m_state));
+        return;
+    }
     EnterCriticalSection(&m_cs);
     m_statusText = message;
     LeaveCriticalSection(&m_cs);
@@ -1054,6 +1091,14 @@ void FaceLoginCredential::OnPipeStatus(const std::wstring& message) {
 }
 
 void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& message) {
+    // Same late-result guard as OnPipeStatus: a response delivered after the
+    // tile was deselected (auth aborted, state reset to Waiting) is stale
+    // and must not overwrite state, credentials or tile text.
+    if (!facelogin::credential_provider::ShouldProcessPipeResponse(m_state)) {
+        FACELOGIN_INFO(L"OnPipeResponse: dropped late result in state=%d",
+                       static_cast<int>(m_state));
+        return;
+    }
     if (success) {
         auto result = facelogin::ipc::ParseAuthMessage(message);
 
