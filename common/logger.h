@@ -50,15 +50,19 @@ private:
     CRITICAL_SECTION m_cs{};
     bool m_csInitialized = false;
 
-    // Log rotation: rotate on calendar-day boundaries and keep logs for a
-    // bounded number of days. The log file keeps its original name — when it
-    // crosses into a new day AND the existing file is older than the retention
-    // window, it is deleted and a fresh file is started, capping disk usage.
-    // A file is created anew each day the process writes, so an old file's
-    // creation time marks the day it was started.
+    // Log rotation with a day-based retention window: when the current file
+    // started more than kMaxLogDays days ago, it is moved aside under a dated
+    // name (<name>.YYYY-MM-DD.log) and a fresh file is started, so roughly the
+    // last kMaxLogDays days of logs stay on disk. A fresh file's creation time
+    // is set explicitly on open — otherwise NTFS file tunneling (a file
+    // recreated under a just-deleted/renamed name inherits the old creation
+    // time) keeps the stale birth date alive and re-triggers rotation on every
+    // write, destroying all but the newest line.
     static constexpr int kMaxLogDays = 3;   // keep up to 3 days of logs
 
     void CheckRotation();   // rotate if m_logPath is stale (older than kMaxLogDays)
+    void OpenLogFile();     // open m_logPath for append, stamp creation time on fresh files
+    void PurgeDatedFiles(); // delete rotated <name>.<date>.log files past the window
 
     // Ring buffer for UI log viewer (cursor wraps when full)
     static constexpr size_t RING_SIZE = 2000;
