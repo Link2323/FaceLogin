@@ -171,6 +171,14 @@ func (a *App) Install(installDir string) map[string]interface{} {
 		a.emit(60, "验证目录权限", "fail", err.Error())
 		return result(false, fmt.Sprintf("设置安装目录安全权限失败: %v", err))
 	}
+	// data\ (users.dat) then gets a tighter ACL with NO Users read entry —
+	// after the sweep above, whose /T would otherwise re-grant Users onto the
+	// data subtree. Fatal on failure: a Users-readable users.dat defeats the
+	// DPAPI machine-scope encryption (any local account could decrypt it).
+	if err = internal.SetDataDirectoryACL(dataDir); err != nil {
+		a.emit(60, "验证目录权限", "fail", err.Error())
+		return result(false, fmt.Sprintf("设置数据目录安全权限失败: %v", err))
+	}
 	a.emit(67, "验证目录权限", "done", "")
 
 	// Step 6: Register COM DLL

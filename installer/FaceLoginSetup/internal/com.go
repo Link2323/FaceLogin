@@ -117,6 +117,39 @@ func SetDirectoryACL(dirPath string) error {
 		{dirPath, "/setowner", "*S-1-5-32-544", "/T", "/Q"},
 		{dirPath, "/inheritance:r", "/Q"},
 	}
+	return applyIcacls(commands)
+}
+
+// SetDataDirectoryACL locks down <installDir>\data — where users.dat lives.
+// Unlike the install dir, no Users entry is granted: everything that touches
+// data\ (service = SYSTEM, elevated console, LogonUI's header read = SYSTEM)
+// is privileged. users.dat holds a DPAPI LOCAL_MACHINE password blob, which
+// ANY local account could decrypt after reading the file — the file ACL is
+// the only barrier for non-admin processes, so granting Users read here would
+// nullify the encryption. Must run AFTER SetDirectoryACL on the parent: that
+// call's /T sweeps would re-apply the Users entry onto the data subtree.
+func SetDataDirectoryACL(dataDir string) error {
+	if !DirExists(dataDir) {
+		if err := os.MkdirAll(dataDir, 0755); err != nil {
+			return err
+		}
+	}
+
+	// Same strategy as SetDirectoryACL minus the Users RX entry: reset the
+	// subtree (drops the Users ACEs inherited from the install dir), grant
+	// SYSTEM/Administrators explicit, re-own, protect the directory itself.
+	// Files rewritten in place (users.dat) keep their explicit ACEs; files
+	// created later inherit (OI)(CI) from the directory.
+	commands := [][]string{
+		{dataDir, "/reset", "/T", "/Q"},
+		{dataDir, "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"},
+		{dataDir, "/setowner", "*S-1-5-32-544", "/T", "/Q"},
+		{dataDir, "/inheritance:r", "/Q"},
+	}
+	return applyIcacls(commands)
+}
+
+func applyIcacls(commands [][]string) error {
 	for _, args := range commands {
 		cmd := exec.Command("icacls", args...)
 		out, err := cmd.CombinedOutput()
