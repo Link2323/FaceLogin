@@ -8,8 +8,8 @@
   "frontend:dev:serverUrl": "auto",
   "Info": {
     "productName": "FaceLogin Setup",
-    "productVersion": "1.7.0",
-    "fileVersion": "1.7.0",
+    "productVersion": "1.7.1",
+    "fileVersion": "1.7.1",
     "fileDescription": "FaceLogin installer"
   },
   "author": {
