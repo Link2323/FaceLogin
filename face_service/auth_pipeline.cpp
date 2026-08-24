@@ -207,9 +207,17 @@ AuthPipelineResult AuthPipeline::Run() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     continue;
                 }
+                // Anchor the guard at the GRAB (acquisition), not after
+                // detection: the invariant is acquisition spacing, and a
+                // post-detect anchor would serialize each frame's SCRFD run
+                // on top of the guard wait (measured 27–50 ms/frame p50–max
+                // on the dev machine). Detection of the next frame must fit
+                // inside the 60 ms window; where it doesn't (slow machines,
+                // ~153 ms on the 1360P) the wait shrinks to zero and
+                // detection itself becomes the pacing floor — never worse.
+                const auto grabWall = std::chrono::steady_clock::now();
                 RotateFrame(frame, m_config.cameraRotation);
                 auto det = m_detector.DetectLargestFace(frame);
-                const auto grabWall = std::chrono::steady_clock::now();
                 out = Prefetch{ true, std::move(frame), seq, std::move(det), grabWall };
                 return true;
             }
