@@ -107,7 +107,6 @@ bool VerifyModelIntegrity(const std::filesystem::path& path,
                         modelLabel, expectedHex.c_str(), actual->c_str());
         return false;
     }
-    FACELOGIN_INFO(L"Model integrity verified: %s (SHA-256 OK)", modelLabel);
     return true;
 }
 

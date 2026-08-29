@@ -130,32 +130,12 @@ static const int kSnapshotFirstVk = 0x01;   // VK_LBUTTON
 static const int kSnapshotLastVk = 0xFE;    // VK_OEM_CLEAR
 
 void FaceLoginCredential::SnapshotBaselineKeys() {
-    std::wstring held;
-    auto appendName = [&held](int vk) {
-        wchar_t name[8];
-        if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) {
-            name[0] = static_cast<wchar_t>(vk);
-            name[1] = L'\0';
-        } else {
-            wsprintfW(name, L"#%02X", vk);
-        }
-        if (!held.empty()) held += L",";
-        held += name;
-    };
-
     m_baselineKeysHeld.clear();
     for (int vk = kSnapshotFirstVk; vk <= kSnapshotLastVk; ++vk) {
         if (GetAsyncKeyState(vk) & 0x8000) {
             m_baselineKeysHeld.push_back(vk);
-            appendName(vk);
         }
     }
-
-    // One log line proving GetAsyncKeyState works in the secure desktop and
-    // showing exactly what was held at baseline.
-    FACELOGIN_INFO(L"Advise: baseline held keys: %s — residue quarantine %s",
-                   held.empty() ? L"(none)" : held.c_str(),
-                   m_baselineKeysHeld.empty() ? L"not needed" : L"ARMED");
 }
 
 // True while any key or mouse button is physically held. Used at arm time so
@@ -194,7 +174,6 @@ static bool AnyKeyPhysicallyDown() {
 // GetAsyncKeyState scan (mouse buttons are visible to it once the
 // credential view is up).
 static thread_local LONG t_rawKeyboardSeen = 0;
-static thread_local bool t_loggedFirstRawInput = false;
 
 static LRESULT CALLBACK RawInputSinkWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_INPUT) {
@@ -203,18 +182,9 @@ static LRESULT CALLBACK RawInputSinkWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
         if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT,
                             &raw, &size, sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
             raw.header.dwType == RIM_TYPEKEYBOARD) {
-            // RI_KEY_BREAK is the release marker; E0/E1 bits are scancode
-            // terminator info, not button state. Auto-repeat reports as MAKE.
-            const bool released = (raw.data.keyboard.Flags & RI_KEY_BREAK) != 0;
+            // Both MAKE and BREAK qualify the wave — an UP alone proves a
+            // complete press happened, so the release flag needs no handling.
             t_rawKeyboardSeen = 1;
-            if (!t_loggedFirstRawInput) {
-                t_loggedFirstRawInput = true;
-                FACELOGIN_INFO(L"[InputThread] first WM_INPUT (keyboard, vk=0x%02X, %s)",
-                               raw.data.keyboard.VKey, released ? L"up" : L"down");
-            } else {
-                FACELOGIN_INFO(L"[InputThread] raw keyboard key %s (vk=0x%02X)",
-                               released ? L"up" : L"down", raw.data.keyboard.VKey);
-            }
         }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -270,8 +240,6 @@ bool RawInputSink::Register() {
         Unregister();
         return false;
     }
-
-    FACELOGIN_INFO(L"[InputThread] raw-input keyboard sink registered");
     return true;
 }
 
@@ -297,8 +265,6 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     FaceLoginCredential* pCred = ctx->pCred;
     delete ctx;
 
-    FACELOGIN_INFO(L"[InputThread] Started — polling for user input every 50ms");
-
     const DWORD pollIntervalMs = 25;
     const DWORD QUIESCE_MS = 100;         // gap that ends an input "wave" (held keys are excluded by the arm-time guard below)
     const DWORD RESIDUE_MARGIN_MS = 150;  // swallow the final KEYUP ticks after residue keys release
@@ -313,8 +279,6 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     DWORD lastInputTick = baseline;     // input-timestamp space (GetLastInputInfo)
     DWORD lastInputEndWall = 0;         // wall-clock space (GetTickCount)
     bool waveQualifying = false;        // wave contains a real key/button press
-    bool waveSawAsyncKey = false;       // qualifying source: GetAsyncKeyState scan
-    bool waveSawRawKeyboard = false;    // qualifying source: raw-input keyboard (MAKE or BREAK)
     bool armed = false;                 // current wave has gone quiet
 
     // Residue quarantine. Keys were still held when this credential appeared
@@ -328,8 +292,6 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         const DWORD quarantineStart = GetTickCount();
         for (;;) {
             if (WaitForSingleObject(pCred->m_hInputStop, 0) == WAIT_OBJECT_0) {
-                FACELOGIN_INFO(L"[InputThread] Stop event signaled — exiting (residue quarantine)");
-                FACELOGIN_INFO(L"[InputThread] Exiting");
                 pCred->m_inputThreadRunning = false;
                 return 0;
             }
@@ -351,8 +313,6 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         if (GetLastInputInfo(&residueLii) && residueLii.dwTime > lastInputTick) {
             lastInputTick = residueLii.dwTime;
         }
-        FACELOGIN_INFO(L"[InputThread] Residue quarantine ended after %lums — residue ticks swallowed",
-                       GetTickCount() - quarantineStart);
     }
 
     // The keyboard raw-input sink is created AFTER residue quarantine (which
@@ -369,7 +329,6 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         // Check stop signal (non-blocking)
         DWORD waitResult = WaitForSingleObject(pCred->m_hInputStop, 0);
         if (waitResult == WAIT_OBJECT_0) {
-            FACELOGIN_INFO(L"[InputThread] Stop event signaled — exiting");
             break;
         }
 
@@ -380,14 +339,11 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         // evaluated cleanly.
         DWORD elapsedMs = GetTickCount() - startTick;
         if (elapsedMs > timeoutSec * 1000) {
-            FACELOGIN_INFO(L"[InputThread] 30s idle — restarting idle window");
             startTick = GetTickCount();
             baseline = pCred->m_waitingStartTick;
             lastInputTick = baseline;
             lastInputEndWall = 0;
             waveQualifying = false;
-            waveSawAsyncKey = false;
-            waveSawRawKeyboard = false;
             armed = false;
             continue;
         }
@@ -415,7 +371,6 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
             // view is up (the mouse's second-click trigger rides on this).
             if (AnyKeyPhysicallyDown()) {
                 waveQualifying = true;
-                waveSawAsyncKey = true;
             }
 
             // Arm once the current wave has been quiet for QUIESCE_MS AND no
@@ -430,28 +385,13 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
                     // the wallpaper): discard it and keep waiting — the tile
                     // still says "按下任意按键". Zeroing lastInputEndWall
                     // makes this branch run once per discarded wave.
-                    FACELOGIN_INFO(L"[InputThread] Wave quiet for %lums but "
-                                  L"no key/button press seen — movement-only "
-                                  L"wave discarded, still waiting",
-                                  QUIESCE_MS);
                     lastInputEndWall = 0;
                     waveQualifying = false;
-                    waveSawAsyncKey = false;
-                    waveSawRawKeyboard = false;
                 } else {
                     armed = true;
-                    FACELOGIN_INFO(L"[InputThread] Dismiss wave quiet for %lums — "
-                                  L"auto-triggering (no second keypress required)",
-                                  QUIESCE_MS);
                     // Auto-trigger: the dismiss wave (KEYDOWN+KEYUP) has fully
                     // ended, so the user's single dismiss press is enough.
                     // Start auth immediately instead of waiting for another wave.
-                    FACELOGIN_INFO(L"[InputThread] Auto-triggered after dismiss "
-                                  L"(last=%lu, baseline=%lu, elapsed=%lums, "
-                                  L"src: asyncKey=%d rawKbd=%d)",
-                                  lastInputTick, baseline,
-                                  static_cast<DWORD>(lastInputTick - baseline),
-                                  waveSawAsyncKey, waveSawRawKeyboard);
                     // Failure-tile round: route through the explicit-retry
                     // entry so the terminal pipe from the failed round is
                     // destroyed first (a direct StartAuth could see the dead
@@ -491,20 +431,16 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
         }
         if (InterlockedExchange(&t_rawKeyboardSeen, 0) != 0) {
             waveQualifying = true;
-            waveSawRawKeyboard = true;
         }
         DWORD wait = MsgWaitForMultipleObjectsEx(
             1, &pCred->m_hInputStop, sleepMs, QS_ALLINPUT,
             MWMO_ALERTABLE | MWMO_INPUTAVAILABLE);
         if (wait == WAIT_OBJECT_0) {
-            FACELOGIN_INFO(L"[InputThread] Stop event signaled — exiting");
             break;
         }
     }
 
     rawSink.Unregister();  // idempotent no-op if registration failed
-
-    FACELOGIN_INFO(L"[InputThread] Exiting");
     pCred->m_inputThreadRunning = false;
     return 0;
 }
@@ -598,8 +534,6 @@ STDMETHODIMP_(ULONG) FaceLoginCredential::Release() {
 // ============================================================================
 
 STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pcpce) {
-    FACELOGIN_INFO(L"=== Advise ENTER (state=%d, pcpce=%p) ===", static_cast<int>(m_state), pcpce);
-
     if (m_pCredentialEvents) {
         m_pCredentialEvents->Release();
     }
@@ -659,13 +593,10 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     // modifiers are still physically held, before the input thread starts.
     SnapshotBaselineKeys();
 
-    FACELOGIN_INFO(L"=== Advise EXIT (state=%d) ===", static_cast<int>(m_state));
     return S_OK;
 }
 
 STDMETHODIMP FaceLoginCredential::UnAdvise() {
-    FACELOGIN_INFO(L"=== UnAdvise ENTER ===");
-
     // Stop the input-detection thread if running
     StopInputDetectionThread();
 
@@ -683,12 +614,6 @@ STDMETHODIMP FaceLoginCredential::UnAdvise() {
 // ============================================================================
 
 STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
-    FACELOGIN_INFO(L"=== SetSelected ENTER (state=%d, *pbAutoLogon=%d) ===",
-                  static_cast<int>(m_state),
-                  pbAutoLogon ? static_cast<int>(*pbAutoLogon) : -1);
-
-    bool credUI = m_pProvider ? m_pProvider->IsCredUI() : false;
-
     if (m_state == State::Ready) {
         // Credentials ready (bg thread finished auth):
         // enable auto-logon so LogonUI calls GetSerialization to pack creds.
@@ -718,15 +643,10 @@ STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
         }
     }
 
-    FACELOGIN_INFO(L"=== SetSelected EXIT (*pbAutoLogon=%d, credUI=%d, state=%d) ===",
-                  *pbAutoLogon, static_cast<int>(credUI),
-                  static_cast<int>(m_state));
     return S_OK;
 }
 
 STDMETHODIMP FaceLoginCredential::SetDeselected() {
-    FACELOGIN_INFO(L"=== SetDeselected called (state=%d) ===", static_cast<int>(m_state));
-
     // The user moved to another sign-in option: stop watching global input,
     // and if a recognition is in flight, tear the pipe down — the service
     // observes the client disconnect, aborts the loop and releases the
@@ -758,9 +678,6 @@ STDMETHODIMP FaceLoginCredential::GetFieldState(
     DWORD dwFieldID,
     CREDENTIAL_PROVIDER_FIELD_STATE* pcpfs,
     CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE* pcpfis) {
-
-    FACELOGIN_INFO(L"=== GetFieldState (field=%lu, state=%d) ===",
-                  dwFieldID, static_cast<int>(m_state));
 
     *pcpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
     *pcpfis = CPFIS_NONE;
@@ -807,8 +724,6 @@ STDMETHODIMP FaceLoginCredential::GetFieldState(
 }
 
 STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) {
-    FACELOGIN_INFO(L"=== GetStringValue (field=%lu, state=%d) ===",
-                  dwFieldID, static_cast<int>(m_state));
     *ppwsz = nullptr;
 
     switch (dwFieldID) {
@@ -939,8 +854,6 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
     PWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon) {
 
-    FACELOGIN_INFO(L"=== GetSerialization ENTER (state=%d) ===", static_cast<int>(m_state));
-
     *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
@@ -1060,8 +973,6 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
     // Not ready yet — LogonUI will call GetSerialization() again
     // due to auto-logon being set. Our auth timeout guard above
     // ensures we eventually give up and don't block forever.
-    FACELOGIN_INFO(L"=== GetSerialization EXIT: not ready (state=%d, response=%d) ===",
-                  static_cast<int>(m_state), static_cast<int>(*pcpgsr));
     return S_OK;
 }
 
@@ -1073,9 +984,6 @@ STDMETHODIMP FaceLoginCredential::ReportResult(
     NTSTATUS ntsStatus, NTSTATUS ntsSubstatus,
     PWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon) {
-
-    FACELOGIN_INFO(L"=== ReportResult ENTER (status=0x%08X, substatus=0x%08X, state=%d) ===",
-                  ntsStatus, ntsSubstatus, static_cast<int>(m_state));
 
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
@@ -1296,7 +1204,6 @@ HRESULT FaceLoginCredential::PackCredentials(
     } else {
         packedUser = m_domain + L"\\" + m_username;
     }
-    FACELOGIN_INFO(L"CredPack user: \"%s\"", packedUser.c_str());
 
     if (!CredPackAuthenticationBufferW(
             packFlags,
@@ -1337,8 +1244,6 @@ HRESULT FaceLoginCredential::PackCredentials(
     pcpcs->ulAuthenticationPackage = ulAuthPackage;
     pcpcs->clsidCredentialProvider = CLSID_FaceLoginProvider;
 
-    FACELOGIN_INFO(L"Credentials packed successfully (%lu bytes, pkg=%lu)",
-                   cbPackedCreds, ulAuthPackage);
     return S_OK;
 }
 

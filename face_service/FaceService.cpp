@@ -371,8 +371,6 @@ bool FaceService::Initialize() {
 std::shared_ptr<FaceService::InferenceModels>
 FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
     failureReason = ModelLoadFailure::None;
-    FACELOGIN_INFO(L"Loading inference models in background...");
-
     auto models = std::make_shared<InferenceModels>();
 
     // 1. SCRFD detector (gnkps variant with five alignment keypoints).
@@ -388,7 +386,6 @@ FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
         FACELOGIN_ERROR(L"SCRFD detector failed to load — face detection unavailable");
         return {};
     }
-    FACELOGIN_INFO(L"SCRFD detector loaded");
 
     // 2. InsightFace recognizer (the largest resident model).
     models->recognizer = std::make_unique<OnnxRecognizer>();
@@ -404,7 +401,6 @@ FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
         FACELOGIN_ERROR(L"ONNX recognizer failed to load — recognition unavailable");
         return {};
     }
-    FACELOGIN_INFO(L"ONNX recognizer loaded — using InsightFace w600k_r50");
 
     // 3. Dual MiniFAS PAD. Never publish a partial bundle: authentication is
     // fail-closed unless detector, recognizer and both PAD sessions are ready.
@@ -424,7 +420,6 @@ FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
         return {};
     }
 
-    FACELOGIN_INFO(L"Anti-spoof models loaded (MiniFASNetV2 + MiniFASNetV1SE)");
     // Standalone runs inference in this process: warm the sessions during the
     // background load so the first auth frame doesn't pay ORT's first-run cost.
     WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);

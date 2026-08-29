@@ -122,17 +122,6 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
         m_inputName = m_session->GetInputNameAllocated(0, alloc).get();
         m_outputName = m_session->GetOutputNameAllocated(0, alloc).get();
 
-        FACELOGIN_INFO(L"OnnxRecognizer initialized: %s", modelPath.c_str());
-        FACELOGIN_INFO(L"  Input: %hs, Output: %hs", m_inputName.c_str(), m_outputName.c_str());
-        // Diagnostic for slow-machine reports (e.g. i5-13500H embedding ~1.4s):
-        // the thread count is derived from hardware_concurrency, which can be
-        // wrong in Session 0 or masked by power policies, and threads can land
-        // on E-cores. Knowing the actual value distinguishes "few threads"
-        // from "threads present but slow" in one log line.
-        FACELOGIN_INFO(L"  ONNX global intra-op threads: %d (hardware_concurrency=%zu)",
-                       OnnxThreadCount(),
-                       static_cast<size_t>(std::thread::hardware_concurrency()));
-
         m_initialized = true;
         return true;
     } catch (const std::exception& e) {
@@ -239,7 +228,6 @@ bool OnnxDetector::Initialize(const std::wstring& modelPath) {
             m_outputNames[i] = m_session->GetOutputNameAllocated(i, alloc).get();
         }
 
-        FACELOGIN_INFO(L"OnnxDetector initialized: %s", modelPath.c_str());
         m_initialized = true;
         return true;
     } catch (const std::exception& e) {
@@ -540,8 +528,6 @@ bool MiniFasEvaluator::Initialize(const std::wstring& modelPath, float cropScale
         m_inputWidth = static_cast<int>(inputShape[3]);
         m_cropScale = cropScale;
         m_initialized = true;
-        FACELOGIN_INFO(L"MiniFASNet initialized: %s (%dx%d, crop %.1f)",
-                       modelPath.c_str(), m_inputWidth, m_inputHeight, m_cropScale);
         return true;
     } catch (const std::exception& error) {
         FACELOGIN_ERROR(L"MiniFASNet initialization failed: %hs", error.what());
