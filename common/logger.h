@@ -12,6 +12,7 @@ namespace facelogin {
 // Simple file/console logger for debugging.
 // In production (credential provider), messages go to a log file.
 // In test/CLI programs, messages go to stdout or DebugOutput.
+// Log files are UTF-8 without BOM (directly readable by grep/git bash/PowerShell).
 
 enum class LogLevel {
     Debug,
@@ -69,6 +70,7 @@ private:
     void CheckRotation();   // rotate if m_logPath is stale (older than kMaxLogDays)
     void OpenLogFile();     // open m_logPath for append, stamp creation time on fresh files
     void PurgeDatedFiles(); // delete rotated <name>.<date>.log files past the window
+    void RotateAsideLegacyUtf16();  // one-time UTF-8 switch: rename a pre-switch UTF-16LE log to its dated name
 
     // Ring buffer for UI log viewer (cursor wraps when full)
     static constexpr size_t RING_SIZE = 2000;

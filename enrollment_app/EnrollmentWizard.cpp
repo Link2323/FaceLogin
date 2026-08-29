@@ -1711,7 +1711,9 @@ std::string EnrollmentWizard::GetLogLines() {
 
 std::string EnrollmentWizard::GetServiceLogLines() {
     // Read the service log file directly — avoids pipe message size limits.
-    // The log file is written in UTF-16LE (wchar_t on Windows).
+    // Log files are UTF-8 without BOM; files from pre-UTF-8 builds were
+    // UTF-16LE and are detected (BOM or 0x00 bytes — impossible in UTF-8)
+    // for a graceful fallback while such files still exist.
     std::wstring logPath = m_dataDir + L"\\log\\service.log";
     HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1730,44 +1732,66 @@ std::string EnrollmentWizard::GetServiceLogLines() {
     DWORD capSize = fileSize;
     if (capSize > 256 * 1024) capSize = 256 * 1024;
 
-    std::vector<wchar_t> wbuf(capSize / sizeof(wchar_t) + 1);
+    std::vector<char> buf(capSize);
     DWORD bytesRead = 0;
-    if (!ReadFile(hFile, wbuf.data(), capSize, &bytesRead, nullptr) || bytesRead < 2) {
+    if (!ReadFile(hFile, buf.data(), capSize, &bytesRead, nullptr) || bytesRead < 2) {
         CloseHandle(hFile);
         return "[\"Failed to read service log\"]";
     }
     CloseHandle(hFile);
 
-    size_t wlen = bytesRead / sizeof(wchar_t);
+    bool utf16 = (unsigned char)buf[0] == 0xFF && (unsigned char)buf[1] == 0xFE;
+    if (!utf16) {
+        for (DWORD i = 0; i < bytesRead; i++) {
+            if (buf[i] == '\0') { utf16 = true; break; }
+        }
+    }
 
-    // Parse lines: each log line ends with \r\n (wchar_t)
+    std::string text;
+    if (utf16) {
+        // Legacy UTF-16LE file — decode to UTF-8, then share the byte-level
+        // line parsing below.
+        int wlen = bytesRead / sizeof(wchar_t);
+        std::wstring wide(wlen, L'\0');
+        memcpy(&wide[0], buf.data(), wlen * sizeof(wchar_t));
+        if (!wide.empty() && wide.front() == 0xFEFF)
+            wide.erase(wide.begin());
+        int need = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
+                                       static_cast<int>(wide.size()),
+                                       nullptr, 0, nullptr, nullptr);
+        if (need > 0) {
+            text.resize(need);
+            WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
+                                static_cast<int>(wide.size()),
+                                &text[0], need, nullptr, nullptr);
+        }
+    } else {
+        text.assign(buf.data(), bytesRead);
+    }
+
+    // Parse lines: each log line ends with \r\n. Bytes pass through verbatim
+    // (the file is UTF-8); only JSON metacharacters are escaped.
     std::ostringstream ss;
     ss << "[";
     bool first = true;
     size_t pos = 0;
-    while (pos < wlen) {
+    while (pos < text.size()) {
         // Find end of line
         size_t lineStart = pos;
-        while (pos < wlen && wbuf[pos] != L'\r' && wbuf[pos] != L'\n') pos++;
+        while (pos < text.size() && text[pos] != '\r' && text[pos] != '\n') pos++;
         size_t lineLen = pos - lineStart;
         // Skip \r\n
-        while (pos < wlen && (wbuf[pos] == L'\r' || wbuf[pos] == L'\n')) pos++;
+        while (pos < text.size() && (text[pos] == '\r' || text[pos] == '\n')) pos++;
         if (lineLen == 0) continue;
 
         if (!first) ss << ",";
         first = false;
         ss << "\"";
         for (size_t i = 0; i < lineLen; i++) {
-            wchar_t ch = wbuf[lineStart + i];
-            if (ch == L'\\') ss << "\\\\";
-            else if (ch == L'"') ss << "\\\"";
-            else if (ch >= 0x20 && ch < 0x7F) ss << static_cast<char>(ch);
-            else {
-                // Non-ASCII character — convert via UTF-8
-                char mb[4] = {};
-                int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, mb, 4, nullptr, nullptr);
-                if (n > 0) ss.write(mb, n);
-            }
+            char ch = text[lineStart + i];
+            if (ch == '\\') ss << "\\\\";
+            else if (ch == '"') ss << "\\\"";
+            else ss << ch;
         }
         ss << "\"";
     }

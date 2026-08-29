@@ -53,6 +53,9 @@ void Logger::SetLogFile(const std::wstring& path) {
     // rotation existed), rotate it now. CheckRotation works on the path,
     // independent of m_hFile, so it is safe to call before opening.
     CheckRotation();
+    // Then move a legacy UTF-16LE file aside so the fresh UTF-8 stream never
+    // appends to a file in the old encoding.
+    RotateAsideLegacyUtf16();
     if (m_hFile != INVALID_HANDLE_VALUE) {
         CloseHandle(m_hFile);
         m_hFile = INVALID_HANDLE_VALUE;
@@ -154,11 +157,22 @@ void Logger::WriteToFile(const std::wstring& line) {
         OpenLogFile();
     }
     if (m_hFile != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        WriteFile(m_hFile, line.c_str(),
-                  static_cast<DWORD>(line.size() * sizeof(wchar_t)),
-                  &written, nullptr);
-        FlushFileBuffers(m_hFile);
+        // UTF-8 output: 3 bytes per wchar_t is the per-element worst case
+        // (U+0800..U+FFFF and the U+FFFD replacement char), so the conversion
+        // can never run out of buffer. Unpaired surrogates become U+FFFD via
+        // the default replacement behavior instead of failing the line.
+        static thread_local std::string utf8;
+        utf8.resize(line.size() * 3);
+        int bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(),
+                                        static_cast<int>(line.size()),
+                                        &utf8[0], static_cast<int>(utf8.size()),
+                                        nullptr, nullptr);
+        if (bytes > 0) {
+            DWORD written;
+            WriteFile(m_hFile, utf8.data(), static_cast<DWORD>(bytes),
+                      &written, nullptr);
+            FlushFileBuffers(m_hFile);
+        }
     }
     LeaveCriticalSection(&m_cs);
 }
@@ -304,6 +318,55 @@ void Logger::PurgeDatedFiles() {
             DeleteFileW((dir + L"\\" + fn).c_str());
     } while (FindNextFileW(find, &fd));
     FindClose(find);
+}
+
+// One-time transition for the UTF-8 switch: files written by older builds
+// hold UTF-16LE. Appending UTF-8 to such a file would leave it holding two
+// encodings that no reader can decode whole, so move it aside under its
+// dated rotation name (history stays readable as UTF-16) and let the caller
+// start a fresh file. Detection cannot false-positive on real UTF-8 log
+// content because UTF-8 never contains a 0x00 byte. Callers must hold m_cs.
+void Logger::RotateAsideLegacyUtf16() {
+    if (m_logPath.empty())
+        return;
+
+    HANDLE h = CreateFileW(m_logPath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return;  // no file yet — nothing to transition
+    unsigned char head[64];
+    DWORD got = 0;
+    BOOL ok = ReadFile(h, head, sizeof(head), &got, nullptr);
+    CloseHandle(h);
+    if (!ok || got < 2)
+        return;
+
+    bool utf16 = head[0] == 0xFF && head[1] == 0xFE;  // BOM (legacy files have none)
+    if (!utf16) {
+        for (DWORD i = 0; i < got; i++) {
+            if (head[i] == 0) { utf16 = true; break; }
+        }
+    }
+    if (!utf16)
+        return;
+
+    WIN32_FILE_ATTRIBUTE_DATA attrs = {};
+    if (!GetFileAttributesExW(m_logPath.c_str(), GetFileExInfoStandard, &attrs))
+        return;
+
+    // Close the current handle so the rename succeeds on Windows. On failure
+    // (e.g. another process holds the file), keep appending per the same
+    // retry-on-next-write contract as CheckRotation — the transition simply
+    // happens on a later SetLogFile.
+    if (m_hFile != INVALID_HANDLE_VALUE) {
+        CloseHandle(m_hFile);
+        m_hFile = INVALID_HANDLE_VALUE;
+    }
+    if (MoveFileExW(m_logPath.c_str(), BuildDatedLogPath(m_logPath, attrs).c_str(),
+                    MOVEFILE_REPLACE_EXISTING)) {
+        PurgeDatedFiles();
+    }
 }
 
 void Logger::AppendToRingBuffer(const std::wstring& line) {
