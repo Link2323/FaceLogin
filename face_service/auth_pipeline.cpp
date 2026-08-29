@@ -168,6 +168,13 @@ AuthPipelineResult AuthPipeline::Run() {
         bool identityRejected = false;
         bool failFastEmpty = false;
         bool failFastAttack = false;
+        // Both verifyBinding hosts return Retry only for "no enrolled identity
+        // matches this face". A face that keeps missing every enrolled identity
+        // never leaves the anchor frame, so no frame is ever counted and the
+        // persistent-attack timer fires without a single PAD verdict — that
+        // outcome is an unknown face, not a PAD failure, and must not report
+        // the misleading liveness message.
+        bool sawUnknownFace = false;
         std::wstring identityError;
 
         // Pacing invariant (explicit, auditable, stricter than the legacy
@@ -271,7 +278,11 @@ AuthPipelineResult AuthPipeline::Run() {
             timing.OnFaceDetected(faceNow);
 
             if (timing.ShouldFailPersistentAttack(faceNow)) {
-                FACELOGIN_INFO(L"PAD persistently below threshold for 2s — failing fast (likely attack)");
+                if (totalChecked == 0 && sawUnknownFace) {
+                    FACELOGIN_INFO(L"Face present but no enrolled identity matched for 2s — failing fast (unknown face)");
+                } else {
+                    FACELOGIN_INFO(L"PAD persistently below threshold for 2s — failing fast (likely attack)");
+                }
                 failFastAttack = true;
                 break;
             }
@@ -299,6 +310,7 @@ AuthPipelineResult AuthPipeline::Run() {
                     m_callbacks.verifyBinding(embedding, bindingCount);
                 if (decision.kind == BindingDecisionKind::Retry) {
                     scoreFuture.get();
+                    sawUnknownFace = true;
                     std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     continue;
                 }
@@ -405,6 +417,8 @@ AuthPipelineResult AuthPipeline::Run() {
             result.errorMessage = identityError;
         } else if (!timing.AnyFaceSeen()) {
             result.errorMessage = L"未检测到人脸";
+        } else if (totalChecked == 0 && sawUnknownFace) {
+            result.errorMessage = L"未识别到已注册人脸，请使用密码登录";
         } else {
             result.errorMessage = L"未通过活体检测，请使用真实人脸";
         }
