@@ -3,9 +3,11 @@
 #include "../common/logger.h"
 #include "resource.h"
 #include <wtsapi32.h>
+#include <shlobj.h>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "wtsapi32.lib")
+#pragma comment(lib, "shell32.lib")
 
 static const wchar_t* WND_CLASS = L"FaceloginWv2Wnd";
 
@@ -14,7 +16,10 @@ static const wchar_t* WND_CLASS = L"FaceloginWv2Wnd";
 // ==========================================================================
 
 STDMETHODIMP EnvCallback::Invoke(HRESULT hr, ICoreWebView2Environment* env) {
-    if (FAILED(hr) || !env) return hr;
+    if (FAILED(hr) || !env) {
+        FACELOGIN_ERROR(L"WebView2 environment creation failed: hr=0x%08X", hr);
+        return hr;
+    }
     HWND hWnd = m_hWnd;
     WebviewHost* self = (WebviewHost*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
     if (!self) return E_FAIL;
@@ -32,7 +37,10 @@ STDMETHODIMP EnvCallback::Invoke(HRESULT hr, ICoreWebView2Environment* env) {
 // ==========================================================================
 
 STDMETHODIMP CtrlCallback::Invoke(HRESULT hr, ICoreWebView2Controller* ctrl) {
-    if (FAILED(hr) || !ctrl) return hr;
+    if (FAILED(hr) || !ctrl) {
+        FACELOGIN_ERROR(L"WebView2 controller creation failed: hr=0x%08X", hr);
+        return hr;
+    }
     HWND hWnd = m_hWnd;
     WebviewHost* self = (WebviewHost*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
     if (!self) return E_FAIL;
@@ -195,15 +203,44 @@ LRESULT WebviewHost::HandleMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(hWnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
         }
 
-        // Prepare WebView2 user data folder in system temp to avoid
-        // polluting the EXE directory with a .WebView2 folder.
-        wchar_t tempPath[MAX_PATH];
-        GetTempPathW(MAX_PATH, tempPath);
-        std::wstring wv2DataDir = std::wstring(tempPath) + L"FaceLoginConsole.WebView2";
-        CreateDirectoryW(wv2DataDir.c_str(), nullptr);
+        // WebView2 user data folder must be an absolute path in a per-user
+        // writable location: the install dir is ACL-locked to
+        // SYSTEM+Administrators and WebView2's sandboxed child processes
+        // cannot write there. Derive it from %LOCALAPPDATA% (stable, unlike
+        // the inherited TEMP env) and create it recursively before handing
+        // it to the loader. The chosen folder and any failure HRESULT are
+        // logged — environment creation is otherwise completely silent.
+        std::wstring wv2DataDir;
+        wchar_t localAppData[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData)) && localAppData[0]) {
+            wv2DataDir = std::wstring(localAppData) + L"\\FaceLogin\\WebView2";
+            int mkErr = SHCreateDirectoryExW(nullptr, wv2DataDir.c_str(), nullptr);
+            if (mkErr != ERROR_SUCCESS && mkErr != ERROR_ALREADY_EXISTS && mkErr != ERROR_FILE_EXISTS) {
+                FACELOGIN_WARN(L"WebView2: create UDF dir failed err=%d: %s", mkErr, wv2DataDir.c_str());
+                wv2DataDir.clear();
+            }
+        }
+        if (wv2DataDir.empty()) {
+            wchar_t tempPath[MAX_PATH] = {};
+            if (GetTempPathW(MAX_PATH, tempPath) && tempPath[0]) {
+                wv2DataDir = std::wstring(tempPath) + L"FaceLoginConsole.WebView2";
+                CreateDirectoryW(wv2DataDir.c_str(), nullptr);
+            }
+        }
+        FACELOGIN_INFO(L"WebView2 user data folder: %s",
+                       wv2DataDir.empty() ? L"(loader default)" : wv2DataDir.c_str());
+
+        // The loader gives WEBVIEW2_USER_DATA_FOLDER priority over the
+        // userDataFolder argument and checks existence, not emptiness: a host
+        // that carries the variable set to "" (Wails's go-webview2 does this
+        // via preventEnvAndRegistryOverrides) silently discards our folder and
+        // falls back to the exe-adjacent default. Remove it so our choice is
+        // the one that counts, no matter who launched us.
+        SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", nullptr);
 
         EnvCallback* cb = new EnvCallback(hWnd);
-        CreateCoreWebView2EnvironmentWithOptions(nullptr, wv2DataDir.c_str(), nullptr, cb);
+        CreateCoreWebView2EnvironmentWithOptions(
+            nullptr, wv2DataDir.empty() ? nullptr : wv2DataDir.c_str(), nullptr, cb);
         return 0;
     }
     case WM_SIZE:

@@ -450,6 +450,20 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, reb
 		}
 	}
 
+	// The WebView2 runtime's legacy default user-data folder next to the
+	// console EXE (predates the move to %LOCALAPPDATA%). Removed on every
+	// uninstall/upgrade so the install dir can finalize cleanly; harmless if
+	// absent.
+	if wv2Dir := filepath.Join(destDir, "FaceLoginConsole.exe.WebView2"); DirExists(wv2Dir) {
+		pending, removeErr := removeAllOrScheduleReboot(wv2Dir)
+		if pending {
+			rebootRequired = true
+		}
+		if removeErr != nil {
+			recordErr(removeErr)
+		}
+	}
+
 	return removed, rebootRequired, firstErr
 }
 
@@ -460,6 +474,23 @@ func isKnownRootPayload(name string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// isOwnedSubdir reports whether a subdirectory of the install dir belongs to
+// the product and may be removed on uninstall. models/data/log are deployed
+// by the installer; FaceLoginConsole.exe.WebView2 is created by the WebView2
+// runtime next to the console EXE (its legacy default user-data-folder
+// location) — without recognizing it, the dir looks unknown and the whole
+// install folder is left behind.
+func isOwnedSubdir(name string) bool {
+	switch {
+	case strings.EqualFold(name, "models"),
+		strings.EqualFold(name, "data"),
+		strings.EqualFold(name, "log"),
+		strings.EqualFold(name, "FaceLoginConsole.exe.WebView2"):
+		return true
 	}
 	return false
 }
@@ -481,10 +512,7 @@ func RemoveInstalledDir(destDir string) (removed, rebootRequired bool, err error
 	for _, entry := range entries {
 		entryPath := filepath.Join(destDir, entry.Name())
 		if entry.IsDir() {
-			owned := strings.EqualFold(entry.Name(), "models") ||
-				strings.EqualFold(entry.Name(), "data") ||
-				strings.EqualFold(entry.Name(), "log")
-			if !owned {
+			if !isOwnedSubdir(entry.Name()) {
 				return false, rebootRequired, fmt.Errorf("install directory contains unknown subdirectory: %s", entry.Name())
 			}
 			pending, removeErr := removeAllOrScheduleReboot(entryPath)
