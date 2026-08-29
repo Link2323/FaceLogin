@@ -41,6 +41,15 @@ FaceLoginProvider::FaceLoginProvider() {
     m_rgFieldDescriptors[3].cpft = CPFT_COMMAND_LINK;
     m_rgFieldDescriptors[3].pszLabel = const_cast<LPWSTR>(L"切换到密码登录");
     m_rgFieldDescriptors[3].guidFieldType = GUID_NULL;
+
+    // Field 4: Small text — the "请按任意键重试" hint line on failure tiles.
+    // Tile text fields do not render "\r\n" as a line break (装机实测
+    // 2026-08-29), so the two-line layout (reason / hint) needs its own
+    // field instead of an embedded newline in the status text.
+    m_rgFieldDescriptors[4].dwFieldID = 4;
+    m_rgFieldDescriptors[4].cpft = CPFT_SMALL_TEXT;
+    m_rgFieldDescriptors[4].pszLabel = const_cast<LPWSTR>(L"重试提示");
+    m_rgFieldDescriptors[4].guidFieldType = GUID_NULL;
 }
 
 FaceLoginProvider::~FaceLoginProvider() {

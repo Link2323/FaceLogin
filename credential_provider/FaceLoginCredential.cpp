@@ -28,15 +28,17 @@
 // The SAME watcher, with the SAME qualifying-wave gate, is re-armed for the
 // in-place failure tile (ArmFailureRetryDetection): after a terminal
 // failure any qualifying press (key or mouse button) requests another face
-// round via StartExplicitRetry — the command link remains as the visible
-// explicit affordance. Password entry stays structurally excluded: this
-// tile has no editable field, and SetDeselected stops the watcher before
-// the user can type anywhere else. One deliberate hole: when the triggered
-// round fails IMMEDIATELY on the watcher thread itself (pipe connect/send
-// error → "人脸登录服务不可用"), ArmFailureRetryDetection no-ops because
-// that thread still occupies the running slot and nothing re-arms after it
-// exits — acceptable because a dead service makes press-to-retry useless
-// noise anyway; the command link still works once it recovers.
+// round via StartExplicitRetry. The failure tile carries NO command link —
+// the affordance is field 4 ("请按任意键重试", its own field because tile
+// text ignores "\r\n"). Password entry stays structurally excluded: this tile has no editable field, and
+// SetDeselected stops the watcher before the user can type anywhere else.
+// One deliberate hole: when the triggered round fails IMMEDIATELY on the
+// watcher thread itself (pipe connect/send error → "人脸登录服务不可用"),
+// ArmFailureRetryDetection no-ops because that thread still occupies the
+// running slot and nothing re-arms after it exits — acceptable because a
+// dead service makes press-to-retry useless noise anyway; re-selecting the
+// tile (SetSelected → ArmFailureRetryDetection) re-arms once the service
+// recovers.
 //
 // Trigger algorithm (residue quarantine + quiesce):
 //
@@ -764,7 +766,9 @@ STDMETHODIMP FaceLoginCredential::GetFieldState(
     *pcpfis = CPFIS_NONE;
 
     switch (dwFieldID) {
-    case 0: // "Face Login" label
+    case 0: // "Face Login" label — kept on the failure tile too (user
+        // decision 2026-08-29: a title-less tile reads worse than a
+        // three-line one; line count was never the complaint).
         *pcpfs = CPFS_DISPLAY_IN_BOTH;
         break;
 
@@ -776,10 +780,23 @@ STDMETHODIMP FaceLoginCredential::GetFieldState(
         *pcpfs = CPFS_HIDDEN;
         break;
 
-    case 3: // Retry is explicit after failure; otherwise retain password link.
+    case 3: // Password-switch link, deselected tile-list view only. The
+        // failure tile carries NO link: retries there are input-triggered
+        // (ArmFailureRetryDetection) and field 4 carries the hint.
+        *pcpfs = facelogin::credential_provider::IsRetryableFailure(m_state)
+            ? CPFS_HIDDEN
+            : CPFS_DISPLAY_IN_DESELECTED_TILE;
+        break;
+
+    case 4: // "请按任意键重试" hint line under the failure reason (its own
+        // field because tile text fields ignore "\r\n" — 装机实测
+        // 2026-08-29). Enumeration shows it for any retryable failure:
+        // a re-selected tile has SetSelected-armed detection, so the hint
+        // is truthful by the time it renders. The one unarmed case (dead
+        // service) hides it in-place from PresentRetryableFailure.
         *pcpfs = facelogin::credential_provider::IsRetryableFailure(m_state)
             ? CPFS_DISPLAY_IN_SELECTED_TILE
-            : CPFS_DISPLAY_IN_DESELECTED_TILE;
+            : CPFS_HIDDEN;
         break;
 
     default:
@@ -816,7 +833,7 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
             if (!m_statusText.empty()) {
                 return SHStrDupW(m_statusText.c_str(), ppwsz);
             }
-            return SHStrDupW(L"人脸识别失败，按任意键或点击重试", ppwsz);
+            return SHStrDupW(L"人脸识别失败", ppwsz);
         case State::Error:
             // Show the specific error message from the service (e.g. anti-spoof
             // rejection) if one was received; otherwise the generic fallback.
@@ -831,12 +848,11 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
     case 2: // Submit button
         return SHStrDupW(L"", ppwsz);
 
-    case 3: // Command link
-        return SHStrDupW(
-            facelogin::credential_provider::IsRetryableFailure(m_state)
-                ? L"重新尝试人脸识别"
-                : L"切换到密码登录",
-            ppwsz);
+    case 3: // Command link — password switch, deselected list view only
+        return SHStrDupW(L"切换到密码登录", ppwsz);
+
+    case 4: // Retry hint line (visibility is state-driven, see GetFieldState)
+        return SHStrDupW(L"请按任意键重试", ppwsz);
 
     default:
         return E_INVALIDARG;
@@ -899,6 +915,9 @@ STDMETHODIMP FaceLoginCredential::SetComboBoxSelectedValue(DWORD dwFieldID, DWOR
 STDMETHODIMP FaceLoginCredential::CommandLinkClicked(DWORD dwFieldID) {
     if (dwFieldID == 3) {
         if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
+            // UI-unreachable since the failure tile hides field 3 — kept as
+            // defense (a hidden command link must still do the right thing
+            // if LogonUI ever dispatches it, e.g. via keyboard focus).
             FACELOGIN_INFO(L"User explicitly requested face authentication retry");
             StartExplicitRetry();
             return S_OK;
@@ -1434,16 +1453,22 @@ void FaceLoginCredential::PresentRetryableFailure(
 
     m_state = failureState;
     m_authStartTime = 0;
-    m_statusText = statusText.empty() ? L"人脸识别失败，按任意键或点击重试"
-                                      : statusText;
+    m_statusText = statusText.empty() ? L"人脸识别失败" : statusText;
 
-    // Update the selected tile in-place. In particular, do not call
-    // CredentialsChanged: that causes UnAdvise/Advise and used to restart the
-    // global input watcher while the user was typing a password.
-    if (m_pCredentialEvents) {
-        m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
-        m_pCredentialEvents->SetFieldString(this, 3, L"重新尝试人脸识别");
-        m_pCredentialEvents->SetFieldState(this, 3, CPFS_DISPLAY_IN_SELECTED_TILE);
+    // The reason line states WHAT failed; field 4 below owns "how to
+    // retry" — strip instruction tails that would read as duplication next
+    // to "请按任意键重试" (用户定稿 2026-08-29). Only the two tails whose
+    // retry the hint actually serves; password/re-enroll instructions
+    // (e.g. "请使用密码登录并重新录入人脸") stay — the hint does not
+    // replace them.
+    for (const wchar_t* tail : {L"，请重试", L"，请使用真实人脸"}) {
+        const size_t tailLen = wcslen(tail);
+        if (m_statusText.size() > tailLen &&
+            m_statusText.compare(m_statusText.size() - tailLen, tailLen,
+                                 tail) == 0) {
+            m_statusText.erase(m_statusText.size() - tailLen);
+            break;
+        }
     }
 
     // Re-arm the passive watcher for the failure tile: a qualifying press
@@ -1451,6 +1476,28 @@ void FaceLoginCredential::PresentRetryableFailure(
     // called on the still-running watcher thread (immediate pipe connect/
     // send failure) — documented at the top of this file.
     ArmFailureRetryDetection();
+
+    // The retry affordance is field 4 ("请按任意键重试") under the reason
+    // line — a separate field because tile text ignores "\r\n". Show it
+    // exactly when passive retry is live after this presentation: always
+    // for Failed (those presentations never run on the watcher thread),
+    // and for Error only when the running watcher is NOT the calling
+    // thread — the immediate connect/send failure on the watcher thread
+    // leaves nothing armed (GetThreadId identifies that caller), so its
+    // "服务不可用" tile stays bare instead of promising a dead gesture.
+    const bool passiveRetryLive = m_inputThreadRunning &&
+        GetThreadId(m_hInputThread) != GetCurrentThreadId();
+    const bool showRetryHint = failureState == State::Failed || passiveRetryLive;
+
+    // Update the selected tile in-place. In particular, do not call
+    // CredentialsChanged: that causes UnAdvise/Advise and used to restart the
+    // global input watcher while the user was typing a password.
+    if (m_pCredentialEvents) {
+        m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
+        m_pCredentialEvents->SetFieldState(this, 3, CPFS_HIDDEN);
+        m_pCredentialEvents->SetFieldState(
+            this, 4, showRetryHint ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN);
+    }
     FACELOGIN_INFO(L"Terminal failure shown in-place; passive retry %s",
                    m_inputThreadRunning ? L"re-armed" : L"not armed (service down)");
 }
@@ -1472,6 +1519,7 @@ void FaceLoginCredential::StartExplicitRetry() {
         m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
         m_pCredentialEvents->SetFieldString(this, 3, L"切换到密码登录");
         m_pCredentialEvents->SetFieldState(this, 3, CPFS_DISPLAY_IN_DESELECTED_TILE);
+        m_pCredentialEvents->SetFieldState(this, 4, CPFS_HIDDEN);
     }
 
     // This is the single retry entry: the visible command link AND the
