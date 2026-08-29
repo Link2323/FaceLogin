@@ -8,25 +8,14 @@
 namespace facelogin {
 
 PipeClient::PipeClient() {
-    InitializeCriticalSection(&m_cs);
-    m_csInitialized = true;
-    m_hDataReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_hReadStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 }
 
 PipeClient::~PipeClient() {
     Disconnect();
-    if (m_hDataReady) {
-        CloseHandle(m_hDataReady);
-        m_hDataReady = nullptr;
-    }
     if (m_hReadStop) {
         CloseHandle(m_hReadStop);
         m_hReadStop = nullptr;
-    }
-    if (m_csInitialized) {
-        DeleteCriticalSection(&m_cs);
-        m_csInitialized = false;
     }
 }
 
@@ -136,6 +125,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
     // thread stuck there would keep the pipe's client file object alive
     // and the server could never observe the disconnect. We instead check
     // PeekNamedPipe + the stop event in a short loop and exit promptly.
+    wchar_t buffer[4096];
     while (true) {
         // Stop signal (set by Disconnect) — exit without touching the pipe.
         if (WaitForSingleObject(self->m_hReadStop, 0) == WAIT_OBJECT_0) {
@@ -158,14 +148,8 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             } else {
                 FACELOGIN_WARN(L"Background read failed: %lu", err);
             }
-            // Signal the main thread that the pipe is dead
-            EnterCriticalSection(&self->m_cs);
-            self->m_readSuccess = false;
-            self->m_bytesRead = 0;
-            self->m_connected = false;
-            LeaveCriticalSection(&self->m_cs);
-            SetEvent(self->m_hDataReady);
             // Notify — connection lost unexpectedly
+            self->m_connected = false;
             if (self->m_onResponse) {
                 self->m_onResponse(false, L"");
             }
@@ -173,11 +157,11 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
         }
 
         // Data is available — ReadFile returns immediately.
-        ZeroMemory(self->m_readBuffer, sizeof(self->m_readBuffer));
+        ZeroMemory(buffer, sizeof(buffer));
         DWORD bytesRead = 0;
         BOOL result = ReadFile(self->m_hPipe,
-                               self->m_readBuffer,
-                               static_cast<DWORD>(sizeof(self->m_readBuffer) - sizeof(wchar_t)),
+                               buffer,
+                               static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t)),
                                &bytesRead,
                                nullptr);
 
@@ -189,12 +173,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             } else {
                 FACELOGIN_WARN(L"Background read failed: %lu", err);
             }
-            EnterCriticalSection(&self->m_cs);
-            self->m_readSuccess = false;
-            self->m_bytesRead = 0;
             self->m_connected = false;
-            LeaveCriticalSection(&self->m_cs);
-            SetEvent(self->m_hDataReady);
             if (self->m_onResponse) {
                 self->m_onResponse(false, L"");
             }
@@ -203,10 +182,10 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
 
         // Parse message from buffer
         size_t len = bytesRead / sizeof(wchar_t);
-        while (len > 0 && self->m_readBuffer[len - 1] == L'\0') {
+        while (len > 0 && buffer[len - 1] == L'\0') {
             len--;
         }
-        std::wstring msg(self->m_readBuffer, len);
+        std::wstring msg(buffer, len);
         // SECURITY: AUTH_SUCCESS carries the plaintext password in its payload
         // (AUTH_SUCCESS:SID:UPN:DOMAIN\USER:PASSWORD). Never log its content —
         // even a truncated prefix leaks password characters into a Users-readable
@@ -229,17 +208,14 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             continue;  // keep looping for more messages
         }
 
-        // Terminal message — store and signal
-        EnterCriticalSection(&self->m_cs);
-        self->m_bytesRead = bytesRead;
-        self->m_readSuccess = true;
-        LeaveCriticalSection(&self->m_cs);
-
-        SetEvent(self->m_hDataReady);
-
+        // Terminal message — deliver via callback, then scrub both plaintext
+        // copies (the wstring heap buffer and the stack buffer) before this
+        // thread exits. The credential has already copied what it needs.
         if (self->m_onResponse) {
             self->m_onResponse(success, msg);
         }
+        SecureZeroMemory(msg.data(), msg.size() * sizeof(wchar_t));
+        SecureZeroMemory(buffer, sizeof(buffer));
         break;
     }
 
@@ -254,11 +230,7 @@ void PipeClient::StartBackgroundRead(OnResponseCallback onResponse,
     CleanupReadThread();
 
     // Reset state
-    ResetEvent(m_hDataReady);
     ResetEvent(m_hReadStop);
-    m_bytesRead = 0;
-    m_readSuccess = false;
-    ZeroMemory(m_readBuffer, sizeof(m_readBuffer));
     m_onResponse = std::move(onResponse);
     m_onStatus   = std::move(onStatus);
 
@@ -270,35 +242,6 @@ void PipeClient::StartBackgroundRead(OnResponseCallback onResponse,
     if (!m_hReadThread) {
         FACELOGIN_ERROR(L"Failed to create read thread: %lu", GetLastError());
     }
-}
-
-bool PipeClient::CheckResponse(std::wstring& outMessage) {
-    if (!m_hDataReady) return false;
-
-    // Non-blocking: has the background thread finished?
-    DWORD waitResult = WaitForSingleObject(m_hDataReady, 0);
-    if (waitResult != WAIT_OBJECT_0) {
-        return false; // still waiting
-    }
-
-    // Thread is done — grab the result under the CS
-    EnterCriticalSection(&m_cs);
-    if (m_readSuccess && m_bytesRead > 0) {
-        size_t len = m_bytesRead / sizeof(wchar_t);
-        while (len > 0 && m_readBuffer[len - 1] == L'\0') {
-            len--;
-        }
-        outMessage.assign(m_readBuffer, len);
-    }
-    LeaveCriticalSection(&m_cs);
-
-    // Clean up the thread handle
-    if (m_hReadThread) {
-        CloseHandle(m_hReadThread);
-        m_hReadThread = nullptr;
-    }
-
-    return m_readSuccess && m_bytesRead > 0;
 }
 
 void PipeClient::Disconnect() {
@@ -318,9 +261,6 @@ void PipeClient::Disconnect() {
     m_connected = false;
 
     CleanupReadThread();
-
-    m_bytesRead = 0;
-    m_readSuccess = false;
 }
 
 } // namespace facelogin

@@ -837,9 +837,7 @@ void FaceService::Run() {
                     if (!m_webcamDS->Initialize(640, 480, Utf8ToWstr(m_config.camera_device))) {
                         FACELOGIN_ERROR(L"DirectShow camera init failed on demand");
                         m_webcamDS.reset();
-                        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"摄像头不可用"));
-                        FlushFileBuffers(m_pipeServer->GetHandle());
-                        m_pipeServer->DrainOutput(5000);
+                        SendAuthErrorMessage(L"摄像头不可用");
                         m_pipeServer->Disconnect();
                         continue;
                     }
@@ -889,14 +887,73 @@ void FaceService::RequestStop() {
     }
 }
 
+// ============================================================================
+// Shared auth-session helpers (public pipe + identity binding)
+// ============================================================================
+
+BindingDecision FaceService::VerifyIdentityBinding(
+    const std::vector<float>& embedding, unsigned int bindingIndex,
+    std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
+    std::wstring& initialSid) const {
+    auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
+                                              m_matchThreshold);
+    if (!identity) {
+        return BindingDecision{BindingDecisionKind::Retry, {}};
+    }
+
+    if (bindingIndex == 0) {
+        if (lockedIdentity) {
+            return BindingDecision{BindingDecisionKind::Reject,
+                                   L"身份验证状态异常，请使用密码登录"};
+        }
+        if (identity->sid.empty()) {
+            FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
+            return BindingDecision{BindingDecisionKind::Reject,
+                                   L"身份数据无效，请使用密码登录并重新录入人脸"};
+        }
+        initialSid = identity->sid;
+        lockedIdentity = std::move(identity);
+        FACELOGIN_INFO(L"Identity locked: %s (distance=%.4f) [1/3]",
+                       lockedIdentity->username.c_str(), lockedIdentity->distance);
+        return BindingDecision{BindingDecisionKind::Accept, {}};
+    }
+
+    if (!lockedIdentity || bindingIndex > 2 || identity->sid.empty() ||
+        identity->sid != initialSid) {
+        FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
+        return BindingDecision{BindingDecisionKind::Reject,
+                               L"活体验证期间人脸不匹配，请重试"};
+    }
+
+    FACELOGIN_INFO(L"Identity confirmed: %s [%u/3]", initialSid.c_str(),
+                   bindingIndex + 1);
+    return BindingDecision{BindingDecisionKind::Accept, {}};
+}
+
+bool FaceService::SendStatusMessage(const std::wstring& text) {
+    const bool ok = m_pipeServer->WriteMessage(
+        std::wstring(ipc::MSG_STATUS_PREFIX) + text);
+    FlushFileBuffers(m_pipeServer->GetHandle());
+    return ok;
+}
+
+bool FaceService::SendTerminalMessage(const std::wstring& message) {
+    const bool ok = m_pipeServer->WriteMessage(message);
+    FlushFileBuffers(m_pipeServer->GetHandle());
+    m_pipeServer->DrainOutput(5000);
+    return ok;
+}
+
+bool FaceService::SendAuthErrorMessage(const std::wstring& message) {
+    return SendTerminalMessage(ipc::BuildAuthErrorMessage(message));
+}
+
 bool FaceService::ProcessWorkerAuthRequest() {
     FACELOGIN_INFO(L"Starting face authentication through worker...");
 
     if (m_store->GetUserCount() == 0) {
         FACELOGIN_WARN(L"No registered users");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"没有注册用户"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(L"没有注册用户");
         return false;
     }
 
@@ -926,9 +983,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
             }
         }
         if (workerNeedsWait) {
-            m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) +
-                                       L"正在加载模型...");
-            FlushFileBuffers(m_pipeServer->GetHandle());
+            SendStatusMessage(L"正在加载模型...");
         }
         m_modelCv.notify_all();
 
@@ -946,40 +1001,15 @@ bool FaceService::ProcessWorkerAuthRequest() {
         } else {
             AuthWorkerCallbacks callbacks;
             callbacks.reportStatus = [this](const std::wstring& text) {
-                m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + text);
-                FlushFileBuffers(m_pipeServer->GetHandle());
+                SendStatusMessage(text);
             };
             callbacks.isCancelled = [this]() {
                 return !m_running || m_pipeServer->IsClientDisconnected();
             };
             callbacks.verifyBinding = [this, &lockedIdentity, &initialSid](
                 const std::vector<float>& embedding, unsigned int bindingIndex) {
-                auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
-                                                          m_matchThreshold);
-                if (!identity) return BindingDecision{BindingDecisionKind::Retry, {}};
-
-                if (bindingIndex == 0) {
-                    if (lockedIdentity) {
-                        return BindingDecision{BindingDecisionKind::Reject,
-                                               L"身份验证状态异常，请使用密码登录"};
-                    }
-                    if (identity->sid.empty()) {
-                        FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
-                        return BindingDecision{BindingDecisionKind::Reject,
-                                               L"身份数据无效，请使用密码登录并重新录入人脸"};
-                    }
-                    initialSid = identity->sid;
-                    lockedIdentity = std::move(identity);
-                    return BindingDecision{BindingDecisionKind::Accept, {}};
-                }
-
-                if (!lockedIdentity || bindingIndex > 2 || identity->sid.empty() ||
-                    identity->sid != initialSid) {
-                    FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
-                    return BindingDecision{BindingDecisionKind::Reject,
-                                           L"活体验证期间人脸不匹配，请重试"};
-                }
-                return BindingDecision{BindingDecisionKind::Accept, {}};
+                return VerifyIdentityBinding(embedding, bindingIndex,
+                                             lockedIdentity, initialSid);
             };
             workerResult = worker->Authenticate(std::move(callbacks));
         }
@@ -997,9 +1027,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     if (workerResult.timedOut) {
         MarkAuthWorkerConsumed(true);
         FACELOGIN_INFO(L"Authentication timed out in worker");
-        m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
     if (!workerResult.succeeded) {
@@ -1008,18 +1036,13 @@ bool FaceService::ProcessWorkerAuthRequest() {
             ? L"认证工作进程执行失败，请使用密码登录"
             : workerResult.errorMessage;
         FACELOGIN_WARN(L"Authentication worker failed: %s", message.c_str());
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(message));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(message);
         return false;
     }
     if (!lockedIdentity) {
         MarkAuthWorkerConsumed(true);
         FACELOGIN_ERROR(L"Worker reported success without a parent-bound identity");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            L"身份验证状态异常，请使用密码登录"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(L"身份验证状态异常，请使用密码登录");
         return false;
     }
 
@@ -1028,11 +1051,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     if (!credential) {
         MarkAuthWorkerConsumed(true);
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            L"账户凭据不可用，请使用密码登录"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
-        SecureClearMatchPassword(credential);
+        SendAuthErrorMessage(L"账户凭据不可用，请使用密码登录");
         return false;
     }
 
@@ -1044,6 +1063,9 @@ bool FaceService::ProcessWorkerAuthRequest() {
     std::wstring message = ipc::BuildAuthSuccessMessage(
         credential->sid, credential->upn, domain, credential->username,
         credential->password);
+    // Success handoff: write + flush now, drain LAST (after the logs, worker
+    // teardown and registry writes) so waiting for the client to consume the
+    // message never delays resource reclamation on the unlock critical path.
     const bool writeOk = m_pipeServer->WriteMessage(message);
     FlushFileBuffers(m_pipeServer->GetHandle());
     SecureClearWString(message);
@@ -1091,9 +1113,7 @@ bool FaceService::ProcessAuthRequest() {
         modelsNeedWait = m_modelState != ModelState::Ready;
     }
     if (modelsNeedWait) {
-        m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) +
-                                   L"正在加载模型...");
-        FlushFileBuffers(m_pipeServer->GetHandle());
+        SendStatusMessage(L"正在加载模型...");
     }
 
     auto models = AcquireModelsForAuth();
@@ -1102,17 +1122,12 @@ bool FaceService::ProcessAuthRequest() {
         const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
         const wchar_t* loadError = ModelLoadFailureMessage(
             loadFailure == ModelLoadFailure::None ? ModelLoadFailure::Load : loadFailure);
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(loadError));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(loadError);
         return false;
     }
     if (!models->detector || !models->recognizer || !models->antiSpoof) {
         FACELOGIN_ERROR(L"Model lifecycle invariant violated — incomplete bundle published");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            L"服务模型状态异常，请使用密码登录"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(L"服务模型状态异常，请使用密码登录");
         return false;
     }
     if (!models->antiSpoof->IsInitialized()) {
@@ -1120,16 +1135,12 @@ bool FaceService::ProcessAuthRequest() {
         const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
         const wchar_t* message = ModelLoadFailureMessage(
             loadFailure == ModelLoadFailure::None ? ModelLoadFailure::Load : loadFailure);
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(message));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(message);
         return false;
     }
     if (m_store->GetUserCount() == 0) {
         FACELOGIN_WARN(L"No registered users");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(L"没有注册用户"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(L"没有注册用户");
         return false;
     }
 
@@ -1149,44 +1160,12 @@ bool FaceService::ProcessAuthRequest() {
         return m_pipeServer->IsClientDisconnected();
     };
     callbacks.reportStatus = [this](const std::wstring& text) {
-        m_pipeServer->WriteMessage(std::wstring(ipc::MSG_STATUS_PREFIX) + text);
-        FlushFileBuffers(m_pipeServer->GetHandle());
+        SendStatusMessage(text);
     };
     callbacks.verifyBinding = [this, &lockedIdentity, &initialSid](
         const std::vector<float>& embedding, unsigned int bindingIndex) {
-        auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
-                                                  m_matchThreshold);
-        if (!identity) {
-            return BindingDecision{BindingDecisionKind::Retry, {}};
-        }
-
-        if (bindingIndex == 0) {
-            if (lockedIdentity) {
-                return BindingDecision{BindingDecisionKind::Reject,
-                                       L"身份验证状态异常，请使用密码登录"};
-            }
-            if (identity->sid.empty()) {
-                FACELOGIN_ERROR(L"Matched credential has an empty SID — enrollment data is invalid");
-                return BindingDecision{BindingDecisionKind::Reject,
-                                       L"身份数据无效，请使用密码登录并重新录入人脸"};
-            }
-            initialSid = identity->sid;
-            lockedIdentity = std::move(identity);
-            FACELOGIN_INFO(L"Identity locked: %s (distance=%.4f) [1/3]",
-                           lockedIdentity->username.c_str(), lockedIdentity->distance);
-            return BindingDecision{BindingDecisionKind::Accept, {}};
-        }
-
-        if (!lockedIdentity || bindingIndex > 2 || identity->sid.empty() ||
-            identity->sid != initialSid) {
-            FACELOGIN_WARN(L"Identity changed during anti-spoof — rejecting face swap");
-            return BindingDecision{BindingDecisionKind::Reject,
-                                   L"活体验证期间人脸不匹配，请重试"};
-        }
-
-        FACELOGIN_INFO(L"Identity confirmed: %s [%u/3]", initialSid.c_str(),
-                       bindingIndex + 1);
-        return BindingDecision{BindingDecisionKind::Accept, {}};
+        return VerifyIdentityBinding(embedding, bindingIndex,
+                                     lockedIdentity, initialSid);
     };
 
     AuthPipeline pipeline(
@@ -1200,26 +1179,19 @@ bool FaceService::ProcessAuthRequest() {
         return false;
     }
     if (result.timedOut) {
-        m_pipeServer->WriteMessage(ipc::MSG_AUTH_TIMEOUT);
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
     if (!result.succeeded) {
         const std::wstring error = result.errorMessage.empty()
             ? L"认证过程异常，请使用密码登录"
             : result.errorMessage;
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(error));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(error);
         return false;
     }
     if (!lockedIdentity) {
         FACELOGIN_ERROR(L"Authentication reached final release without a locked identity");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            L"身份验证状态异常，请使用密码登录"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
+        SendAuthErrorMessage(L"身份验证状态异常，请使用密码登录");
         return false;
     }
 
@@ -1227,11 +1199,7 @@ bool FaceService::ProcessAuthRequest() {
                                                      lockedIdentity->distance);
     if (!credential) {
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
-        m_pipeServer->WriteMessage(ipc::BuildAuthErrorMessage(
-            L"账户凭据不可用，请使用密码登录"));
-        FlushFileBuffers(m_pipeServer->GetHandle());
-        m_pipeServer->DrainOutput(5000);
-        SecureClearMatchPassword(credential);
+        SendAuthErrorMessage(L"账户凭据不可用，请使用密码登录");
         return false;
     }
 
@@ -1245,6 +1213,8 @@ bool FaceService::ProcessAuthRequest() {
     std::wstring message = ipc::BuildAuthSuccessMessage(
         credential->sid, credential->upn, domain, credential->username,
         credential->password);
+    // Success handoff: write + flush now, drain LAST (after logs, registry
+    // write and camera shutdown) — see the worker path for the reasoning.
     const bool writeOk = m_pipeServer->WriteMessage(message);
     FlushFileBuffers(m_pipeServer->GetHandle());
     SecureClearWString(message);

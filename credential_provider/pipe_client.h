@@ -10,13 +10,14 @@ namespace facelogin {
 // Connects to the FaceLogin service to send/receive authentication messages.
 //
 // Runs in LogonUI.exe (SYSTEM context on Secure Desktop).
-// Uses a background thread with blocking synchronous ReadFile so the
-// message is captured immediately when the server sends it — no race
-// with GetSerialization() polling or server-side DisconnectNamedPipe.
+// The background read thread polls the pipe (PeekNamedPipe + short ReadFile)
+// so it can also watch the stop event, and delivers every message through
+// callbacks — terminal results have NO second polling channel.
 //
-// OnResponseCallback: called from the background read thread when a
-// response arrives (or the pipe breaks).  The credential uses this to
-// transition state and signal LogonUI to re-serialize immediately.
+// OnResponseCallback: called from the background read thread exactly once,
+// when the terminal message arrives or the pipe breaks.  The credential
+// transitions state there and triggers re-enumeration.
+// OnStatusCallback: called from the same thread for STATUS: messages.
 
 using OnResponseCallback = std::function<void(bool success, const std::wstring& message)>;
 using OnStatusCallback = std::function<void(const std::wstring& message)>;
@@ -40,13 +41,9 @@ public:
     // Spawn a background thread that loops reading messages from the pipe.
     // STATUS: messages trigger onStatus (if set).
     // Terminal messages (AUTH_SUCCESS/AUTH_TIMEOUT/AUTH_ERROR/etc.) trigger
-    // onResponse and the thread exits.
+    // onResponse once and the thread exits.
     void StartBackgroundRead(OnResponseCallback onResponse = nullptr,
                              OnStatusCallback onStatus = nullptr);
-
-    // Check whether the background read has completed.  Non-blocking.
-    // Returns true and sets outMessage when the server response was received.
-    bool CheckResponse(std::wstring& outMessage);
 
     // Check if connected
     bool IsConnected() const { return m_connected; }
@@ -60,22 +57,20 @@ private:
     void CleanupReadThread();
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
+    // Written by the read thread (pipe breakage) and by the owning thread
+    // (send failure / disconnect); read by IsConnected as a guard. A plain
+    // bool torn read is impossible on x64 and the guard only degrades
+    // gracefully, so no lock is taken around it.
     bool m_connected = false;
 
-    // Background blocking read
+    // Background read
     HANDLE m_hReadThread = nullptr;
-    HANDLE m_hDataReady = nullptr;       // manual-reset: set when response arrives
     HANDLE m_hReadStop = nullptr;        // manual-reset: signaled to stop the read thread
-    wchar_t m_readBuffer[4096] = {};
-    DWORD  m_bytesRead = 0;
-    bool   m_readSuccess = false;
 
-    // Callbacks
+    // Callbacks — set before the read thread starts (CreateThread gives the
+    // happens-before), never touched afterwards.
     OnResponseCallback m_onResponse;
     OnStatusCallback   m_onStatus;
-
-    CRITICAL_SECTION m_cs;
-    bool m_csInitialized = false;
 };
 
 } // namespace facelogin

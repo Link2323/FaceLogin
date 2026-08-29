@@ -61,12 +61,8 @@ public:
         DWORD dwIndex,
         ICredentialProviderCredential** ppcpc) override;
 
-    // Accessors for our credential
-    bool IsCredUI() const { return m_cpus == CPUS_CREDUI || m_cpus == CPUS_PLAP; }
-
 private:
     LONG m_refCount = 1;
-    CREDENTIAL_PROVIDER_USAGE_SCENARIO m_cpus = CPUS_LOGON;
     CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR m_rgFieldDescriptors[5];
     ICredentialProviderEvents* m_pEvents = nullptr;
     UINT_PTR m_upAdviseContext = 0;

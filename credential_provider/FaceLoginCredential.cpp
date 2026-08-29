@@ -119,10 +119,6 @@
 //   - The stop event is signaled (UnAdvise / destructor), OR
 //   - UnAdvise() sets m_pCredentialEvents = nullptr and the thread notices
 
-struct InputDetectionContext {
-    FaceLoginCredential* pCred;
-};
-
 // Keys still held at the baseline moment are the mid-gesture fingerprint of
 // a lock action (see the algorithm comment above). Any key counts — see the
 // Win-cleared observation there for why modifiers alone are not enough.
@@ -260,10 +256,8 @@ void RawInputSink::Unregister() noexcept {
     }
 }
 
-static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
-    auto* ctx = static_cast<InputDetectionContext*>(pParam);
-    FaceLoginCredential* pCred = ctx->pCred;
-    delete ctx;
+unsigned __stdcall FaceLoginCredential::InputDetectionThreadProc(void* pParam) {
+    FaceLoginCredential* pCred = static_cast<FaceLoginCredential*>(pParam);
 
     const DWORD pollIntervalMs = 25;
     const DWORD QUIESCE_MS = 100;         // gap that ends an input "wave" (held keys are excluded by the arm-time guard below)
@@ -445,6 +439,10 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     return 0;
 }
 
+// Idle prompt shown on the Waiting tile — one constant so the deselect reset
+// and GetStringValue can never drift apart.
+static const wchar_t kWaitingPrompt[] = L"按下任意按键以开始人脸识别";
+
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
@@ -453,17 +451,14 @@ FaceLoginCredential::FaceLoginCredential() {
     InitializeCriticalSection(&m_cs);
     m_csInitialized = true;
 
-    m_hCredsReady = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!m_hCredsReady) {
-        FACELOGIN_ERROR(L"Failed to create credentials ready event");
-    }
-
     FACELOGIN_DEBUG(L"FaceLoginCredential created");
 }
 
 FaceLoginCredential::~FaceLoginCredential() {
     // SENSITIVE: Zero the password from memory
     facelogin::SecureClearWString(m_password);
+    // ... and the retained packed credential (it carries the same plaintext)
+    ClearPackedCredentials();
 
     // Stop the background input-detection thread before tearing down any state
     // it touches. COM release order does not guarantee UnAdvise (which also
@@ -471,11 +466,6 @@ FaceLoginCredential::~FaceLoginCredential() {
     // thread is still running when `this` is freed, its next access to pCred
     // is a use-after-free. Idempotent and safe to call when not running.
     StopInputDetectionThread();
-
-    if (m_hCredsReady) {
-        CloseHandle(m_hCredsReady);
-        m_hCredsReady = nullptr;
-    }
 
     if (m_csInitialized) {
         DeleteCriticalSection(&m_cs);
@@ -580,9 +570,8 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     // typing in those flows trigger the camera and interrupt the wizard.
     // Advise still records the baseline tick and held-key snapshot as early
     // as possible; SetSelected starts the watcher only when the user
-    // actually lands on this tile.
-    bool credUI = m_pProvider ? m_pProvider->IsCredUI() : false;
-    FACELOGIN_INFO(L"Advise: credUI=%d, m_pProvider=%p", credUI, m_pProvider);
+    // actually lands on this tile. (CredUI/PLAP never reach this point —
+    // SetUsageScenario already returned E_NOTIMPL for them.)
     if (!facelogin::credential_provider::ShouldStartInputDetection(m_state)) {
         FACELOGIN_INFO(L"Advise: state does not permit passive input detection");
         return S_OK;
@@ -658,7 +647,7 @@ STDMETHODIMP FaceLoginCredential::SetDeselected() {
     if (facelogin::credential_provider::ShouldAbortAuthOnDeselect(m_state)) {
         FACELOGIN_INFO(L"SetDeselected: aborting in-flight authentication");
         m_pipeClient.reset();
-        m_statusText = L"按下任意按键以开始人脸识别";
+        SetStatusText(kWaitingPrompt);
         m_state = State::Waiting;
         if (m_pCredentialEvents) {
             m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
@@ -733,29 +722,28 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
     case 1: // Status
         switch (m_state) {
         case State::Waiting:
-            return SHStrDupW(L"按下任意按键以开始人脸识别", ppwsz);
-        case State::Authenticating:
-            if (!m_statusText.empty()) {
-                return SHStrDupW(m_statusText.c_str(), ppwsz);
-            }
-            return SHStrDupW(L"正在识别...", ppwsz);
+            return SHStrDupW(kWaitingPrompt, ppwsz);
         case State::Ready:
             return SHStrDupW(L"人脸识别成功，正在解锁...", ppwsz);
+        case State::Authenticating:
         case State::Failed:
-            // Surface a specific failure reason if one was provided by the
-            // service (e.g. "未检测到人脸", "未通过活体检测，请使用真实人脸",
-            // "识别超时，请重试"); otherwise the generic fallback.
-            if (!m_statusText.empty()) {
-                return SHStrDupW(m_statusText.c_str(), ppwsz);
+        case State::Error: {
+            // Surface the specific service-provided text when one exists
+            // (live "正在识别...", failure reasons like "未检测到人脸",
+            // service errors like "人脸登录服务不可用"); otherwise the
+            // per-state generic fallback. Snapshot under m_cs — the text is
+            // concurrently written by the pipe read thread.
+            const std::wstring snapshot = SnapshotStatusText();
+            if (!snapshot.empty()) {
+                return SHStrDupW(snapshot.c_str(), ppwsz);
             }
-            return SHStrDupW(L"人脸识别失败", ppwsz);
-        case State::Error:
-            // Show the specific error message from the service (e.g. anti-spoof
-            // rejection) if one was received; otherwise the generic fallback.
-            if (!m_statusText.empty()) {
-                return SHStrDupW(m_statusText.c_str(), ppwsz);
-            }
-            return SHStrDupW(L"人脸登录服务不可用", ppwsz);
+            return SHStrDupW(m_state == State::Authenticating
+                                 ? L"正在识别..."
+                                 : m_state == State::Failed
+                                       ? L"人脸识别失败"
+                                       : L"人脸登录服务不可用",
+                             ppwsz);
+        }
         default:
             return SHStrDupW(L"", ppwsz);
         }
@@ -880,18 +868,12 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
         return S_OK;
     }
 
-    // Check for pipe disconnection — the server may have disconnected
-    // without sending a response (e.g., service crashed or timed out).
-    // Without this check, the CP stays in Authenticating forever.
-    if (m_pipeClient && !m_pipeClient->IsConnected()) {
-        FACELOGIN_WARN(L"Pipe disconnected while waiting for auth response");
-        PresentRetryableFailure(State::Error, L"人脸登录服务连接已断开");
-        *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
-        return S_OK;
-    }
-
-    // Track auth timeout: if we've been authenticating too long, give up
     if (m_state == State::Authenticating) {
+        // Terminal results arrive exclusively via OnPipeResponse on the pipe
+        // read thread (a dead service breaks the pipe and is reported there
+        // within one 50 ms poll). This polling-side guard only bounds the
+        // rare case where LogonUI polls us while Authenticating (e.g. the
+        // user pressed Enter) and the service never answers at all.
         LONGLONG now = 0;
         GetSystemTimeAsFileTime(reinterpret_cast<FILETIME*>(&now));
         if (m_authStartTime == 0) {
@@ -907,72 +889,51 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
                 return S_OK;
             }
         }
+        // Not ready yet — LogonUI re-polls GetSerialization when auto-logon
+        // is set; OnPipeResponse flips the state and re-enumerates.
+        return S_OK;
     }
 
-    // Check if pipe has a response
-    if (m_pipeClient) {
-        std::wstring response;
-        if (m_pipeClient->CheckResponse(response)) {
-            // Parse the response
-            auto result = facelogin::ipc::ParseAuthMessage(response);
-
-            if (result.status == facelogin::ipc::AuthResult::Status::Success) {
-                FACELOGIN_INFO(L"Auth success: %s\\%s (SID=%s, UPN=%s)",
-                              result.domain.c_str(), result.username.c_str(),
-                              result.sid.c_str(), result.upn.c_str());
-                m_upn = result.upn;
-                m_domain = result.domain;
-                m_username = result.username;
-                m_password = result.password;
-                m_state = State::Ready;
-                m_statusText = L"人脸识别成功，正在解锁...";
-                if (m_pCredentialEvents) {
-                    m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
-                }
-                if (m_hCredsReady) {
-                    SetEvent(m_hCredsReady);
-                }
-            }
-            else if (result.status == facelogin::ipc::AuthResult::Status::Timeout) {
-                FACELOGIN_INFO(L"Auth timeout");
-                PresentRetryableFailure(State::Failed, L"识别超时，请重试");
-                *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
-                return S_OK;
-            }
-            else if (result.status == facelogin::ipc::AuthResult::Status::Error) {
-                FACELOGIN_WARN(L"Auth error: %s", result.errorMessage.c_str());
-                // Surface the service's specific error on the lock screen.
-                if (!result.errorMessage.empty()) {
-                    m_statusText = result.errorMessage;
-                }
-                PresentRetryableFailure(
-                    State::Error,
-                    result.errorMessage.empty()
-                        ? L"人脸登录服务不可用"
-                        : result.errorMessage);
-                *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
-                return S_OK;
-            }
+    // State::Ready — hand LogonUI the credential. The FIRST call packs
+    // fresh (retaining a copy in m_packedCreds, because m_password is
+    // zeroed on every pack return — see PackCredentials); any later call
+    // re-serves from that retained copy.
+    if (m_packedCreds) {
+        BYTE* copy = static_cast<BYTE*>(CoTaskMemAlloc(m_cbPackedCreds));
+        if (!copy) {
+            FACELOGIN_ERROR(L"GetSerialization: CoTaskMemAlloc for cached credential failed");
+            return E_OUTOFMEMORY;
         }
+        memcpy(copy, m_packedCreds, m_cbPackedCreds);
+        pcpcs->rgbSerialization = copy;
+        pcpcs->cbSerialization = m_cbPackedCreds;
+        pcpcs->ulAuthenticationPackage = m_ulAuthPackage;
+        pcpcs->clsidCredentialProvider = CLSID_FaceLoginProvider;
+        *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+        return S_OK;
     }
 
-    // If we have credentials ready, pack and return them
-    if (m_state == State::Ready && !m_password.empty()) {
-        // NOTE: never log the password or any part of it — it is a credential.
-        HRESULT hr = PackCredentials(pcpcs);
-        if (SUCCEEDED(hr)) {
-            *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
-            FACELOGIN_INFO(L"PackCred SUCCESS: cbSerialization=%lu, ulAuthPackage=%lu",
-                          pcpcs->cbSerialization, pcpcs->ulAuthenticationPackage);
-        } else {
-            FACELOGIN_ERROR(L"PackCred FAILED: hr=0x%08X", hr);
-        }
-        return hr;
+    if (m_password.empty()) {
+        // Ready without credentials and without a retained pack cannot
+        // happen (Ready is only entered with a full result) — fail closed
+        // rather than spinning NOT_FINISHED forever.
+        FACELOGIN_ERROR(L"GetSerialization: Ready state has no credentials to serialize");
+        *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
+        return S_OK;
     }
 
-    // Not ready yet — LogonUI will call GetSerialization() again
-    // due to auto-logon being set. Our auth timeout guard above
-    // ensures we eventually give up and don't block forever.
+    // NOTE: never log the password or any part of it — it is a credential.
+    HRESULT hr = PackCredentials(pcpcs);
+    if (SUCCEEDED(hr)) {
+        *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+    } else {
+        FACELOGIN_ERROR(L"PackCred FAILED: hr=0x%08X", hr);
+        // A failed pack leaves no retained copy and the password is already
+        // zeroed — later polls could not succeed either. Present a terminal
+        // failure instead of spinning NOT_FINISHED.
+        PresentRetryableFailure(State::Error, L"凭据封装失败，请使用密码登录");
+        *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
+    }
     return S_OK;
 }
 
@@ -987,6 +948,10 @@ STDMETHODIMP FaceLoginCredential::ReportResult(
 
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
+
+    // The handoff is over (accepted or rejected) — the retained packed
+    // credential must not outlive it.
+    ClearPackedCredentials();
 
     if (ntsStatus == STATUS_SUCCESS) {
         FACELOGIN_INFO(L"Authentication succeeded");
@@ -1016,10 +981,17 @@ STDMETHODIMP FaceLoginCredential::ReportResult(
 // ============================================================================
 
 void FaceLoginCredential::StartAuth() {
-    // CRITICAL SECTION: m_cs is held by the caller (if from background
-    // thread). The pipe callbacks also acquire m_cs, so we must NOT hold
-    // it here. In our design, only the main thread (Advise) and the
-    // input-detection thread call StartAuth, and they do so outside m_cs.
+    // Single reset point for the polling-side deadline: every round (first
+    // attempt, explicit retry, re-armed watcher trigger) enters here, so a
+    // round can never inherit the start time of an earlier, aborted one and
+    // be instantly judged "timed out" by GetSerialization.
+    m_authStartTime = 0;
+
+    // StartAuth runs on the input-detection thread (auto-trigger / explicit
+    // retry) or the LogonUI thread (command link). It does NOT take m_cs:
+    // the pipe callbacks (OnPipeResponse/OnPipeStatus) run on the pipe read
+    // thread and lock m_cs only for their own m_statusText writes; state
+    // transitions are ordered by the auth_interaction_policy guards instead.
     FACELOGIN_INFO(L"StartAuth: connecting to face service pipe (state=%d)", static_cast<int>(m_state));
 
     if (m_pipeClient && m_pipeClient->IsConnected()) {
@@ -1041,18 +1013,17 @@ void FaceLoginCredential::StartAuth() {
         // previous content (last round's failure text or the idle prompt)
         // during the pipe round-trip before the service's first STATUS
         // message arrives — that gap reads as a brief flash of stale text.
-        m_statusText = L"正在识别...";
+        SetStatusText(L"正在识别...");
         if (m_pCredentialEvents) {
             m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
         }
 
-        auto self = this;
         m_pipeClient->StartBackgroundRead(
-            [self](bool success, const std::wstring& msg) {
-                self->OnPipeResponse(success, msg);
+            [this](bool success, const std::wstring& msg) {
+                OnPipeResponse(success, msg);
             },
-            [self](const std::wstring& msg) {
-                self->OnPipeStatus(msg);
+            [this](const std::wstring& msg) {
+                OnPipeStatus(msg);
             });
         FACELOGIN_INFO(L"Pipe connected, auth request sent");
     } else {
@@ -1081,17 +1052,13 @@ void FaceLoginCredential::StartInputDetectionThread() {
         ResetEvent(m_hInputStop);
     }
 
-    auto* ctx = new InputDetectionContext;
-    ctx->pCred = this;
-
     m_inputThreadRunning = true;
     unsigned threadId = 0;
     m_hInputThread = reinterpret_cast<HANDLE>(
-        _beginthreadex(nullptr, 0, InputDetectionThreadProc, ctx, 0, &threadId));
+        _beginthreadex(nullptr, 0, InputDetectionThreadProc, this, 0, &threadId));
     if (!m_hInputThread || m_hInputThread == INVALID_HANDLE_VALUE) {
         FACELOGIN_ERROR(L"Failed to start input detection thread");
         m_inputThreadRunning = false;
-        delete ctx;
     } else {
         FACELOGIN_INFO(L"Input detection thread started (id=%u)", threadId);
     }
@@ -1236,15 +1203,40 @@ HRESULT FaceLoginCredential::PackCredentials(
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    // Password clearing is handled by pwdGuard on return (success path
-    // included) — no manual SecureZeroMemory needed here.
+    // Retain a private copy so GetSerialization can re-serve the credential
+    // on later calls: the guard above zeroes m_password on EVERY return path
+    // (security #9), so without this copy a re-polling LogonUI could never
+    // serialize a second time. The copy lives only while the Ready handoff
+    // is pending — ClearPackedCredentials bounds it at ReportResult, failure
+    // presentation and destruction.
+    ClearPackedCredentials();
+    m_packedCreds = new (std::nothrow) BYTE[cbPackedCreds];
+    if (!m_packedCreds) {
+        CoTaskMemFree(pPackedCreds);
+        return E_OUTOFMEMORY;
+    }
+    memcpy(m_packedCreds, pPackedCreds, cbPackedCreds);
+    m_cbPackedCreds = cbPackedCreds;
+    m_ulAuthPackage = ulAuthPackage;
 
     pcpcs->rgbSerialization = pPackedCreds;
     pcpcs->cbSerialization = cbPackedCreds;
     pcpcs->ulAuthenticationPackage = ulAuthPackage;
     pcpcs->clsidCredentialProvider = CLSID_FaceLoginProvider;
 
+    FACELOGIN_INFO(L"PackCred SUCCESS: cbSerialization=%lu, ulAuthPackage=%lu",
+                  cbPackedCreds, ulAuthPackage);
     return S_OK;
+}
+
+void FaceLoginCredential::ClearPackedCredentials() {
+    if (m_packedCreds) {
+        SecureZeroMemory(m_packedCreds, m_cbPackedCreds);
+        delete[] m_packedCreds;
+        m_packedCreds = nullptr;
+    }
+    m_cbPackedCreds = 0;
+    m_ulAuthPackage = 0;
 }
 
 // ============================================================================
@@ -1269,6 +1261,19 @@ HRESULT FaceLoginCredential::SwitchToPasswordProvider() {
     return S_OK;
 }
 
+void FaceLoginCredential::SetStatusText(const std::wstring& text) {
+    EnterCriticalSection(&m_cs);
+    m_statusText = text;
+    LeaveCriticalSection(&m_cs);
+}
+
+std::wstring FaceLoginCredential::SnapshotStatusText() {
+    EnterCriticalSection(&m_cs);
+    std::wstring snapshot = m_statusText;
+    LeaveCriticalSection(&m_cs);
+    return snapshot;
+}
+
 void FaceLoginCredential::OnPipeStatus(const std::wstring& message) {
     // A deselection may have torn the pipe down mid-flight; a late status
     // from that round must not overwrite the reset idle prompt.
@@ -1277,9 +1282,7 @@ void FaceLoginCredential::OnPipeStatus(const std::wstring& message) {
                        static_cast<int>(m_state));
         return;
     }
-    EnterCriticalSection(&m_cs);
-    m_statusText = message;
-    LeaveCriticalSection(&m_cs);
+    SetStatusText(message);
     FACELOGIN_INFO(L"Status text updated: %s", message.c_str());
     // Use SetFieldString to update the status text in-place on the lock
     // screen, without triggering re-enumeration (which destroys the pipe).
@@ -1313,12 +1316,9 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
             // Push the success text immediately so the tile does not keep
             // showing the last in-flight status ("正在识别...") during
             // the re-enumeration gap before LogonUI calls GetStringValue.
-            m_statusText = L"人脸识别成功，正在解锁...";
+            SetStatusText(L"人脸识别成功，正在解锁...");
             if (m_pCredentialEvents) {
                 m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
-            }
-            if (m_hCredsReady) {
-                SetEvent(m_hCredsReady);
             }
             // Ask LogonUI to call GetSerialization again right away
             if (facelogin::credential_provider::ShouldReenumerateAfterTerminal(m_state)) {
@@ -1358,7 +1358,11 @@ void FaceLoginCredential::PresentRetryableFailure(
 
     m_state = failureState;
     m_authStartTime = 0;
-    m_statusText = statusText.empty() ? L"人脸识别失败" : statusText;
+    SetStatusText(statusText.empty() ? L"人脸识别失败" : statusText);
+
+    // A terminal state ends any pending Ready handoff — the retained packed
+    // credential (which carries the plaintext password) must not survive it.
+    ClearPackedCredentials();
 
     // The reason line states WHAT failed; field 4 below owns "how to
     // retry" — strip instruction tails that would read as duplication next
@@ -1416,8 +1420,7 @@ void FaceLoginCredential::StartExplicitRetry() {
     // Destroying the client joins that completed thread and guarantees the new
     // request cannot reuse a terminal pipe connection.
     m_pipeClient.reset();
-    m_authStartTime = 0;
-    m_statusText = L"正在识别...";
+    SetStatusText(L"正在识别...");
     m_state = State::Waiting;
 
     if (m_pCredentialEvents) {

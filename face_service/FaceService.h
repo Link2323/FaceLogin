@@ -84,6 +84,23 @@ private:
     bool ProcessAuthRequest();  // Handle one auth session
     bool ProcessWorkerAuthRequest(); // Service-mode auth via child process
 
+    // Shared identity-binding rule for both auth hosts (in-process pipeline
+    // and worker child): the first anchor locks the matched SID, later
+    // binding frames must return the same SID or the round is rejected as a
+    // face swap. Single source — the security rule must not exist as two
+    // copies that can drift.
+    BindingDecision VerifyIdentityBinding(
+        const std::vector<float>& embedding, unsigned int bindingIndex,
+        std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
+        std::wstring& initialSid) const;
+
+    // Public-pipe message helpers. Status pushes keep the round alive (no
+    // drain); terminal messages flush and wait for the client to consume
+    // before the caller disconnects. Returns the WriteMessage result.
+    bool SendStatusMessage(const std::wstring& text);
+    bool SendTerminalMessage(const std::wstring& message);
+    bool SendAuthErrorMessage(const std::wstring& message);
+
     // Model residency follows the interactive session: preload all inference
     // sessions when Windows locks, retain them across failed auth retries, and
     // release them after unlock. AUTH_REQUEST always requests + waits as a

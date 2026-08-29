@@ -65,8 +65,9 @@ FaceLoginProvider::~FaceLoginProvider() {
 // ============================================================================
 
 static DWORD ReadUserCountFromDatabase() {
-    // Build path: %PROGRAMDATA%\FaceLogin\data\users.dat
-    // Fall back to the registry DataPath if set
+    // Path precedence: the registry DataPath (written by the installer as the
+    // install directory — where users.dat actually lives in production) wins;
+    // %PROGRAMDATA%\FaceLogin is only the fallback when it is unset.
     wchar_t programData[MAX_PATH];
     std::wstring dataDir;
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, programData))) {
@@ -74,7 +75,6 @@ static DWORD ReadUserCountFromDatabase() {
     } else {
         dataDir = L"C:\\ProgramData\\FaceLogin";
     }
-    // Registry DataPath may override
     std::wstring regPath = ReadRegString(REGVAL_DATA_PATH, L"");
     if (!regPath.empty()) {
         dataDir = regPath;
@@ -98,10 +98,6 @@ static DWORD ReadUserCountFromDatabase() {
 
     return count;
 }
-
-// ============================================================================
-// SetUsageScenario
-// ============================================================================
 
 // ============================================================================
 // IUnknown
@@ -139,7 +135,6 @@ STDMETHODIMP_(ULONG) FaceLoginProvider::Release() {
 STDMETHODIMP FaceLoginProvider::SetUsageScenario(
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, DWORD dwFlags) {
     FACELOGIN_INFO(L"SetUsageScenario: cpus=%d, flags=0x%08X", cpus, dwFlags);
-    m_cpus = cpus;
 
     // CPUS_CHANGE_PASSWORD: we don't support changing passwords via face
     // recognition. Let the built-in password provider handle this.

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <credentialprovider.h>
+#include <atomic>
 #include <string>
 #include <memory>
 #include <vector>
@@ -30,9 +31,6 @@ class FaceLoginProvider;
 
 class FaceLoginCredential : public ICredentialProviderCredential {
 public:
-    // Allow the input-detection thread to access private members
-    friend unsigned __stdcall InputDetectionThreadProc(void* pParam);
-
     FaceLoginCredential();
     virtual ~FaceLoginCredential();
 
@@ -81,8 +79,17 @@ private:
     // Switch to the password credential provider (fallback)
     HRESULT SwitchToPasswordProvider();
 
-    // Pack credentials into the serialization format
+    // Pack credentials into the serialization format. On success the packed
+    // bytes are ALSO retained in m_packedCreds so GetSerialization can serve
+    // LogonUI a fresh CoTaskMemAlloc copy on any later call (m_password is
+    // zeroed on every return path — the cache, not the pipe, is what makes
+    // repeated serialization possible).
     HRESULT PackCredentials(CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs);
+
+    // Zero and release the retained packed credential bytes. Called whenever
+    // the Ready handoff ends: ReportResult (submitted or rejected), terminal
+    // failure presentation, and destruction.
+    void ClearPackedCredentials();
 
     // Trigger re-enumeration of credentials (via CredentialsChanged)
     void TriggerReEnumeration();
@@ -93,6 +100,8 @@ private:
     void StartAuth();
 
     // Start / stop the background input-detection thread (LOGON + unlock).
+    // The thread body is a static member (natural private access, no friend).
+    static unsigned __stdcall InputDetectionThreadProc(void* pParam);
     void StartInputDetectionThread();
     void StopInputDetectionThread();
 
@@ -113,6 +122,13 @@ private:
     // Pipe callbacks — called from background read thread
     void OnPipeResponse(bool success, const std::wstring& message);
     void OnPipeStatus(const std::wstring& message);
+
+    // m_cs guards exactly one thing: m_statusText (written from the pipe
+    // read thread and the input-detection thread, read on the LogonUI
+    // thread). All other cross-thread coordination is the
+    // auth_interaction_policy guards plus LogonUI's serialized calls.
+    void SetStatusText(const std::wstring& text);
+    std::wstring SnapshotStatusText();
 
     // Present a terminal, retryable failure in-place on the selected tile
     // (no re-enumeration — LogonUI must not disturb password entry on other
@@ -153,7 +169,10 @@ private:
     DWORD m_waitingStartTick = 0;
     HANDLE m_hInputThread = nullptr;   // background input-detection thread
     HANDLE m_hInputStop = nullptr;     // event: signal to stop the thread
-    bool m_inputThreadRunning = false;
+    // Set before the thread starts, cleared by the thread itself on exit and
+    // by StopInputDetectionThread after the join — atomic because it is the
+    // handshake between those two threads (never a torn "running" read).
+    std::atomic<bool> m_inputThreadRunning = false;
 
     // Keys (any key or mouse button) still physically held when the
     // credential view appeared (first round) or when a failure was
@@ -174,8 +193,15 @@ private:
     // reliably visible.
     std::vector<int> m_baselineKeysHeld;
 
+    // Retained packed credential (CredPackAuthenticationBufferW output —
+    // contains the plaintext password). Owned with new[]/SecureZeroMemory.
+    // Lives only while a Ready handoff is pending: created by the first
+    // PackCredentials, cleared by ClearPackedCredentials.
+    BYTE* m_packedCreds = nullptr;
+    DWORD m_cbPackedCreds = 0;
+    ULONG m_ulAuthPackage = 0;
+
     // Synchronization
-    HANDLE m_hCredsReady = nullptr;  // Set when auth result received
     CRITICAL_SECTION m_cs;
     bool m_csInitialized = false;
 };
