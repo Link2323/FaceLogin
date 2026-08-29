@@ -750,6 +750,13 @@ function captureAngleSequence(idx, total) {
     return;
   }
 
+  // Reset the bar for the new angle: the completed-angle poll takes the
+  // "done" branch and never repaints, so without this the previous angle's
+  // last painted value (80% = 4/5 frames) stays frozen through the whole
+  // liveness phase of this angle.
+  document.getElementById('cap-fill').style.width = '0%';
+  document.getElementById('cap-pct').textContent = '0%';
+
   // Watchdog: if the server reports no activity for 25s, the capture thread
   // is stuck (e.g. camera stall) — fail visibly instead of hanging forever.
   var pollStart = Date.now();
@@ -776,6 +783,10 @@ function captureAngleSequence(idx, total) {
     // inherit a stale proof from a previous capture.
     if (st.livenessChecking) {
       document.getElementById('cap-step').textContent = '正在进行活体检测...';
+      // The tag still says the PREVIOUS angle is done here (the completing
+      // poll repaints nothing) — show which angle is actually being checked.
+      document.getElementById('samples-tag').textContent =
+        (total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · ' : '') + '活体检测中';
       return;
     }
 
@@ -805,8 +816,12 @@ function captureAngleSequence(idx, total) {
       return;
     }
 
-    // This angle is complete — move on to the next one.
+    // This angle is complete — move on to the next one. Paint 100% first:
+    // the collected==target poll lands here without touching the bar, which
+    // otherwise never shows beyond the last partial update (80% at 4/5).
     clearInterval(poll);
+    document.getElementById('cap-fill').style.width = '100%';
+    document.getElementById('cap-pct').textContent = '100%';
     document.getElementById('samples-tag').textContent =
       total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · 完成'
                : '「' + ANGLE_LABELS[idx] + '」采集完成';
