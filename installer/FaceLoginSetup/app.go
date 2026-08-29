@@ -204,7 +204,13 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	_ = internal.ExtractResource("resources/FaceLoginConsole.exe", enrollDest)
 
 	a.emit(100, "完成", "done", "")
-	return result(true, "安装完成。\n请运行安装目录下的 FaceLoginConsole.exe 注册人脸。")
+	// Enrollment is always the user's next step, so open the console right
+	// away. The child inherits our elevated token — no second UAC prompt.
+	message := "安装完成。\n注册向导已自动打开，请完成人脸注册。"
+	if startErr := internal.StartProgram(enrollDest); startErr != nil {
+		message = "安装完成。\n自动打开注册向导失败，请手动运行安装目录下的 FaceLoginConsole.exe 注册人脸。"
+	}
+	return result(true, message)
 }
 
 // Uninstall runs the full uninstallation.

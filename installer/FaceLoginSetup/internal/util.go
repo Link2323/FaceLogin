@@ -190,3 +190,34 @@ func RunCommand(name string, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
+
+// StartProgram launches a GUI program detached: Start() returns immediately,
+// the child outlives the installer. The child inherits the installer's
+// elevated token, so the enrollment console opens without its own UAC prompt.
+//
+// Wails's go-webview2 leaves the WEBVIEW2_* env vars set to EMPTY strings in
+// this process (preventEnvAndRegistryOverrides). The official WebView2 loader
+// checks existence, not emptiness: an inherited empty WEBVIEW2_USER_DATA_FOLDER
+// silently overrides the app's own userDataFolder argument and makes the
+// console fall back to the exe-adjacent default — ACL-locked under Program
+// Files, so WebView2 dies there. Strip every variable go-webview2 blanks.
+func StartProgram(path string) error {
+	cmd := exec.Command(path)
+	cmd.Dir = filepath.Dir(path)
+	clean := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		name := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			name = kv[:i]
+		}
+		switch strings.ToUpper(name) {
+		case "WEBVIEW2_USER_DATA_FOLDER", "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+			"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "WEBVIEW2_RELEASE_CHANNEL_PREFERENCE",
+			"WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER":
+			continue
+		}
+		clean = append(clean, kv)
+	}
+	cmd.Env = clean
+	return cmd.Start()
+}
