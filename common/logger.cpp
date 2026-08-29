@@ -24,6 +24,9 @@ Logger& Logger::Instance() {
 // DeleteCriticalSection are safe inside DLL_PROCESS_DETACH.
 Logger::~Logger() {
     if (m_hFile != INVALID_HANDLE_VALUE) {
+        // Last-chance sync of unflushed non-error lines; kernel call with no
+        // loader-lock hazard, safe next to CloseHandle in DLL_PROCESS_DETACH.
+        FlushFileBuffers(m_hFile);
         CloseHandle(m_hFile);
         m_hFile = INVALID_HANDLE_VALUE;
     }
@@ -56,7 +59,9 @@ void Logger::SetLogFile(const std::wstring& path) {
     // Then move a legacy UTF-16LE file aside so the fresh UTF-8 stream never
     // appends to a file in the old encoding.
     RotateAsideLegacyUtf16();
+    m_lastRotationCheck = GetTickCount64();
     if (m_hFile != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(m_hFile);
         CloseHandle(m_hFile);
         m_hFile = INVALID_HANDLE_VALUE;
     }
@@ -101,8 +106,8 @@ void Logger::Log(LogLevel level, const wchar_t* format, ...) {
         OutputDebugStringW(finalMsg);
     }
 
-    // Write to file
-    WriteToFile(finalMsg);
+    // Write to file; only error lines pay the synchronous flush
+    WriteToFile(finalMsg, level >= LogLevel::Error);
 
     // Ring buffer for UI — store WITHOUT trailing \r\n for cleaner display
     {
@@ -149,9 +154,9 @@ void Logger::Error(const wchar_t* format, ...) {
     Log(LogLevel::Error, L"%s", buffer);
 }
 
-void Logger::WriteToFile(const std::wstring& line) {
+void Logger::WriteToFile(const std::wstring& line, bool flushToDisk) {
     EnterCriticalSection(&m_cs);
-    CheckRotation();
+    MaybeCheckRotation();
     // If rotation just closed the handle, reopen before writing.
     if (m_hFile == INVALID_HANDLE_VALUE && !m_logPath.empty()) {
         OpenLogFile();
@@ -171,7 +176,16 @@ void Logger::WriteToFile(const std::wstring& line) {
             DWORD written;
             WriteFile(m_hFile, utf8.data(), static_cast<DWORD>(bytes),
                       &written, nullptr);
-            FlushFileBuffers(m_hFile);
+            // Plain WriteFile parks the line in the kernel file cache: every
+            // reader sees it immediately and it survives process crashes.
+            // Only power loss or a kernel crash can drop it, so the ~11ms
+            // synchronous flush (NTFS metadata commit per append, measured
+            // on NVMe) runs just for error lines — the ones needed for
+            // post-mortems — plus rotation and shutdown (see ~Logger,
+            // CheckRotation, SetLogFile).
+            if (flushToDisk) {
+                FlushFileBuffers(m_hFile);
+            }
         }
     }
     LeaveCriticalSection(&m_cs);
@@ -233,6 +247,19 @@ void Logger::OpenLogFile() {
     }
 }
 
+// Rotation is day-granularity, so the per-write path only re-reads the
+// file's creation time at most every kRotationCheckIntervalMs (SetLogFile
+// always checks once and stamps m_lastRotationCheck). Callers must hold m_cs.
+void Logger::MaybeCheckRotation() {
+    ULONGLONG now = GetTickCount64();
+    if (m_lastRotationCheck != 0 &&
+        now - m_lastRotationCheck < kRotationCheckIntervalMs) {
+        return;
+    }
+    m_lastRotationCheck = now;
+    CheckRotation();
+}
+
 // Rotate the log file with a day-based retention window. When the current
 // file started more than kMaxLogDays days ago (by its creation time), it is
 // moved aside under a dated name and dated copies past the window are
@@ -267,6 +294,7 @@ void Logger::CheckRotation() {
 
     // Close the current handle so the rename succeeds on Windows.
     if (m_hFile != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(m_hFile);
         CloseHandle(m_hFile);
         m_hFile = INVALID_HANDLE_VALUE;
     }
@@ -360,6 +388,7 @@ void Logger::RotateAsideLegacyUtf16() {
     // retry-on-next-write contract as CheckRotation — the transition simply
     // happens on a later SetLogFile.
     if (m_hFile != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(m_hFile);
         CloseHandle(m_hFile);
         m_hFile = INVALID_HANDLE_VALUE;
     }

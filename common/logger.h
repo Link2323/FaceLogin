@@ -47,7 +47,7 @@ private:
     // handle dangles until process exit and blocks the installer's own file
     // deletion minutes later (delete deferred to reboot).
     ~Logger();
-    void WriteToFile(const std::wstring& line);
+    void WriteToFile(const std::wstring& line, bool flushToDisk);
     void AppendToRingBuffer(const std::wstring& line);
 
     HANDLE m_hFile = INVALID_HANDLE_VALUE;
@@ -68,9 +68,18 @@ private:
     static constexpr int kMaxLogDays = 3;   // keep up to 3 days of logs
 
     void CheckRotation();   // rotate if m_logPath is stale (older than kMaxLogDays)
+    void MaybeCheckRotation();  // throttled CheckRotation for the per-write path
     void OpenLogFile();     // open m_logPath for append, stamp creation time on fresh files
     void PurgeDatedFiles(); // delete rotated <name>.<date>.log files past the window
     void RotateAsideLegacyUtf16();  // one-time UTF-8 switch: rename a pre-switch UTF-16LE log to its dated name
+
+    // Rotation is day-granularity, so re-reading the file's creation time on
+    // every write (a metadata syscall per line) is waste: the per-write path
+    // re-checks at most this often. SetLogFile always checks once at startup,
+    // so a file that crosses the window mid-run simply rotates a few seconds
+    // late on the next check.
+    static constexpr ULONGLONG kRotationCheckIntervalMs = 30000;
+    ULONGLONG m_lastRotationCheck = 0;
 
     // Ring buffer for UI log viewer (cursor wraps when full)
     static constexpr size_t RING_SIZE = 2000;
