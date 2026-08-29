@@ -48,13 +48,38 @@
 //   before the lock engages), so it has no structural residue and needs no
 //   quarantine.
 //
-//   Wave + quiesce. A new input tick starts a wave; once no further tick
-//   arrives for QUIESCE_MS AND no key is currently physically held (checked
-//   via GetAsyncKeyState — a held key keeps generating auto-repeat ticks, so
-//   it must never count as a finished wave), the wave has ended and
-//   StartAuth() fires IMMEDIATELY — the user's single dismiss press is the
-//   trigger (trade-off: there is no way to "just dismiss" without starting
-//   face recognition). QUIESCE_MS only needs to clear the keyboard
+//   Wave + quiesce. A new input tick starts a wave. A wave QUALIFIES only
+//   if evidence of a real key press or mouse click arrived while it ran.
+//   Final product semantics (user decision 2026-08-29): any keyboard key
+//   triggers with ONE press — even a quick tap on the wallpaper — via the
+//   raw-input KEYUP evidence below; a mouse CLICK takes two (first click
+//   wakes the wallpaper, second click triggers once the credential view is
+//   up, where GetAsyncKeyState finally sees mouse buttons); a mouse MOVE
+//   never triggers. GetLastInputInfo cannot tell input types apart, and on
+//   Win11 a mere mouse MOVE dismisses the lock-screen wallpaper, so without
+//   the qualifier brushing the mouse would auto-start face recognition
+//   against the tile's own "按下任意按键" prompt (the original 2026-08-29
+//   bug).
+//
+//   Secure-desktop channel matrix (装机实测 2026-08-29, do NOT retry
+//   these): GetAsyncKeyState sees keyboard keys AND mouse buttons only
+//   once the credential view is up, never during wallpaper dismissal;
+//   WH_MOUSE_LL installs but the system never dispatches callbacks in
+//   LogonUI; Raw Input (RIDEV_INPUTSINK on a message-only window owned by
+//   this thread) works, and during wallpaper dismissal the system swallows
+//   the KEYDOWN half of a key press — but the matching KEYUP leaks through,
+//   which is exactly the one-press keyboard trigger — while a whole mouse
+//   click (BUTTON_DOWN and BUTTON_UP) is swallowed with nothing leaking,
+//   which is why a one-press click trigger is physically impossible.
+//
+//   Once no further tick arrives for QUIESCE_MS AND no key is currently
+//   physically held (a held key keeps generating auto-repeat ticks, so it
+//   must never count as a finished wave), the wave has ended: a
+//   qualifying wave fires StartAuth() IMMEDIATELY — the user's single
+//   dismiss PRESS is the trigger (trade-off: there is no way to "just
+//   dismiss" with a press without starting face recognition) — while a
+//   movement-only wave is discarded and the watcher keeps waiting:
+//   moving the mouse wakes the screen but never opens the camera. QUIESCE_MS only needs to clear the keyboard
 //   auto-repeat interval (~33–76 ms observed) and event jitter; the
 //   typing-gap floor that kept it at 200 ms was dropped 2026-08-15: the
 //   waiting view is face-first with no focused password field, typing a
@@ -65,6 +90,11 @@
 //   State per iteration:
 //     lastInputTick     — highest input timestamp seen so far (>= baseline)
 //     lastInputEndWall  — wall-clock tick of when we last saw a new input
+//     waveQualifying    — a keyboard key press was observed during this wave
+//                          (monotonic within a wave: never reset on new
+//                          ticks — a KEYUP tick would otherwise erase the
+//                          qualifying press that preceded it; only reset
+//                          when a wave is discarded or the window restarts)
 //     armed             — true once the dismiss wave has gone quiet for
 //                          QUIESCE_MS; on becoming true we fire StartAuth()
 //                          right away and exit the loop.
@@ -116,11 +146,135 @@ void FaceLoginCredential::SnapshotBaselineKeys() {
 // True while any key or mouse button is physically held. Used at arm time so
 // a held (auto-repeating) key can never end a wave — its eventual KEYUP
 // restarts the quiet window instead, regardless of the repeat interval.
+// NOTE: inside LogonUI's secure desktop this sees keyboard keys and mouse
+// buttons ONLY once the credential view is up — never during wallpaper
+// dismissal (装机实测 2026-08-29; see the trigger algorithm comment for the
+// full channel matrix).
 static bool AnyKeyPhysicallyDown() {
     for (int vk = kSnapshotFirstVk; vk <= kSnapshotLastVk; ++vk) {
         if (GetAsyncKeyState(vk) & 0x8000) return true;
     }
     return false;
+}
+
+// Keyboard press evidence from Raw Input since the last pump. The sink window
+// belongs to the input-detection thread and WM_INPUT is dispatched only while
+// that same thread pumps — no lock needed.
+//
+// This is the ONLY channel that sees a key press while the lock-screen
+// wallpaper is dismissing: the system swallows the KEYDOWN half of the
+// dismiss gesture on every side channel, but the matching KEYUP leaks through
+// Raw Input (装机实测 2026-08-29). An UP alone proves a complete press, so
+// both MAKE and BREAK qualify the wave — that is what makes a quick tap on
+// the wallpaper trigger auth with ONE press. Residue safety: a key still
+// held at baseline is captured by the Advise snapshot and its trailing UP is
+// swallowed by the residue-quarantine watermark; a key released before
+// baseline never forms a wave. Either way an UP can only qualify a genuine
+// post-baseline press.
+//
+// Keyboard ONLY. Mouse is deliberately NOT registered: during wallpaper
+// dismissal the system swallows the whole click (BUTTON_DOWN and BUTTON_UP,
+// same 实测), so a first-press click trigger is physically impossible and
+// the mouse stays at "first click wakes, second click triggers" via the
+// GetAsyncKeyState scan (mouse buttons are visible to it once the
+// credential view is up).
+static thread_local LONG t_rawKeyboardSeen = 0;
+static thread_local bool t_loggedFirstRawInput = false;
+
+static LRESULT CALLBACK RawInputSinkWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_INPUT) {
+        RAWINPUT raw = {};
+        UINT size = sizeof(raw);
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT,
+                            &raw, &size, sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
+            raw.header.dwType == RIM_TYPEKEYBOARD) {
+            // RI_KEY_BREAK is the release marker; E0/E1 bits are scancode
+            // terminator info, not button state. Auto-repeat reports as MAKE.
+            const bool released = (raw.data.keyboard.Flags & RI_KEY_BREAK) != 0;
+            t_rawKeyboardSeen = 1;
+            if (!t_loggedFirstRawInput) {
+                t_loggedFirstRawInput = true;
+                FACELOGIN_INFO(L"[InputThread] first WM_INPUT (keyboard, vk=0x%02X, %s)",
+                               raw.data.keyboard.VKey, released ? L"up" : L"down");
+            } else {
+                FACELOGIN_INFO(L"[InputThread] raw keyboard key %s (vk=0x%02X)",
+                               released ? L"up" : L"down", raw.data.keyboard.VKey);
+            }
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+struct RawInputSink {
+    HWND hwnd = nullptr;
+    ATOM classAtom = 0;
+    HINSTANCE hInst = nullptr;
+    wchar_t className[64] = {};
+
+    bool Register();
+    void Unregister() noexcept;
+};
+
+bool RawInputSink::Register() {
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&RawInputSinkWndProc), &hInst);
+    wsprintfW(className, L"FaceLoginRawSink_%08lx", GetCurrentThreadId());
+
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = RawInputSinkWndProc;
+    wc.hInstance = hInst;
+    wc.lpszClassName = className;
+    classAtom = RegisterClassW(&wc);
+    if (!classAtom) {
+        FACELOGIN_WARN(L"[InputThread] raw-input class registration failed (GLE=%lu)",
+                       GetLastError());
+        return false;
+    }
+
+    // HWND_MESSAGE parent: invisible message-only window, exactly what a
+    // RIDEV_INPUTSINK registration needs as its delivery address.
+    hwnd = CreateWindowExW(0, className, L"", 0, 0, 0, 0, 0,
+                           HWND_MESSAGE, nullptr, hInst, nullptr);
+    if (!hwnd) {
+        FACELOGIN_WARN(L"[InputThread] raw-input sink window creation failed (GLE=%lu)",
+                       GetLastError());
+        Unregister();
+        return false;
+    }
+
+    RAWINPUTDEVICE rid = {};
+    rid.usUsagePage = 0x01;         // generic desktop
+    rid.usUsage = 0x06;             // keyboard
+    rid.dwFlags = RIDEV_INPUTSINK;  // deliver even without foreground
+    rid.hwndTarget = hwnd;
+    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) {
+        FACELOGIN_WARN(L"[InputThread] RegisterRawInputDevices failed (GLE=%lu) — "
+                       L"key presses degrade to credential-view-only detection",
+                       GetLastError());
+        Unregister();
+        return false;
+    }
+
+    FACELOGIN_INFO(L"[InputThread] raw-input keyboard sink registered");
+    return true;
+}
+
+void RawInputSink::Unregister() noexcept {
+    if (hwnd) {
+        RAWINPUTDEVICE rid = {};
+        rid.usUsagePage = 0x01;
+        rid.usUsage = 0x06;
+        rid.dwFlags = RIDEV_REMOVE;  // requires hwndTarget == nullptr
+        rid.hwndTarget = nullptr;
+        RegisterRawInputDevices(&rid, 1, sizeof(rid));
+        DestroyWindow(hwnd);
+        hwnd = nullptr;
+    }
+    if (classAtom) {
+        UnregisterClassW(className, hInst);
+        classAtom = 0;
+    }
 }
 
 static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
@@ -143,6 +297,9 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
     DWORD baseline = pCred->m_waitingStartTick;
     DWORD lastInputTick = baseline;     // input-timestamp space (GetLastInputInfo)
     DWORD lastInputEndWall = 0;         // wall-clock space (GetTickCount)
+    bool waveQualifying = false;        // wave contains a real key/button press
+    bool waveSawAsyncKey = false;       // qualifying source: GetAsyncKeyState scan
+    bool waveSawRawKeyboard = false;    // qualifying source: raw-input keyboard (MAKE or BREAK)
     bool armed = false;                 // current wave has gone quiet
 
     // Residue quarantine. Keys were still held when this credential appeared
@@ -183,6 +340,13 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
                        GetTickCount() - quarantineStart);
     }
 
+    // The keyboard raw-input sink is created AFTER residue quarantine (which
+    // does not pump messages — a WM_INPUT arriving meanwhile just queues up
+    // and the first main-loop pump consumes it) and before the wait loop, so
+    // every wait is a message-pumping wait that dispatches WM_INPUT.
+    RawInputSink rawSink;
+    rawSink.Register();
+
     // Loop forever (until the stop event is signaled).  The 30s timeout does
     // NOT kill the thread — it only restarts the idle window so a user who
     // waits longer than 30s before pressing a key can still trigger auth.
@@ -206,6 +370,9 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
             baseline = pCred->m_waitingStartTick;
             lastInputTick = baseline;
             lastInputEndWall = 0;
+            waveQualifying = false;
+            waveSawAsyncKey = false;
+            waveSawRawKeyboard = false;
             armed = false;
             continue;
         }
@@ -219,10 +386,21 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
             if (newInput) {
                 // Part of (or the start of) the dismiss wave (KEYDOWN/KEYUP).
                 // Note the wall-clock moment we saw it so we can detect when
-                // the wave goes quiet, then auto-trigger.
+                // the wave goes quiet, then auto-trigger. waveQualifying is
+                // deliberately NOT reset here — see its state comment above.
                 lastInputTick = lii.dwTime;
                 lastInputEndWall = GetTickCount();
                 armed = false;
+            }
+
+            // Qualifier scan, every cycle: a press is observable via
+            // GetAsyncKeyState only while physically held, which frequently
+            // falls between the ticks of one poll interval. Inside LogonUI
+            // this sees keyboard keys and mouse buttons once the credential
+            // view is up (the mouse's second-click trigger rides on this).
+            if (AnyKeyPhysicallyDown()) {
+                waveQualifying = true;
+                waveSawAsyncKey = true;
             }
 
             // Arm once the current wave has been quiet for QUIESCE_MS AND no
@@ -232,25 +410,46 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
             if (!armed && lastInputEndWall != 0 &&
                 GetTickCount() - lastInputEndWall >= QUIESCE_MS &&
                 !AnyKeyPhysicallyDown()) {
-                armed = true;
-                FACELOGIN_INFO(L"[InputThread] Dismiss wave quiet for %lums — "
-                              L"auto-triggering (no second keypress required)",
-                              QUIESCE_MS);
-                // Auto-trigger: the dismiss wave (KEYDOWN+KEYUP) has fully
-                // ended, so the user's single dismiss press is enough.
-                // Start auth immediately instead of waiting for another wave.
-                FACELOGIN_INFO(L"[InputThread] Auto-triggered after dismiss "
-                              L"(last=%lu, baseline=%lu, elapsed=%lums)",
-                              lastInputTick, baseline,
-                              static_cast<DWORD>(lastInputTick - baseline));
-                pCred->StartAuth();
-                break;
+                if (!waveQualifying) {
+                    // Movement-only wave (e.g. the mouse move that dismissed
+                    // the wallpaper): discard it and keep waiting — the tile
+                    // still says "按下任意按键". Zeroing lastInputEndWall
+                    // makes this branch run once per discarded wave.
+                    FACELOGIN_INFO(L"[InputThread] Wave quiet for %lums but "
+                                  L"no key/button press seen — movement-only "
+                                  L"wave discarded, still waiting",
+                                  QUIESCE_MS);
+                    lastInputEndWall = 0;
+                    waveQualifying = false;
+                    waveSawAsyncKey = false;
+                    waveSawRawKeyboard = false;
+                } else {
+                    armed = true;
+                    FACELOGIN_INFO(L"[InputThread] Dismiss wave quiet for %lums — "
+                                  L"auto-triggering (no second keypress required)",
+                                  QUIESCE_MS);
+                    // Auto-trigger: the dismiss wave (KEYDOWN+KEYUP) has fully
+                    // ended, so the user's single dismiss press is enough.
+                    // Start auth immediately instead of waiting for another wave.
+                    FACELOGIN_INFO(L"[InputThread] Auto-triggered after dismiss "
+                                  L"(last=%lu, baseline=%lu, elapsed=%lums, "
+                                  L"src: asyncKey=%d rawKbd=%d)",
+                                  lastInputTick, baseline,
+                                  static_cast<DWORD>(lastInputTick - baseline),
+                                  waveSawAsyncKey, waveSawRawKeyboard);
+                    pCred->StartAuth();
+                    break;
+                }
             }
         }
 
         // Sleep (alertable so the stop event can wake us). While a wave is
         // being timed out, wake exactly when the quiet window can complete
-        // instead of drifting up to a full poll interval past it.
+        // instead of drifting up to a full poll interval past it. This is a
+        // message-pumping wait: DispatchMessage routes WM_INPUT to the sink
+        // wndproc, whose key-press flag qualifies the current wave. The pump
+        // runs even when the sink failed to register — it is then an empty
+        // no-op and the wait is just an alertable sleep.
         DWORD sleepMs = pollIntervalMs;
         if (lastInputEndWall != 0) {
             const DWORD quietSoFar = GetTickCount() - lastInputEndWall;
@@ -258,8 +457,24 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
                 sleepMs = QUIESCE_MS - quietSoFar + 1;
             }
         }
-        SleepEx(sleepMs, TRUE);
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            DispatchMessageW(&msg);
+        }
+        if (InterlockedExchange(&t_rawKeyboardSeen, 0) != 0) {
+            waveQualifying = true;
+            waveSawRawKeyboard = true;
+        }
+        DWORD wait = MsgWaitForMultipleObjectsEx(
+            1, &pCred->m_hInputStop, sleepMs, QS_ALLINPUT,
+            MWMO_ALERTABLE | MWMO_INPUTAVAILABLE);
+        if (wait == WAIT_OBJECT_0) {
+            FACELOGIN_INFO(L"[InputThread] Stop event signaled — exiting");
+            break;
+        }
     }
+
+    rawSink.Unregister();  // idempotent no-op if registration failed
 
     FACELOGIN_INFO(L"[InputThread] Exiting");
     pCred->m_inputThreadRunning = false;
