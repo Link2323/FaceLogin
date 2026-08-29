@@ -3,7 +3,6 @@ package internal
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"golang.org/x/sys/windows"
 )
@@ -78,8 +77,8 @@ func cleanCredentialProviderRegistry() {
 		`SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\%s`,
 		clsidCredentialProvider,
 	)
-	exec.Command("reg", "delete", fmt.Sprintf(`HKLM\%s`, cpKey), "/f").Run()
-	exec.Command("reg", "delete", fmt.Sprintf(`HKCR\CLSID\%s`, clsidCredentialProvider), "/f").Run()
+	_, _ = RunCommand("reg", "delete", fmt.Sprintf(`HKLM\%s`, cpKey), "/f")
+	_, _ = RunCommand("reg", "delete", fmt.Sprintf(`HKCR\CLSID\%s`, clsidCredentialProvider), "/f")
 }
 
 // SetDirectoryACL replaces (rather than merely augments) the directory ACL
@@ -151,10 +150,9 @@ func SetDataDirectoryACL(dataDir string) error {
 
 func applyIcacls(commands [][]string) error {
 	for _, args := range commands {
-		cmd := exec.Command("icacls", args...)
-		out, err := cmd.CombinedOutput()
+		out, err := RunCommand("icacls", args...)
 		if err != nil {
-			return fmt.Errorf("icacls %v failed: %w\n%s", args[1:], err, string(out))
+			return fmt.Errorf("icacls %v failed: %w\n%s", args[1:], err, out)
 		}
 	}
 	return nil

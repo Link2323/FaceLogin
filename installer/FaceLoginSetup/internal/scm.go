@@ -2,7 +2,6 @@ package internal
 
 import (
 	"fmt"
-	"os/exec"
 	"syscall"
 	"time"
 
@@ -45,7 +44,7 @@ func stopService(s *mgr.Service) error {
 		return nil
 	}
 
-	exec.Command("taskkill", "/f", "/im", "FaceLoginService.exe").Run()
+	_, _ = RunCommand("taskkill", "/f", "/im", "FaceLoginService.exe")
 
 	for i := 0; i < 10; i++ {
 		time.Sleep(500 * time.Millisecond)

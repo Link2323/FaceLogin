@@ -6,7 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -174,9 +176,17 @@ func CopyFile(src, dst string) error {
 	return os.WriteFile(dst, data, 0644)
 }
 
-// RunCommand runs a command and returns stdout+stderr combined.
+// RunCommand runs a console command and returns stdout+stderr combined.
+// The installer is a GUI-subsystem process, so every console tool it spawns
+// (icacls, taskkill, reg) would otherwise flash its own console window;
+// CREATE_NO_WINDOW suppresses that window. All external command launches
+// must go through this helper — a bare exec.Command elsewhere will flash.
 func RunCommand(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NO_WINDOW,
+	}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
