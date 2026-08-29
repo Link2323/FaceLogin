@@ -62,11 +62,13 @@ var requiredModels = []requiredModel{
 
 // Root-level payload in the current installer. Keep this aligned with the
 // allow-list in docs/BUILD.md; it is also the fallback removal manifest if the
-// embedded filesystem cannot be enumerated during uninstall.
+// embedded filesystem cannot be enumerated during uninstall — which is the
+// ONLY manifest the slim uninstaller build has (no embedded resources).
 var currentRootPayloadFiles = []string{
 	"FaceLoginService.exe",
 	"FaceLoginCredentialProvider.dll",
 	"FaceLoginConsole.exe",
+	"uninstall.exe",
 	"abseil_dll.dll",
 	"libprotobuf-lite.dll",
 	"libprotobuf.dll",

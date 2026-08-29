@@ -13,12 +13,13 @@ import (
 
 // App struct
 type App struct {
-	ctx context.Context
+	ctx           context.Context
+	uninstallMode bool
 }
 
-// NewApp creates a new App application struct
+// NewApp creates a new App application
 func NewApp() *App {
-	return &App{}
+	return &App{uninstallMode: startupUninstall || uninstallerBuild}
 }
 
 // startup is called when the app starts. The context is saved so we can call runtime methods.
@@ -26,6 +27,17 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	// Set up the embedded FS reference for extraction
 	internal.EmbeddedFS = resources
+}
+
+// GetMode tells the frontend where to land: "uninstall" opens on the
+// uninstall page (slim uninstaller build, or full installer launched with
+// --uninstall). "locked" means the build has no install capability at all
+// (slim) and the mode tabs are hidden.
+func (a *App) GetMode() map[string]bool {
+	return map[string]bool{
+		"uninstall": a.uninstallMode,
+		"locked":    uninstallerBuild,
+	}
 }
 
 // ProgressEvent is sent to the frontend during install/uninstall.
@@ -203,6 +215,13 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	enrollDest := filepath.Join(installDir, "FaceLoginConsole.exe")
 	_ = internal.ExtractResource("resources/FaceLoginConsole.exe", enrollDest)
 
+	// Step 9: Register in Add/Remove Programs. uninstall.exe itself is part
+	// of the payload (ExtractAll deployed it); the entry only points at it.
+	// Failure here leaves the install fully functional — warn, don't fail.
+	if entryErr := internal.WriteUninstallEntry(installDir, appVersion); entryErr != nil {
+		a.emit(100, "完成", "warn", "写入应用列表条目失败："+entryErr.Error())
+	}
+
 	a.emit(100, "完成", "done", "")
 	return result(true, "安装完成。")
 }
@@ -363,12 +382,25 @@ func (a *App) Uninstall() map[string]interface{} {
 		if regErr := internal.DeleteRegKey(); regErr != nil {
 			cleanupFailed = true
 			a.emit(80, "清理注册表", "warn", regErr.Error())
+		} else if entryErr := internal.DeleteUninstallEntry(); entryErr != nil {
+			cleanupFailed = true
+			a.emit(80, "清理注册表", "warn", entryErr.Error())
 		} else {
 			a.emit(90, "清理注册表", "done", "")
 		}
 	}
 
-	// Step 6: Notify complete
+	// Step 6: The slim uninstaller cannot delete its own running exe; a
+	// detached hidden cmd removes it (and the emptied directory) after we
+	// exit. Reboot-deletion of the same paths was already scheduled above as
+	// the fallback, so a lost race is harmless.
+	if uninstallerBuild {
+		if exe, exeErr := os.Executable(); exeErr == nil {
+			_ = internal.SelfDelete(exe)
+		}
+	}
+
+	// Step 7: Notify complete
 	a.emit(90, "完成", "running", "")
 	message := "卸载完成，登录界面已恢复为默认密码登录。程序文件、人脸数据和日志已全部删除。"
 	status := "done"

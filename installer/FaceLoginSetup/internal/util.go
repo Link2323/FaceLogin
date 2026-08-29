@@ -1,6 +1,8 @@
 package internal
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -189,6 +191,59 @@ func RunCommand(name string, args ...string) (string, error) {
 	}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// StartHiddenConsole launches a console command detached, without flashing a
+// window (same flags as RunCommand, but does not wait). Used for the
+// uninstaller self-delete handoff.
+func StartHiddenConsole(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NO_WINDOW,
+	}
+	return cmd.Start()
+}
+
+// SelfDelete removes a running executable: Windows refuses to delete it
+// while it runs, so a detached hidden PowerShell waits for this exact
+// process to exit (Wait-Process on our PID — no timing guess; a fixed-delay
+// cmd races the user closing the window and loses), then deletes the file
+// and the directory. Both deletes retry for up to ~30 s: the WebView2 child
+// processes outlive the main Wails process by a few seconds and their
+// inherited CWD keeps the directory locked until they exit. Remove-Item
+// without -Recurse only removes an EMPTY directory, so nothing else can be
+// wiped by a stale path. Callers schedule reboot-deletion first — that stays
+// as the fallback if this handoff dies.
+func SelfDelete(exePath string) error {
+	dir := filepath.Dir(exePath)
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	script := "Wait-Process -Id " + fmt.Sprint(os.Getpid()) + " -ErrorAction SilentlyContinue; " +
+		"$p=" + q(exePath) + "; $d=" + q(dir) + "; " +
+		"for ($i=0; $i -lt 30 -and (Test-Path -LiteralPath $p); $i++) { Start-Sleep 1; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }; " +
+		"for ($i=0; $i -lt 30 -and (Test-Path -LiteralPath $d); $i++) { Start-Sleep 1; Remove-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue }"
+
+	// -EncodedCommand takes UTF-16LE base64 — sidesteps all quoting issues
+	// for install paths with spaces or quotes.
+	uni, err := windows.UTF16FromString(script)
+	if err != nil {
+		return err
+	}
+	raw := make([]byte, len(uni)*2)
+	for i, v := range uni {
+		binary.LittleEndian.PutUint16(raw[i*2:], v)
+	}
+	cmd := exec.Command("powershell", "-NoProfile",
+		"-EncodedCommand", base64.StdEncoding.EncodeToString(raw))
+	// Never inherit our CWD: it is usually the install dir itself (double-
+	// click launches there), and Windows refuses to delete a process's
+	// working directory — the rmdir step would silently fail.
+	cmd.Dir = os.TempDir()
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NO_WINDOW,
+	}
+	return cmd.Start()
 }
 
 // StartProgram launches a GUI program detached: Start() returns immediately,

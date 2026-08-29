@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
-import { GetDefaultPaths, Install, Uninstall, PickDirectory, IsInstalled, LaunchConsole } from '../wailsjs/go/main/App'
+import { GetDefaultPaths, Install, Uninstall, PickDirectory, IsInstalled, LaunchConsole, GetMode } from '../wailsjs/go/main/App'
 import { EventsOn, EventsOff, Quit } from '../wailsjs/runtime'
 
 const installDir = ref('')
@@ -18,8 +18,22 @@ const installDone = ref(false)
 const launchChecked = ref(true)
 const finishError = ref('')
 const finishing = ref(false)
+// Uninstaller build (or full installer run with --uninstall): land on the
+// uninstall page; the slim build has no install capability at all.
+const hideTabs = ref(false)
 
 onMounted(async () => {
+  try {
+    const mode = await GetMode()
+    if (mode.uninstall) {
+      showInstall.value = false
+    }
+    if (mode.locked) {
+      hideTabs.value = true
+    }
+  } catch {
+    // GetMode failing is not fatal — stay on the install page.
+  }
   try {
     const paths = await GetDefaultPaths()
     installDir.value = paths.installDir
@@ -115,6 +129,14 @@ async function doFinish() {
   }
 }
 
+async function doExit() {
+  try {
+    await Quit()
+  } catch {
+    // Ignore — the window close button still works
+  }
+}
+
 async function doUninstall() {
   if (!confirm('确定要卸载 FaceLogin 人脸登录吗？\n\n⚠️ 卸载将删除所有程序文件、人脸数据和日志，且不可恢复！')) return
 
@@ -155,8 +177,8 @@ async function doUninstall() {
       <p class="text-sm text-gray-400 font-light">人脸识别登录系统 · 安装程序</p>
     </div>
 
-    <!-- Mode Tabs -->
-    <div class="px-8 mt-4 flex gap-6 border-b border-gray-100">
+    <!-- Mode Tabs (hidden in the uninstaller build) -->
+    <div v-if="!hideTabs" class="px-8 mt-4 flex gap-6 border-b border-gray-100">
       <button
         :class="['pb-2 text-sm font-medium transition-colors',
                  showInstall ? 'text-gray-900 border-b-2 border-gray-900' : 'text-gray-400 hover:text-gray-600']"
@@ -244,8 +266,8 @@ async function doUninstall() {
         <button
           class="w-full py-2 text-sm text-gray-500 border border-gray-200
                  hover:bg-gray-50 transition-colors"
-          @click="showResult = false"
-        >返回</button>
+          @click="hideTabs ? doExit() : (showResult = false)"
+        >{{ hideTabs ? '退出' : '返回' }}</button>
       </div>
 
       <!-- Install finish page: success + optional console launch -->
