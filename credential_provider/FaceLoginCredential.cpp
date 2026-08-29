@@ -25,6 +25,19 @@
 // re-enumerate and call GetSerialization(), which then packs and returns
 // the ready credentials.
 //
+// The SAME watcher, with the SAME qualifying-wave gate, is re-armed for the
+// in-place failure tile (ArmFailureRetryDetection): after a terminal
+// failure any qualifying press (key or mouse button) requests another face
+// round via StartExplicitRetry — the command link remains as the visible
+// explicit affordance. Password entry stays structurally excluded: this
+// tile has no editable field, and SetDeselected stops the watcher before
+// the user can type anywhere else. One deliberate hole: when the triggered
+// round fails IMMEDIATELY on the watcher thread itself (pipe connect/send
+// error → "人脸登录服务不可用"), ArmFailureRetryDetection no-ops because
+// that thread still occupies the running slot and nothing re-arms after it
+// exits — acceptable because a dead service makes press-to-retry useless
+// noise anyway; the command link still works once it recovers.
+//
 // Trigger algorithm (residue quarantine + quiesce):
 //
 //   Lock-shortcut residue. Lock hotkeys fire MID-GESTURE (Win+L activates on
@@ -437,7 +450,20 @@ static unsigned __stdcall InputDetectionThreadProc(void* pParam) {
                                   lastInputTick, baseline,
                                   static_cast<DWORD>(lastInputTick - baseline),
                                   waveSawAsyncKey, waveSawRawKeyboard);
-                    pCred->StartAuth();
+                    // Failure-tile round: route through the explicit-retry
+                    // entry so the terminal pipe from the failed round is
+                    // destroyed first (a direct StartAuth could see the dead
+                    // client as "already connected" and skip, or reuse it).
+                    // First-attempt round: straight to StartAuth.
+                    if (facelogin::credential_provider::IsRetryableFailure(
+                            pCred->m_state)) {
+                        FACELOGIN_INFO(L"[InputThread] Qualifying press on "
+                                      L"failure tile — requesting explicit "
+                                      L"retry");
+                        pCred->StartExplicitRetry();
+                    } else {
+                        pCred->StartAuth();
+                    }
                     break;
                 }
             }
@@ -589,13 +615,18 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
         return S_OK;
     }
 
-    // A terminal failure must remain inert until the user explicitly clicks
-    // the retry command. LogonUI may call Advise again for reasons unrelated
-    // to FaceLogin; restarting GetLastInputInfo polling here would interpret
-    // password-entry keystrokes as face retries and repeatedly steal focus.
+    // A terminal failure must NOT (re)start the watcher from Advise:
+    // LogonUI calls Advise for every enumeration — including flows that
+    // never select this tile (PIN reset wizard) and moments when another
+    // tile is focused — and the watcher polls GLOBAL input, so starting it
+    // here would interpret password-entry keystrokes elsewhere as face
+    // retries. The failure watcher is armed only from
+    // PresentRetryableFailure/SetSelected, i.e. strictly while this tile is
+    // the selected one. No baseline is seeded here either —
+    // ArmFailureRetryDetection seeds its own.
     if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
-        FACELOGIN_INFO(L"Advise: terminal failure requires explicit retry; "
-                       L"input detection remains disabled");
+        FACELOGIN_INFO(L"Advise: terminal failure — retry watcher NOT started "
+                       L"here (armed tile-scoped instead)");
         return S_OK;
     }
 
@@ -670,11 +701,19 @@ STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
     // so starting the passive input watcher here keeps the keypress→auth
     // latency identical while never listening during flows that only Advise
     // us (PIN reset wizard, other tiles focused). Re-selecting after a
-    // deselect restarts the watcher the same way.
+    // deselect restarts the watcher the same way; a re-selected FAILED tile
+    // re-arms the failure watcher (fresh baseline — Advise did not seed one
+    // in failure state), so the residue quarantine also applies to the
+    // key/click that performed the re-selection itself.
     if (facelogin::credential_provider::ShouldStartInputDetection(m_state) &&
         !m_inputThreadRunning) {
-        FACELOGIN_INFO(L"SetSelected: starting passive input detection");
-        StartInputDetectionThread();
+        if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
+            FACELOGIN_INFO(L"SetSelected: re-arming passive retry detection");
+            ArmFailureRetryDetection();
+        } else {
+            FACELOGIN_INFO(L"SetSelected: starting passive input detection");
+            StartInputDetectionThread();
+        }
     }
 
     FACELOGIN_INFO(L"=== SetSelected EXIT (*pbAutoLogon=%d, credUI=%d, state=%d) ===",
@@ -777,7 +816,7 @@ STDMETHODIMP FaceLoginCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz) 
             if (!m_statusText.empty()) {
                 return SHStrDupW(m_statusText.c_str(), ppwsz);
             }
-            return SHStrDupW(L"人脸识别失败，请重试或使用密码登录", ppwsz);
+            return SHStrDupW(L"人脸识别失败，按任意键或点击重试", ppwsz);
         case State::Error:
             // Show the specific error message from the service (e.g. anti-spoof
             // rejection) if one was received; otherwise the generic fallback.
@@ -1163,6 +1202,26 @@ void FaceLoginCredential::StopInputDetectionThread() {
     FACELOGIN_INFO(L"Input detection thread stopped");
 }
 
+void FaceLoginCredential::ArmFailureRetryDetection() {
+    if (m_inputThreadRunning) {
+        return;
+    }
+
+    // Seed the baseline HERE, not in Advise: Advise early-returns in failure
+    // state, and for a re-selected failed tile the Advise-time baseline is
+    // stale by a whole round. The fresh baseline ignores everything from the
+    // finished round — including mouse movement while the camera filmed — so
+    // only presses after this moment can request a retry.
+    m_waitingStartTick = GetTickCount();
+    // Same instant: snapshot keys still physically held at failure
+    // presentation (e.g. the user hammering keys through the failed round).
+    // The thread quarantines their auto-repeat/KEYUP ticks, so a key held
+    // across the transition cannot trigger an instant re-retry — only a NEW
+    // press qualifies.
+    SnapshotBaselineKeys();
+    StartInputDetectionThread();
+}
+
 // ============================================================================
 // Private: Credential Packing
 // ============================================================================
@@ -1375,7 +1434,7 @@ void FaceLoginCredential::PresentRetryableFailure(
 
     m_state = failureState;
     m_authStartTime = 0;
-    m_statusText = statusText.empty() ? L"人脸识别失败，请重试或使用密码登录"
+    m_statusText = statusText.empty() ? L"人脸识别失败，按任意键或点击重试"
                                       : statusText;
 
     // Update the selected tile in-place. In particular, do not call
@@ -1386,7 +1445,14 @@ void FaceLoginCredential::PresentRetryableFailure(
         m_pCredentialEvents->SetFieldString(this, 3, L"重新尝试人脸识别");
         m_pCredentialEvents->SetFieldState(this, 3, CPFS_DISPLAY_IN_SELECTED_TILE);
     }
-    FACELOGIN_INFO(L"Terminal failure shown in-place; passive retry disabled");
+
+    // Re-arm the passive watcher for the failure tile: a qualifying press
+    // now requests another round (see ArmFailureRetryDetection). No-op when
+    // called on the still-running watcher thread (immediate pipe connect/
+    // send failure) — documented at the top of this file.
+    ArmFailureRetryDetection();
+    FACELOGIN_INFO(L"Terminal failure shown in-place; passive retry %s",
+                   m_inputThreadRunning ? L"re-armed" : L"not armed (service down)");
 }
 
 void FaceLoginCredential::StartExplicitRetry() {
@@ -1408,9 +1474,11 @@ void FaceLoginCredential::StartExplicitRetry() {
         m_pCredentialEvents->SetFieldState(this, 3, CPFS_DISPLAY_IN_DESELECTED_TILE);
     }
 
-    // This path is intentionally direct. Re-enabling passive key/mouse polling
-    // would again make password input ambiguous; clicking the command is the
-    // explicit user intent to retry face authentication.
+    // This is the single retry entry: the visible command link AND the
+    // failure-tile input watcher both route here. Password input stays
+    // unambiguous not because polling is disabled (it is armed while this
+    // tile is selected), but because the watcher is stopped on deselect and
+    // this tile has no editable field — see auth_interaction_policy.h.
     StartAuth();
 }
 

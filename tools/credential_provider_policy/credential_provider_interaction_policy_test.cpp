@@ -11,8 +11,12 @@ using facelogin::credential_provider::ShouldStartInputDetection;
 
 static_assert(ShouldStartInputDetection(AuthState::Waiting));
 static_assert(!ShouldStartInputDetection(AuthState::Authenticating));
-static_assert(!ShouldStartInputDetection(AuthState::Failed));
-static_assert(!ShouldStartInputDetection(AuthState::Error));
+// Failure tiles keep passive detection armed: a qualifying press routes to
+// an explicit retry, and password keystrokes stay excluded structurally
+// (watcher stopped on deselect; no editable field in this tile).
+static_assert(ShouldStartInputDetection(AuthState::Failed));
+static_assert(ShouldStartInputDetection(AuthState::Error));
+static_assert(!ShouldStartInputDetection(AuthState::Ready));
 
 static_assert(IsRetryableFailure(AuthState::Failed));
 static_assert(IsRetryableFailure(AuthState::Error));

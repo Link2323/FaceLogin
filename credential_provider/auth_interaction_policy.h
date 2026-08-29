@@ -16,11 +16,18 @@ constexpr bool IsRetryableFailure(AuthState state) noexcept {
     return state == AuthState::Failed || state == AuthState::Error;
 }
 
-// Passive GetLastInputInfo polling is allowed only for the first attempt in a
-// credential session. After a terminal failure, password-entry keystrokes must
-// never be interpreted as another face-auth request.
+// Passive input polling runs on the initial Waiting round AND on the
+// in-place failure tile, where a qualifying press (keyboard key or mouse
+// button — the same wave gate as the first attempt, movement alone never
+// qualifies) is routed to an explicit retry. Password-entry keystrokes stay
+// excluded STRUCTURALLY, not by freezing detection: the watcher is stopped in
+// SetDeselected before the user can type anywhere else, and this tile has no
+// editable field, so a password can only be entered after the watcher is
+// gone. Detection must still never be started from Advise alone — Advise
+// fires for flows that never select this tile (PIN reset wizard) and the
+// watcher polls GLOBAL input.
 constexpr bool ShouldStartInputDetection(AuthState state) noexcept {
-    return state == AuthState::Waiting;
+    return state == AuthState::Waiting || IsRetryableFailure(state);
 }
 
 // Only success needs provider re-enumeration so LogonUI asks for serialized

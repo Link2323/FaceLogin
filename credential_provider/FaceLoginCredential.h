@@ -96,19 +96,28 @@ private:
     void StartInputDetectionThread();
     void StopInputDetectionThread();
 
+    // (Re)arm the input-detection watcher for the in-place failure tile: a
+    // qualifying press (key or mouse button) then requests another face
+    // round via StartExplicitRetry. Seeds its own baseline and held-key
+    // snapshot (Advise refuses to in failure state); no-op while a watcher
+    // is already running.
+    void ArmFailureRetryDetection();
+
     // Snapshot of keys physically held at the baseline moment (called from
-    // Advise, same instant as m_waitingStartTick). Also logs every held key
-    // — the one log line that proves GetAsyncKeyState works inside LogonUI's
-    // secure desktop.
+    // Advise for the first round and from ArmFailureRetryDetection for the
+    // failure tile, same instant as m_waitingStartTick). Also logs every
+    // held key — the one log line that proves GetAsyncKeyState works inside
+    // LogonUI's secure desktop.
     void SnapshotBaselineKeys();
 
     // Pipe callbacks — called from background read thread
     void OnPipeResponse(bool success, const std::wstring& message);
     void OnPipeStatus(const std::wstring& message);
 
-    // Freeze passive input triggering after any terminal, retryable failure.
-    // The status and explicit retry command are updated in-place so LogonUI
-    // does not re-enumerate the tile and disturb password entry.
+    // Present a terminal, retryable failure in-place on the selected tile
+    // (no re-enumeration — LogonUI must not disturb password entry on other
+    // tiles), then re-arm the passive watcher so a qualifying press can
+    // request another round (ArmFailureRetryDetection).
     void PresentRetryableFailure(State failureState,
                                  const std::wstring& statusText);
     void StartExplicitRetry();
@@ -134,22 +143,26 @@ private:
     // Auth timeout tracking (so we don't block LogonUI forever)
     LONGLONG m_authStartTime = 0;  // 100ns units, 0 = not yet started
 
-    // Baseline tick recorded in Advise() (LOGON and unlock). A background
-    // thread polls GetLastInputInfo() and calls StartAuth() when NEW input
-    // arrives (keyboard or mouse). The first keypress that dismissed the
-    // lock-screen wallpaper happened BEFORE our DLL was loaded, so any tick
-    // <= baseline is ignored.
+    // Baseline tick recorded in Advise() (first Waiting round) or in
+    // ArmFailureRetryDetection() (failure tile). A background thread polls
+    // GetLastInputInfo() and triggers auth/retry when NEW input arrives
+    // (keyboard or mouse). For the first round, the keypress that dismissed
+    // the lock-screen wallpaper happened BEFORE our DLL was loaded, so any
+    // tick <= baseline is ignored; for the failure tile the fresh baseline
+    // ignores the whole finished round.
     DWORD m_waitingStartTick = 0;
     HANDLE m_hInputThread = nullptr;   // background input-detection thread
     HANDLE m_hInputStop = nullptr;     // event: signal to stop the thread
     bool m_inputThreadRunning = false;
 
     // Keys (any key or mouse button) still physically held when the
-    // credential view appeared, snapshotted via GetAsyncKeyState() in
-    // Advise() right after m_waitingStartTick. Non-empty means this Advise
-    // happened mid-gesture (e.g. the user holding Win+L through the lock
-    // transition), so the input thread must quarantine the trailing
-    // auto-repeat/KEYUP ticks instead of treating them as a dismiss wave.
+    // credential view appeared (first round) or when a failure was
+    // presented (ArmFailureRetryDetection), snapshotted via
+    // GetAsyncKeyState() right after m_waitingStartTick. Non-empty means
+    // input is mid-gesture at that moment (e.g. the user holding Win+L
+    // through the lock transition, or hammering keys through a failed
+    // round), so the input thread must quarantine the trailing
+    // auto-repeat/KEYUP ticks instead of treating them as a wave.
     // Written once before the thread starts (CreateThread establishes the
     // happens-before), so the thread reads it without a lock.
     //
