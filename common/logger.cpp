@@ -19,6 +19,24 @@ Logger& Logger::Instance() {
     return s_instance;
 }
 
+// Runs only from static destruction (DLL unload or process exit); after this
+// no code path may touch the logger again. CloseHandle and
+// DeleteCriticalSection are safe inside DLL_PROCESS_DETACH.
+Logger::~Logger() {
+    if (m_hFile != INVALID_HANDLE_VALUE) {
+        CloseHandle(m_hFile);
+        m_hFile = INVALID_HANDLE_VALUE;
+    }
+    if (m_ringCsInitialized) {
+        DeleteCriticalSection(&m_ringCs);
+        m_ringCsInitialized = false;
+    }
+    if (m_csInitialized) {
+        DeleteCriticalSection(&m_cs);
+        m_csInitialized = false;
+    }
+}
+
 void Logger::SetLogFile(const std::wstring& path) {
     EnterCriticalSection(&m_cs);
     // Ensure parent directory exists

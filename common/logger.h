@@ -40,6 +40,12 @@ public:
 
 private:
     Logger() = default;
+    // Closes the log handle and destroys the critical sections. Static
+    // destruction runs when the host unloads the DLL (installer in-process
+    // self-reg via FreeLibrary) or exits; without an explicit close, the
+    // handle dangles until process exit and blocks the installer's own file
+    // deletion minutes later (delete deferred to reboot).
+    ~Logger();
     void WriteToFile(const std::wstring& line);
     void AppendToRingBuffer(const std::wstring& line);
 
