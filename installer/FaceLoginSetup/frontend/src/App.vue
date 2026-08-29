@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
-import { GetDefaultPaths, Install, Uninstall, PickDirectory, IsInstalled } from '../wailsjs/go/main/App'
-import { EventsOn, EventsOff } from '../wailsjs/runtime'
+import { GetDefaultPaths, Install, Uninstall, PickDirectory, IsInstalled, LaunchConsole } from '../wailsjs/go/main/App'
+import { EventsOn, EventsOff, Quit } from '../wailsjs/runtime'
 
 const installDir = ref('')
 const showInstall = ref(true)
@@ -14,6 +14,10 @@ const resultMessage = ref('')
 const resultSuccess = ref(false)
 const showResult = ref(false)
 const alreadyInstalled = ref(false)
+const installDone = ref(false)
+const launchChecked = ref(true)
+const finishError = ref('')
+const finishing = ref(false)
 
 onMounted(async () => {
   try {
@@ -46,12 +50,16 @@ async function doPickDirectory() {
 function toggleMode(mode: string) {
   showInstall.value = mode === 'install'
   showResult.value = false
+  installDone.value = false
+  finishError.value = ''
   progressStatus.value = ''
 }
 
 async function doInstall() {
   running.value = true
   showResult.value = false
+  installDone.value = false
+  finishError.value = ''
   progressPercent.value = 0
   progressStatus.value = 'running'
 
@@ -70,7 +78,13 @@ async function doInstall() {
     const result = await Install(installDir.value)
     resultMessage.value = result.message
     resultSuccess.value = result.success
-    showResult.value = true
+    // Success goes to the dedicated finish page (checkbox + finish button);
+    // failure keeps the old result banner with a back button.
+    if (result.success) {
+      installDone.value = true
+    } else {
+      showResult.value = true
+    }
 
   } catch (err: any) {
     resultMessage.value = err?.message || String(err) || '安装失败'
@@ -79,6 +93,25 @@ async function doInstall() {
   } finally {
     running.value = false
     EventsOff('setup:progress')
+  }
+}
+
+async function doFinish() {
+  finishing.value = true
+  finishError.value = ''
+  try {
+    if (launchChecked.value) {
+      const r = await LaunchConsole()
+      if (!r.success) {
+        finishError.value = r.message || '打开注册向导失败'
+        finishing.value = false
+        return
+      }
+    }
+    await Quit()
+  } catch (err: any) {
+    finishError.value = err?.message || String(err)
+    finishing.value = false
   }
 }
 
@@ -141,7 +174,7 @@ async function doUninstall() {
     <!-- Body -->
     <div class="flex-1 px-8 py-6">
       <!-- Install mode -->
-      <div v-if="showInstall && !running && !showResult">
+      <div v-if="showInstall && !running && !showResult && !installDone">
         <label class="block text-xs text-gray-500 uppercase tracking-wider mb-2">安装目录</label>
         <div class="flex items-center gap-3">
           <input
@@ -213,6 +246,32 @@ async function doUninstall() {
                  hover:bg-gray-50 transition-colors"
           @click="showResult = false"
         >返回</button>
+      </div>
+
+      <!-- Install finish page: success + optional console launch -->
+      <div v-if="installDone && !running" class="space-y-6">
+        <div class="flex items-center gap-4">
+          <div class="w-10 h-10 rounded-full bg-green-50 flex items-center justify-center flex-shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-green-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 6 9 17l-5-5"/>
+            </svg>
+          </div>
+          <div>
+            <p class="text-lg font-medium text-gray-900">安装成功</p>
+            <p class="text-sm text-gray-500 leading-relaxed">人脸认证服务已启动，登录界面已启用人脸选项。<br>注册人脸后即可使用人脸登录。</p>
+          </div>
+        </div>
+        <label class="flex items-center gap-2.5 text-sm text-gray-700 cursor-pointer select-text">
+          <input type="checkbox" v-model="launchChecked" class="w-4 h-4 accent-gray-900" />
+          立即打开人脸注册向导
+        </label>
+        <p v-if="finishError" class="text-xs text-red-600">{{ finishError }}</p>
+        <button
+          class="w-full py-2.5 text-sm font-medium bg-gray-900 text-white
+                 hover:bg-gray-800 transition-colors disabled:opacity-40"
+          @click="doFinish"
+          :disabled="finishing"
+        >完成</button>
       </div>
     </div>
 

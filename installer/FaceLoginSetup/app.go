@@ -204,13 +204,28 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	_ = internal.ExtractResource("resources/FaceLoginConsole.exe", enrollDest)
 
 	a.emit(100, "完成", "done", "")
-	// Enrollment is always the user's next step, so open the console right
-	// away. The child inherits our elevated token — no second UAC prompt.
-	message := "安装完成。\n注册向导已自动打开，请完成人脸注册。"
-	if startErr := internal.StartProgram(enrollDest); startErr != nil {
-		message = "安装完成。\n自动打开注册向导失败，请手动运行安装目录下的 FaceLoginConsole.exe 注册人脸。"
+	return result(true, "安装完成。")
+}
+
+// LaunchConsole starts the enrollment console detached: elevated token
+// inherited (no second UAC prompt) and the WEBVIEW2_* env vars that Wails's
+// go-webview2 blanks in this process are stripped by StartProgram. Called
+// from the frontend finish page when its "open enrollment wizard" checkbox
+// stays checked. A startup failure is returned, not fatal — the user can
+// still run FaceLoginConsole.exe manually from the install directory.
+func (a *App) LaunchConsole() map[string]interface{} {
+	installDir := internal.ReadRegString(REGVAL_INSTALL_PATH, "")
+	if installDir == "" {
+		installDir = internal.GetDefaultInstallDir()
 	}
-	return result(true, message)
+	consolePath := filepath.Join(installDir, "FaceLoginConsole.exe")
+	if !internal.FileExists(consolePath) {
+		return result(false, "未找到注册程序："+consolePath)
+	}
+	if err := internal.StartProgram(consolePath); err != nil {
+		return result(false, "打开注册向导失败："+err.Error())
+	}
+	return result(true, "")
 }
 
 // Uninstall runs the full uninstallation.
