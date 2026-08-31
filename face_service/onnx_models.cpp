@@ -135,9 +135,6 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
     if (!m_initialized) return {};
 
     try {
-        int h = static_cast<int>(faceChip.nr());
-        int w = static_cast<int>(faceChip.nc());
-
         // InsightFace buffalo_s expects 112x112 RGB, normalized to [-1, 1]
         // First resize to 112x112
         FrameImage resized(112, 112);
@@ -362,8 +359,8 @@ std::vector<OnnxDetector::Detection> OnnxDetector::Detect(
             std::vector<float> centerX(numPts), centerY(numPts);
             for (int r = 0; r < grid; r++) {          // row outer
                 for (int c = 0; c < grid; c++) {      // col inner (x fastest)
-                    centerX[r * grid + c] = c * stride;
-                    centerY[r * grid + c] = r * stride;
+                    centerX[r * grid + c] = static_cast<float>(c * stride);
+                    centerY[r * grid + c] = static_cast<float>(r * stride);
                 }
             }
 

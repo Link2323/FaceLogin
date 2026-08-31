@@ -5,7 +5,12 @@
 #include "../common/ipc_protocol.h"
 #include "../common/secure_clear.h"
 #include <wincred.h>
+// winnt.h (via windows.h above) and ntstatus.h both define the STATUS_*
+// constants with identical values; silence the benign C4005 redefinitions.
+#pragma warning(push)
+#pragma warning(disable : 4005)
 #include <ntstatus.h>
+#pragma warning(pop)
 #include <ntsecapi.h>
 #include <shlwapi.h>
 #include <process.h>
