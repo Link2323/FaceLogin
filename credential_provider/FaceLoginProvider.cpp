@@ -14,8 +14,6 @@
 extern const GUID CLSID_FaceLoginProvider;
 
 FaceLoginProvider::FaceLoginProvider() {
-    FACELOGIN_INFO(L"FaceLoginProvider created");
-
     // Define fields for our credential tile (no tile image — text only)
 
     // Field 0: Large text ("人脸登录")
@@ -134,8 +132,7 @@ STDMETHODIMP_(ULONG) FaceLoginProvider::Release() {
 
 STDMETHODIMP FaceLoginProvider::SetUsageScenario(
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, DWORD dwFlags) {
-    FACELOGIN_INFO(L"SetUsageScenario: cpus=%d, flags=0x%08X", cpus, dwFlags);
-
+    UNREFERENCED_PARAMETER(dwFlags);
     // CPUS_CHANGE_PASSWORD: we don't support changing passwords via face
     // recognition. Let the built-in password provider handle this.
     if (cpus == CPUS_CHANGE_PASSWORD) {
@@ -209,8 +206,6 @@ STDMETHODIMP FaceLoginProvider::SetSerialization(
 
 STDMETHODIMP FaceLoginProvider::Advise(
     ICredentialProviderEvents* pcpe, UINT_PTR upAdviseContext) {
-    FACELOGIN_INFO(L"Advise called");
-
     if (m_pEvents) {
         m_pEvents->Release();
     }
@@ -230,8 +225,6 @@ STDMETHODIMP FaceLoginProvider::Advise(
 }
 
 STDMETHODIMP FaceLoginProvider::UnAdvise() {
-    FACELOGIN_INFO(L"UnAdvise called");
-
     if (m_pEvents) {
         m_pEvents->Release();
         m_pEvents = nullptr;
@@ -287,8 +280,6 @@ STDMETHODIMP FaceLoginProvider::GetCredentialCount(
     // UNLOCK.  SetSelected() flips auto-logon to TRUE once credentials are
     // Ready so LogonUI calls GetSerialization to pack them.
     *pbAutoLogonWithDefault = FALSE;
-    FACELOGIN_INFO(L"GetCredentialCount: count=%d, default=%d, autoLogon=%d",
-                  *pdwCount, *pdwDefault, *pbAutoLogonWithDefault);
 
     return S_OK;
 }

@@ -201,8 +201,10 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     };
 
     // READY means only runtime/model preload. Camera device enumeration and
-    // activation are hard-deferred until the one allowed AUTH_START.
-    LogWorkerResources(L"ready (camera on demand)");
+    // activation are hard-deferred until the one allowed AUTH_START. The
+    // ready-time resource snapshot is logged by the parent (ModelWorkerLoop)
+    // from outside this process; the camera release/failure snapshots below
+    // have no parent-side equivalent and stay here.
     if (!channel.Write(MessageType::Ready, 0)) return ERROR_BROKEN_PIPE;
 
     // The worker is preloaded while the desktop is locked. It handles exactly

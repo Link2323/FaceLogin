@@ -174,10 +174,11 @@ AuthPipelineResult AuthPipeline::Run() {
 
         m_callbacks.reportStatus(L"正在识别...");
         const auto startTime = std::chrono::steady_clock::now();
+        // No per-round echo of the PAD threshold/check counts here: the
+        // active config (threshold included) is logged once per load by
+        // LoadConfig, and "need N" appears in the failure line.
         const int totalChecks = AntiSpoofCheckCount(m_config.antiSpoofThreshold);
         const int passRequired = AntiSpoofPassRequired(totalChecks);
-        FACELOGIN_INFO(L"Anti-spoof: threshold=%.3f → %d checks, %d required",
-                       m_config.antiSpoofThreshold, totalChecks, passRequired);
 
         const auto livenessStart = std::chrono::steady_clock::now();
         LivenessTiming timing{livenessStart};

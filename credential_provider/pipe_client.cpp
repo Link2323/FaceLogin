@@ -53,7 +53,6 @@ bool PipeClient::Connect(DWORD timeoutMs) {
             }
 
             m_connected = true;
-            FACELOGIN_INFO(L"Pipe client connected to service");
             return true;
         }
 
@@ -186,22 +185,15 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             len--;
         }
         std::wstring msg(buffer, len);
-        // SECURITY: AUTH_SUCCESS carries the plaintext password in its payload
-        // (AUTH_SUCCESS:SID:UPN:DOMAIN\USER:PASSWORD). Never log its content —
-        // even a truncated prefix leaks password characters into a Users-readable
-        // log file. Log only the status name + total length for diagnostics.
-        if (msg.starts_with(ipc::MSG_AUTH_SUCCESS_PREFIX)) {
-            FACELOGIN_INFO(L"Background read received: AUTH_SUCCESS (len=%zu, payload redacted)",
-                           len);
-        } else {
-            FACELOGIN_INFO(L"Background read received: %s (len=%zu)",
-                           msg.substr(0, 80).c_str(), len);
-        }
-
-        // STATUS: prefix → dispatch immediately, keep reading
+        // STATUS: prefix → dispatch immediately, keep reading. This receipt
+        // line is the single log per status message. Terminal messages get no
+        // line here — OnPipeResponse logs each outcome semantically, which
+        // also keeps AUTH_SUCCESS payloads (plaintext password) out of the
+        // log without a special-cased redaction branch.
         if (msg.starts_with(ipc::MSG_STATUS_PREFIX)) {
             std::wstring statusText = msg.substr(wcslen(ipc::MSG_STATUS_PREFIX));
-            FACELOGIN_INFO(L"Status update: %s", statusText.c_str());
+            FACELOGIN_INFO(L"Background read received: STATUS:%s (len=%zu)",
+                           statusText.substr(0, 80).c_str(), len);
             if (self->m_onStatus) {
                 self->m_onStatus(statusText);
             }

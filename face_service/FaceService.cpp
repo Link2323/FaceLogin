@@ -262,12 +262,10 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
                 WriteRegDword(REGVAL_USER_LOGGED_IN, 0);
                 pService->RequestModelLoad(L"session logoff");
             } else if (eventType == WTS_SESSION_LOCK) {
-                FACELOGIN_INFO(L"Session LOCK: session=%lu → preloading models",
-                              evt->dwSessionId);
+                // The queued model request logs itself ("Model load
+                // requested: session lock") — no extra line here.
                 pService->RequestModelLoad(L"session lock");
             } else if (eventType == WTS_SESSION_UNLOCK) {
-                FACELOGIN_INFO(L"Session UNLOCK: session=%lu → releasing models",
-                              evt->dwSessionId);
                 pService->RequestModelUnload(L"session unlock");
             } else {
                 // Connect/disconnect and remote-session events are not part of
@@ -304,15 +302,20 @@ bool FaceService::Initialize() {
     CreateDirectoryW(m_dataDir.c_str(), nullptr);
     m_modelsDir = m_dataDir + L"\\models";
 
+    // Attach the log file before LoadConfig: LoadConfig logs the active
+    // config (incl. the PAD threshold) exactly once per load, and calling it
+    // before SetLogFile silently dropped the startup line — leaving the
+    // pipeline's per-auth echo as the only record of the active threshold.
+    std::wstring logPath = m_dataDir + L"\\log\\service.log";
+    Logger::Instance().SetLogFile(logPath);
+    Logger::Instance().SetMinLevel(LogLevel::Info);
+
     // Load configuration from config.json (falls back to registry). Must happen
     // before camera init — the configured camera_device is used below.
     m_config = LoadConfig(m_dataDir);
     m_matchThreshold = m_config.match_threshold;
     m_antiSpoofThreshold = m_config.anti_spoof_threshold;
 
-    std::wstring logPath = m_dataDir + L"\\log\\service.log";
-    Logger::Instance().SetLogFile(logPath);
-    Logger::Instance().SetMinLevel(LogLevel::Info);
     FACELOGIN_INFO(L"=== FaceLoginService initializing ===");
     FACELOGIN_INFO(L"Data dir: %s", m_dataDir.c_str());
     FACELOGIN_INFO(L"Models dir: %s", m_modelsDir.c_str());
@@ -957,8 +960,6 @@ bool FaceService::SendAuthErrorMessage(const std::wstring& message) {
 }
 
 bool FaceService::ProcessWorkerAuthRequest() {
-    FACELOGIN_INFO(L"Starting face authentication through worker...");
-
     if (m_store->GetUserCount() == 0) {
         FACELOGIN_WARN(L"No registered users");
         SendAuthErrorMessage(L"没有注册用户");
@@ -1110,7 +1111,6 @@ bool FaceService::ProcessWorkerAuthRequest() {
     // AUTH_REQUEST, the ordinary fallback starts one then.
     MarkAuthWorkerConsumed(false);
     WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
-    FACELOGIN_INFO(L"UserLoggedIn=1 written after auth success");
     m_pipeServer->DrainOutput(5000);
     return true;
 }
@@ -1253,7 +1253,6 @@ bool FaceService::ProcessAuthRequest() {
                    credential->username.c_str());
     SecureClearMatchPassword(credential);
     WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
-    FACELOGIN_INFO(L"UserLoggedIn=1 written after auth success");
 
     if (m_webcamDS) {
         m_webcamDS->Shutdown();

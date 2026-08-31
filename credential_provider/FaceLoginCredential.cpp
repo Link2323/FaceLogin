@@ -1059,8 +1059,6 @@ void FaceLoginCredential::StartInputDetectionThread() {
     if (!m_hInputThread || m_hInputThread == INVALID_HANDLE_VALUE) {
         FACELOGIN_ERROR(L"Failed to start input detection thread");
         m_inputThreadRunning = false;
-    } else {
-        FACELOGIN_INFO(L"Input detection thread started (id=%u)", threadId);
     }
 }
 
@@ -1283,7 +1281,6 @@ void FaceLoginCredential::OnPipeStatus(const std::wstring& message) {
         return;
     }
     SetStatusText(message);
-    FACELOGIN_INFO(L"Status text updated: %s", message.c_str());
     // Use SetFieldString to update the status text in-place on the lock
     // screen, without triggering re-enumeration (which destroys the pipe).
     if (m_pCredentialEvents) {
