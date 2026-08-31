@@ -484,7 +484,8 @@ size_t CredentialStore::GetFaceCount(const std::wstring& sid) const {
 }
 
 std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
-    const float probeEmbedding[], size_t probeDim, float threshold) {
+    const float probeEmbedding[], size_t probeDim, float threshold,
+    float* outBestDistance) {
 
     if (m_users.empty() || probeDim == 0 || probeEmbedding == nullptr) {
         return std::nullopt;
@@ -540,6 +541,10 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
                         probeDim, m_users.size());
         return std::nullopt;
     }
+
+    // Publish the closest comparable distance before any rejection so
+    // callers can log how far off a failed probe was.
+    if (outBestDistance) *outBestDistance = bestDist;
 
     // The base threshold comes from config (default 0.80). For 512-D ONNX,
     // EmbeddingThresholdForDim honors it inside the calibrated band [0.70,

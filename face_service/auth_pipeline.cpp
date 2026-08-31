@@ -11,6 +11,27 @@
 
 namespace facelogin {
 
+// Mean luma over the face bbox — the capture condition that dominates
+// identity-match distance (dark chips shift embeddings; see
+// config_util.h low_light_enhance). Diagnostic only, computed once per
+// outcome-relevant frame.
+static float FaceRegionLuma(const FrameImage& frame, const FaceRect& r) {
+    const long y0 = std::max<long>(0, r.top());
+    const long y1 = std::min<long>(frame.nr() - 1, r.bottom());
+    const long x0 = std::max<long>(0, r.left());
+    const long x1 = std::min<long>(frame.nc() - 1, r.right());
+    double sum = 0.0;
+    long n = 0;
+    for (long y = y0; y <= y1; ++y) {
+        for (long x = x0; x <= x1; ++x) {
+            const auto& p = frame(y, x);
+            sum += 0.299 * p.red + 0.587 * p.green + 0.114 * p.blue;
+            ++n;
+        }
+    }
+    return n > 0 ? static_cast<float>(sum / n) : -1.0f;
+}
+
 AuthPipeline::AuthPipeline(OnnxDetector& detector,
                            OnnxRecognizer& recognizer,
                            OnnxAntiSpoof& antiSpoof,
@@ -176,6 +197,14 @@ AuthPipelineResult AuthPipeline::Run() {
         // the misleading liveness message.
         bool sawUnknownFace = false;
         std::wstring identityError;
+        // Capture conditions for the outcome log lines: the first identity
+        // miss (what the unknown-face failure looked like) and the latest
+        // accepted binding (what a passing frame looked like).
+        long retryFaceWidth = 0;
+        float retryFaceLuma = -1.0f;
+        bool haveRetryConditions = false;
+        long boundFaceWidth = 0;
+        float boundFaceLuma = -1.0f;
 
         // Pacing invariant (explicit, auditable, stricter than the legacy
         // implicit "sleep 60 + processing time"): consecutive COUNTED frames
@@ -279,7 +308,9 @@ AuthPipelineResult AuthPipeline::Run() {
 
             if (timing.ShouldFailPersistentAttack(faceNow)) {
                 if (totalChecked == 0 && sawUnknownFace) {
-                    FACELOGIN_INFO(L"Face present but no enrolled identity matched for 2s — failing fast (unknown face)");
+                    FACELOGIN_INFO(L"Face present but no enrolled identity matched for 2s — "
+                                   L"failing fast (unknown face; width=%ld px, face luma=%.0f)",
+                                   retryFaceWidth, retryFaceLuma);
                 } else {
                     FACELOGIN_INFO(L"PAD persistently below threshold for 2s — failing fast (likely attack)");
                 }
@@ -310,6 +341,11 @@ AuthPipelineResult AuthPipeline::Run() {
                     m_callbacks.verifyBinding(embedding, bindingCount);
                 if (decision.kind == BindingDecisionKind::Retry) {
                     scoreFuture.get();
+                    if (!haveRetryConditions) {
+                        retryFaceWidth = faceRect.width();
+                        retryFaceLuma = FaceRegionLuma(cur.frame, faceRect);
+                        haveRetryConditions = true;
+                    }
                     sawUnknownFace = true;
                     std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     continue;
@@ -323,6 +359,8 @@ AuthPipelineResult AuthPipeline::Run() {
                     break;
                 }
                 ++bindingCount;
+                boundFaceWidth = faceRect.width();
+                boundFaceLuma = FaceRegionLuma(cur.frame, faceRect);
             } else if (havePrevRect) {
                 const auto interW = std::max<long>(0,
                     std::min(faceRect.right(), prevRect.right()) -
@@ -404,7 +442,9 @@ AuthPipelineResult AuthPipeline::Run() {
             !livenessInferenceError && !identityRejected &&
             totalChecked == totalChecks && timing.PassCount() >= passRequired && bindingCount == 3;
         if (livenessPassed) {
-            FACELOGIN_INFO(L"Liveness passed — tail anchor bound, authentication evidence complete");
+            FACELOGIN_INFO(L"Liveness passed — tail anchor bound, authentication evidence "
+                           L"complete (width=%ld px, face luma=%.0f)",
+                           boundFaceWidth, boundFaceLuma);
             result.succeeded = true;
             return result;
         }

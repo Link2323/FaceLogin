@@ -894,10 +894,18 @@ void FaceService::RequestStop() {
 BindingDecision FaceService::VerifyIdentityBinding(
     const std::vector<float>& embedding, unsigned int bindingIndex,
     std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
-    std::wstring& initialSid) const {
+    std::wstring& initialSid, float* identityMissDistance) const {
+    float bestDistance = -1.0f;
     auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
-                                              m_matchThreshold);
+                                              m_matchThreshold, &bestDistance);
     if (!identity) {
+        // Track the closest miss of the round for the failure log: "0.81
+        // against 0.80" (marginal capture conditions) is a different problem
+        // from "0.95" (wrong face / broken enrollment).
+        if (identityMissDistance && bestDistance >= 0.0f &&
+            (*identityMissDistance < 0.0f || bestDistance < *identityMissDistance)) {
+            *identityMissDistance = bestDistance;
+        }
         return BindingDecision{BindingDecisionKind::Retry, {}};
     }
 
@@ -960,6 +968,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     std::optional<CredentialStore::IdentityMatch> lockedIdentity;
     std::wstring initialSid;
     AuthWorkerResult workerResult;
+    float identityMissDistance = -1.0f;
 
     {
         // Prevent SESSION_UNLOCK from killing the worker between the public
@@ -1006,10 +1015,12 @@ bool FaceService::ProcessWorkerAuthRequest() {
             callbacks.isCancelled = [this]() {
                 return !m_running || m_pipeServer->IsClientDisconnected();
             };
-            callbacks.verifyBinding = [this, &lockedIdentity, &initialSid](
+            callbacks.verifyBinding = [this, &lockedIdentity, &initialSid,
+                                       &identityMissDistance](
                 const std::vector<float>& embedding, unsigned int bindingIndex) {
                 return VerifyIdentityBinding(embedding, bindingIndex,
-                                             lockedIdentity, initialSid);
+                                             lockedIdentity, initialSid,
+                                             &identityMissDistance);
             };
             workerResult = worker->Authenticate(std::move(callbacks));
         }
@@ -1035,7 +1046,12 @@ bool FaceService::ProcessWorkerAuthRequest() {
         const std::wstring message = workerResult.errorMessage.empty()
             ? L"认证工作进程执行失败，请使用密码登录"
             : workerResult.errorMessage;
-        FACELOGIN_WARN(L"Authentication worker failed: %s", message.c_str());
+        if (identityMissDistance >= 0.0f) {
+            FACELOGIN_WARN(L"Authentication worker failed: %s (closest identity distance=%.3f, threshold=%.3f)",
+                           message.c_str(), identityMissDistance, m_matchThreshold);
+        } else {
+            FACELOGIN_WARN(L"Authentication worker failed: %s", message.c_str());
+        }
         SendAuthErrorMessage(message);
         return false;
     }
@@ -1146,6 +1162,7 @@ bool FaceService::ProcessAuthRequest() {
 
     std::optional<CredentialStore::IdentityMatch> lockedIdentity;
     std::wstring initialSid;
+    float identityMissDistance = -1.0f;
 
     AuthPipelineCallbacks callbacks;
     callbacks.grabFrame = [this](FrameImage& frame, unsigned long long& frameSequence) {
@@ -1162,10 +1179,12 @@ bool FaceService::ProcessAuthRequest() {
     callbacks.reportStatus = [this](const std::wstring& text) {
         SendStatusMessage(text);
     };
-    callbacks.verifyBinding = [this, &lockedIdentity, &initialSid](
+    callbacks.verifyBinding = [this, &lockedIdentity, &initialSid,
+                               &identityMissDistance](
         const std::vector<float>& embedding, unsigned int bindingIndex) {
         return VerifyIdentityBinding(embedding, bindingIndex,
-                                     lockedIdentity, initialSid);
+                                     lockedIdentity, initialSid,
+                                     &identityMissDistance);
     };
 
     AuthPipeline pipeline(
@@ -1186,6 +1205,12 @@ bool FaceService::ProcessAuthRequest() {
         const std::wstring error = result.errorMessage.empty()
             ? L"认证过程异常，请使用密码登录"
             : result.errorMessage;
+        if (identityMissDistance >= 0.0f) {
+            FACELOGIN_WARN(L"Authentication failed: %s (closest identity distance=%.3f, threshold=%.3f)",
+                           error.c_str(), identityMissDistance, m_matchThreshold);
+        } else {
+            FACELOGIN_WARN(L"Authentication failed: %s", error.c_str());
+        }
         SendAuthErrorMessage(error);
         return false;
     }

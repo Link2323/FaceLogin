@@ -89,10 +89,14 @@ private:
     // binding frames must return the same SID or the round is rejected as a
     // face swap. Single source — the security rule must not exist as two
     // copies that can drift.
+    // identityMissDistance (optional) collects the closest identity distance
+    // seen on Retry verdicts within one auth round, for the failure log —
+    // distinguishing "just above threshold" from "way off" post-mortem.
     BindingDecision VerifyIdentityBinding(
         const std::vector<float>& embedding, unsigned int bindingIndex,
         std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
-        std::wstring& initialSid) const;
+        std::wstring& initialSid,
+        float* identityMissDistance = nullptr) const;
 
     // Public-pipe message helpers. Status pushes keep the round alive (no
     // drain); terminal messages flush and wait for the client to consume

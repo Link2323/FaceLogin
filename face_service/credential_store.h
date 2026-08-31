@@ -207,9 +207,14 @@ public:
     // probeDim is the number of floats in probeEmbedding (128 for dlib,
     // 512 for InsightFace ONNX). Only stored embeddings of the same
     // dimensionality are compared; others are skipped as non-comparable.
+    // outBestDistance (optional) receives the closest account-level distance
+    // even when the match is rejected (threshold or ratio gate) — callers use
+    // it to log how far off a failed probe was. Untouched when no stored
+    // embedding is comparable.
     std::optional<IdentityMatch> FindBestIdentity(const float probeEmbedding[],
                                                    size_t probeDim,
-                                                   float threshold = 0.30f);
+                                                   float threshold = 0.30f,
+                                                   float* outBestDistance = nullptr);
 
     // Locate an already-authorized identity and decrypt its password.  This
     // must be called only after the caller has completed all authentication

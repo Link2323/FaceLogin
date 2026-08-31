@@ -115,11 +115,26 @@ void TestIdentityMatching() {
           "identity-only match chooses the closest account without a credential field");
 
     const auto ambiguous = Midpoint(1, 2);
-    Check(!store.FindBestIdentity(ambiguous.data(), ambiguous.size(), 1.00f),
+    float ratioMissDistance = -1.0f;
+    Check(!store.FindBestIdentity(ambiguous.data(), ambiguous.size(), 1.00f,
+                                  &ratioMissDistance),
           "best/second account ratio rejects an ambiguous probe");
+    Check(ratioMissDistance > 0.70f && ratioMissDistance < 0.80f,
+          "outBestDistance reports the closest distance on ratio rejection");
     const auto legacyProbe = Basis(0, 128);
-    Check(!store.FindBestIdentity(legacyProbe.data(), legacyProbe.size(), 0.80f),
+    float legacyMissDistance = -1.0f;
+    Check(!store.FindBestIdentity(legacyProbe.data(), legacyProbe.size(), 0.80f,
+                                  &legacyMissDistance),
           "different embedding dimensions are never compared");
+    Check(legacyMissDistance < 0.0f,
+          "outBestDistance is untouched when no embedding is comparable");
+    const auto strangerProbe = Basis(3);
+    float strangerMissDistance = -1.0f;
+    Check(!store.FindBestIdentity(strangerProbe.data(), strangerProbe.size(), 0.80f,
+                                  &strangerMissDistance),
+          "probe far from every enrollment is rejected");
+    Check(std::fabs(strangerMissDistance - std::sqrt(2.0f)) < 1e-4f,
+          "outBestDistance reports how far off the failed probe was");
 
     auto credential = store.LoadCredentialForSid(L"SID-A", identity ? identity->distance : 0.0f);
     Check(credential && credential->password == L"test-password" &&
