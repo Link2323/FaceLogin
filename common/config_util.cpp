@@ -152,7 +152,12 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.anti_spoof_threshold);
         cfg.anti_spoof_threshold = 0.281f;
     }
-    cfg.low_light_enhance = (jsonGetString(json, "low_light_enhance") == "true");
+    // Missing key adopts the current default (true); an explicit value is
+    // honored as written. Configs persisted by older builds carry an explicit
+    // false and keep it — the loader must not silently flip user files.
+    const std::string enhance = jsonGetString(json, "low_light_enhance");
+    cfg.low_light_enhance = enhance.empty() ? cfg.low_light_enhance
+                                            : (enhance == "true");
     int rotation = jsonGetInt(json, "camera_rotation", 0);
     // Only accept 0/90/180/270; anything else silently does nothing in
     // RotateFrame, so fall back to 0 and log it — a configured-but-ignored
