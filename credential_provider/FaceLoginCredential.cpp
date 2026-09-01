@@ -130,8 +130,10 @@ void RawInputSink::Unregister() noexcept {
 unsigned __stdcall FaceLoginCredential::InputDetectionThreadProc(void* pParam) {
     FaceLoginCredential* pCred = static_cast<FaceLoginCredential*>(pParam);
     using facelogin::credential_provider::InputTriggerPolicy;
+    using facelogin::credential_provider::InputTriggerKind;
 
     constexpr DWORD kPollIntervalMs = 10;
+    constexpr DWORD kMouseSelectionSettleMs = 100;
     constexpr int kFirstVk = 0x01;
     constexpr int kLastVk = 0xFE;
     constexpr int kMouseButtons[] = {
@@ -178,6 +180,7 @@ unsigned __stdcall FaceLoginCredential::InputDetectionThreadProc(void* pParam) {
     }
 
     bool shouldTrigger = false;
+    InputTriggerKind triggerKind = InputTriggerKind::None;
     while (WaitForSingleObject(pCred->m_hInputStop, 0) != WAIT_OBJECT_0) {
         MSG msg = {};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -212,6 +215,7 @@ unsigned __stdcall FaceLoginCredential::InputDetectionThreadProc(void* pParam) {
 
         if (policy.triggered()) {
             shouldTrigger = true;
+            triggerKind = policy.triggerKind();
             break;
         }
 
@@ -225,6 +229,17 @@ unsigned __stdcall FaceLoginCredential::InputDetectionThreadProc(void* pParam) {
 
     t_inputTriggerPolicy = nullptr;
     rawSink.Unregister();  // idempotent no-op if registration failed
+
+    // A mouse click can target another sign-in option. LogonUI dispatches the
+    // tile switch at the end of that click and calls SetDeselected, which
+    // signals m_hInputStop. Give that UI transition one short cancellable
+    // window before opening the authentication pipe. Keyboard presses retain
+    // their immediate path.
+    if (shouldTrigger && triggerKind == InputTriggerKind::MouseButton &&
+        WaitForSingleObject(pCred->m_hInputStop, kMouseSelectionSettleMs) ==
+            WAIT_OBJECT_0) {
+        shouldTrigger = false;
+    }
 
     // Deselect/UnAdvise wins a race with the qualifying edge: once the stop
     // event is signaled this watcher must not open a new pipe while its owner
@@ -1046,6 +1061,15 @@ void FaceLoginCredential::ClearPackedCredentials() {
 // ============================================================================
 
 HRESULT FaceLoginCredential::SwitchToPasswordProvider() {
+    // A click on the password command link is also visible to the global
+    // mouse watcher. Cancel that watcher (or its mouse-settle window) before
+    // re-enumerating providers, and tear down a round that may already have
+    // started through an earlier input race.
+    StopInputDetectionThread();
+    if (facelogin::credential_provider::ShouldAbortAuthOnDeselect(m_state)) {
+        m_pipeClient.reset();
+    }
+
     // Set the terminal state before notifying LogonUI. CredentialsChanged may
     // synchronously cause UnAdvise/Advise; Advise must already see Failed so
     // it cannot restart passive face authentication.

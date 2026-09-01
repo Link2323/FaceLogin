@@ -14,6 +14,12 @@ enum class InputDetectionRound {
     FailureRetry
 };
 
+enum class InputTriggerKind {
+    None,
+    Keyboard,
+    MouseButton
+};
+
 // Pure, COM-free input edge policy. The Win32 watcher owns event collection;
 // this class only decides whether an observed edge belongs to the current
 // round. It deliberately has no timers or keyboard-repeat assumptions.
@@ -37,7 +43,7 @@ public:
 
     // Returns true exactly once, on the first qualifying keyboard press.
     bool ObserveKey(std::uint16_t vk, bool isDown) noexcept {
-        if (m_triggered || !IsValidVk(vk)) return false;
+        if (triggered() || !IsValidVk(vk)) return false;
 
         if (isDown) {
             // The initial L MAKE can be an auto-repeat from the Win+L gesture
@@ -55,7 +61,7 @@ public:
             }
 
             m_keyDown[vk] = true;
-            m_triggered = true;
+            m_triggerKind = InputTriggerKind::Keyboard;
             return true;
         }
 
@@ -79,32 +85,44 @@ public:
             return false;
         }
         if (m_round == InputDetectionRound::InitialLock) {
-            m_triggered = true;
+            m_triggerKind = InputTriggerKind::Keyboard;
             return true;
         }
         return false;
     }
 
     // Called with sampled physical button state. Movement never enters this
-    // API, so it cannot qualify. Returns true once on a new button-down edge.
+    // API, so it cannot qualify. A complete DOWN->UP click triggers on UP,
+    // leaving LogonUI time to deselect this tile when the click targets a
+    // password option instead of face authentication.
     bool ObserveMouseButton(std::uint16_t vk, bool isDown) noexcept {
-        if (m_triggered || !IsValidVk(vk)) return false;
+        if (triggered() || !IsValidVk(vk)) return false;
 
         if (isDown) {
             if (m_inheritedMouseButton[vk] || m_mouseDown[vk]) {
                 return false;
             }
             m_mouseDown[vk] = true;
-            m_triggered = true;
-            return true;
+            return false;
         }
 
+        const bool inherited = m_inheritedMouseButton[vk];
+        const bool hadDown = m_mouseDown[vk] && !inherited;
         m_mouseDown[vk] = false;
         m_inheritedMouseButton[vk] = false;
+
+        if (hadDown) {
+            m_triggerKind = InputTriggerKind::MouseButton;
+            return true;
+        }
         return false;
     }
 
-    bool triggered() const noexcept { return m_triggered; }
+    bool triggered() const noexcept {
+        return m_triggerKind != InputTriggerKind::None;
+    }
+
+    InputTriggerKind triggerKind() const noexcept { return m_triggerKind; }
 
 private:
     static constexpr std::uint16_t kVkL = 0x4C;
@@ -121,7 +139,7 @@ private:
 
     InputDetectionRound m_round;
     bool m_drainInitialL = false;
-    bool m_triggered = false;
+    InputTriggerKind m_triggerKind = InputTriggerKind::None;
     std::array<bool, 256> m_keyDown{};
     std::array<bool, 256> m_inheritedKey{};
     std::array<bool, 256> m_mouseDown{};

@@ -10,6 +10,7 @@ using facelogin::credential_provider::ShouldProcessPipeResponse;
 using facelogin::credential_provider::ShouldReenumerateAfterTerminal;
 using facelogin::credential_provider::ShouldStartInputDetection;
 using facelogin::credential_provider::InputDetectionRound;
+using facelogin::credential_provider::InputTriggerKind;
 using facelogin::credential_provider::InputTriggerPolicy;
 
 static_assert(ShouldStartInputDetection(AuthState::Waiting));
@@ -86,8 +87,13 @@ bool TestMousePolicy() {
     ok &= Expect(!movementOnly.triggered(), "mouse movement must never trigger");
 
     InputTriggerPolicy click(InputDetectionRound::InitialLock);
-    ok &= Expect(click.ObserveMouseButton(kLeftButton, true),
-                 "a visible mouse-button down edge must trigger");
+    ok &= Expect(!click.ObserveMouseButton(kLeftButton, true),
+                 "mouse DOWN alone must not trigger before LogonUI handles the click");
+    ok &= Expect(!click.triggered(), "mouse DOWN must leave the policy untriggered");
+    ok &= Expect(click.ObserveMouseButton(kLeftButton, false),
+                 "a complete visible mouse click must trigger on button UP");
+    ok &= Expect(click.triggerKind() == InputTriggerKind::MouseButton,
+                 "a complete click must retain mouse trigger provenance");
 
     InputTriggerPolicy inheritedClick(InputDetectionRound::FailureRetry);
     inheritedClick.SeedMouseButtonDown(kLeftButton);
@@ -95,8 +101,10 @@ bool TestMousePolicy() {
                  "a button held across arm must not trigger");
     ok &= Expect(!inheritedClick.ObserveMouseButton(kLeftButton, false),
                  "the inherited button release must not trigger");
-    ok &= Expect(inheritedClick.ObserveMouseButton(kLeftButton, true),
-                 "the next new click must trigger");
+    ok &= Expect(!inheritedClick.ObserveMouseButton(kLeftButton, true),
+                 "the next new click DOWN must wait for completion");
+    ok &= Expect(inheritedClick.ObserveMouseButton(kLeftButton, false),
+                 "the next complete click must trigger");
 
     return ok;
 }
