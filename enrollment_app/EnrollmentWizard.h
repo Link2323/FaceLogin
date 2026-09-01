@@ -133,6 +133,8 @@ public:
     // Log viewer
     std::string GetLogLines();
     std::string GetServiceLogLines();
+    std::string GetAuthWorkerLogLines();
+    std::string GetCredentialProviderLogLines();
     void ClearLog();
 
     // Per-frame data for JS canvas rendering (pull model — JS calls these from rAF)
@@ -146,6 +148,10 @@ public:
 private:
     std::string EncodeJPEGBase64(const FrameImage& frame);
     std::string FacesToJson(const std::vector<facelogin::FaceWithKps>& faces);
+
+    // Reads <m_dataDir>\log\<logFileName> and returns a JSON array of lines
+    // for the JS log viewer (shared by Service/AuthWorker/CredentialProvider).
+    std::string ReadLogFileLines(const std::wstring& logFileName);
 
     bool SaveEnrollmentImpl(const std::wstring& password,
                             const std::wstring& label);

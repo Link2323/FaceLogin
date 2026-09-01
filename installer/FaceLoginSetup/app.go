@@ -109,6 +109,22 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	}
 	a.emit(12, "停止并删除已有服务", "done", "")
 
+	// Step 1.5: Close programs the update is about to overwrite. A console
+	// left running since the previous install (its finish-page auto-launch)
+	// holds the image lock on FaceLoginConsole.exe and would fail extraction.
+	// Any FaceLoginService.exe alive after the SCM stop is a stray standalone
+	// or an in-flight auth worker — same lock, same treatment.
+	a.emit(12, "关闭运行中的程序", "running", "")
+	for _, image := range []string{"FaceLoginService.exe", "FaceLoginConsole.exe"} {
+		killed, kerr := internal.KillProcessesByName(image)
+		if kerr != nil {
+			a.emit(12, "关闭运行中的程序", "warn", kerr.Error())
+		} else if killed > 0 {
+			a.emit(12, "关闭运行中的程序", "running", fmt.Sprintf("已结束 %s（%d 个）", image, killed))
+		}
+	}
+	a.emit(12, "关闭运行中的程序", "done", "")
+
 	// Step 2: Create directories
 	a.emit(12, "创建目标目录", "running", "")
 	if err = os.MkdirAll(installDir, 0755); err != nil {
@@ -262,6 +278,15 @@ func (a *App) Uninstall() map[string]interface{} {
 		return result(false, err.Error())
 	}
 	a.emit(30, "停止并删除认证服务", "done", "")
+
+	// Step 1.5: Close programs whose files are about to be deleted, so
+	// removal finishes now instead of deferring to the reboot queue. Best
+	// effort only — the reboot-pending path below already covers survivors.
+	a.emit(30, "关闭运行中的程序", "running", "")
+	for _, image := range []string{"FaceLoginService.exe", "FaceLoginConsole.exe"} {
+		internal.KillProcessesByName(image)
+	}
+	a.emit(30, "关闭运行中的程序", "done", "")
 
 	// Step 2: Unregister COM DLL
 	a.emit(30, "注销登录组件", "running", "")

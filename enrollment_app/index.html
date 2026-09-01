@@ -335,7 +335,7 @@ body{
         <option value="180">180°</option>
         <option value="270">顺时针 270°</option>
       </select>
-      <p class="dim" style="margin-top:4px;font-size:11px">摄像头物理安装方向不是正向上时（如竖屏安装），可在此调整。实时预览会立即反映旋转效果。</p>
+      <p class="dim" style="margin-top:4px;font-size:11px">摄像头物理安装方向不是正向上时（如竖屏安装），可在此调整。</p>
     </div>
 
     <div class="field">
@@ -343,7 +343,6 @@ body{
       <select id="cfg-camera">
         <option value="">默认（第一个设备）</option>
       </select>
-      <p class="dim" style="margin-top:4px;font-size:11px">有多台或虚拟摄像头时，可在此选择用于录入与登录的摄像头。</p>
     </div>
 
     <div class="field">
@@ -351,21 +350,21 @@ body{
         <input type="checkbox" id="cfg-low-light" style="width:auto;cursor:pointer">
         <span>暗光增强（暗光环境下人脸识别不稳定时开启）</span>
       </label>
-      <p class="dim" style="font-size:11px">暗光增强会对偏暗的人脸图像做亮度归一化，提升暗光下的识别与反欺诈通过率。正常亮度下无影响。非必要建议保持关闭。</p>
+      <p class="dim" style="font-size:11px">暗光增强会对偏暗的人脸图像做亮度归一化，提升暗光下的识别与反欺诈通过率。正常亮度下无影响。</p>
     </div>
 
     <div class="field" id="field-antispoof-threshold">
-      <label>双模型反欺诈阈值: <span id="cfg-asthr-val">0.281</span></label>
-      <input type="range" id="cfg-antispoof-threshold" min="0.281" max="0.500" value="0.281" step="0.001"
-             oninput="document.getElementById('cfg-asthr-val').textContent=parseFloat(this.value).toFixed(3)">
-      <p class="dim" style="margin-top:4px;font-size:11px">MiniFAS V2 + V1SE 50/50 融合；固定 5/5 帧通过。标定默认值 0.281，越高越严格。</p>
+      <label>反欺诈阈值 (Anti-Spoof Threshold): <span id="cfg-asthr-val">0.28</span></label>
+      <input type="range" id="cfg-antispoof-threshold" min="0.15" max="0.50" value="0.28" step="0.01"
+             oninput="document.getElementById('cfg-asthr-val').textContent=parseFloat(this.value).toFixed(2)">
+      <p class="dim" style="margin-top:4px;font-size:11px">MiniFAS V2 + V1SE 50/50 融合。标定默认值 0.28，越高越严格。</p>
     </div>
 
     <div class="field">
       <label>匹配阈值 (Match Threshold): <span id="cfg-threshold-val">0.80</span></label>
       <input type="range" id="cfg-threshold" min="0.70" max="1.00" value="0.80" step="0.01"
              oninput="document.getElementById('cfg-threshold-val').textContent=parseFloat(this.value).toFixed(2)">
-      <p class="dim" style="margin-top:4px;font-size:11px">值越低越严格（人脸需更相似才能通过）。范围 0.70–1.00 基于跨人距离标定，确保陌生人无法解锁；默认 0.80。</p>
+      <p class="dim" style="margin-top:4px;font-size:11px">与录入人脸比对的欧氏距离，低于阈值才通过。标定默认值 0.80，越低越严格。</p>
     </div>
 
     <button class="btn btn-primary" onclick="onSaveSettings()">
@@ -396,6 +395,8 @@ body{
         <select id="log-source" onchange="refreshLogs()" style="font-size:12px;padding:4px 8px;border:1px solid #e5e7eb;background:#f9fafb">
           <option value="console">Console</option>
           <option value="service">Service</option>
+          <option value="worker">AuthWorker</option>
+          <option value="cp">CredentialProvider</option>
         </select>
         <button class="btn btn-secondary" onclick="clearLogs()">清空日志</button>
       </div>
@@ -636,9 +637,14 @@ function loadSettings() {
     matchThr = Math.max(0.70, Math.min(1.00, matchThr));   // clamp to slider range
     document.getElementById('cfg-threshold').value = matchThr;
     document.getElementById('cfg-threshold-val').textContent = matchThr.toFixed(2);
-    var asThr = Number(cfg.anti_spoof_threshold || 0.281);
+    // Snap onto the slider's 0.01 grid: configs written by older builds may
+    // carry values like 0.281 that the step-0.01 slider can no longer hold.
+    var asThr = Number(cfg.anti_spoof_threshold || 0.28);
+    asThr = Math.round((asThr - 0.15) / 0.01) * 0.01 + 0.15;
+    if (asThr < 0.15) asThr = 0.15;
+    if (asThr > 0.50) asThr = 0.50;
     document.getElementById('cfg-antispoof-threshold').value = asThr;
-    document.getElementById('cfg-asthr-val').textContent = asThr.toFixed(3);
+    document.getElementById('cfg-asthr-val').textContent = asThr.toFixed(2);
   } catch(e) { showBanner('settings', '读取设置失败: ' + e.message, 'error'); }
 }
 
@@ -1268,6 +1274,10 @@ function refreshLogs() {
     var json;
     if (src === 'service') {
       json = H.GetServiceLogLines();
+    } else if (src === 'worker') {
+      json = H.GetAuthWorkerLogLines();
+    } else if (src === 'cp') {
+      json = H.GetCredentialProviderLogLines();
     } else {
       json = H.GetLogLines();
     }

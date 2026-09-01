@@ -1726,33 +1726,53 @@ std::string EnrollmentWizard::GetLogLines() {
 }
 
 std::string EnrollmentWizard::GetServiceLogLines() {
-    // Read the service log file directly — avoids pipe message size limits.
+    return ReadLogFileLines(L"service.log");
+}
+
+std::string EnrollmentWizard::GetAuthWorkerLogLines() {
+    return ReadLogFileLines(L"auth_worker.log");
+}
+
+std::string EnrollmentWizard::GetCredentialProviderLogLines() {
+    return ReadLogFileLines(L"credential_provider.log");
+}
+
+std::string EnrollmentWizard::ReadLogFileLines(const std::wstring& logFileName) {
+    // Read the log file directly — avoids pipe message size limits.
     // Log files are UTF-8 without BOM; files from pre-UTF-8 builds were
     // UTF-16LE and are detected (BOM or 0x00 bytes — impossible in UTF-8)
     // for a graceful fallback while such files still exist.
-    std::wstring logPath = m_dataDir + L"\\log\\service.log";
+    std::wstring logPath = m_dataDir + L"\\log\\" + logFileName;
     HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
-        return "[\"Service log file not available\"]";
+        return "[\"" + WstrToUtf8(logFileName) + " not available\"]";
     }
 
     DWORD fileSize = GetFileSize(hFile, nullptr);
     if (fileSize == INVALID_FILE_SIZE || fileSize < 2) {
         CloseHandle(hFile);
-        return "[\"Service log is empty\"]";
+        return "[\"" + WstrToUtf8(logFileName) + " is empty\"]";
     }
 
-    // Cap at ~256KB of raw bytes
+    // Cap at ~256KB of raw bytes, reading from the END — the viewer cares
+    // about the most recent lines, and a day of logging can exceed the cap.
     DWORD capSize = fileSize;
     if (capSize > 256 * 1024) capSize = 256 * 1024;
+    bool truncated = (capSize < fileSize);
+    if (truncated &&
+        SetFilePointer(hFile, static_cast<LONG>(fileSize - capSize),
+                       nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
+        CloseHandle(hFile);
+        return "[\"Failed to read " + WstrToUtf8(logFileName) + "\"]";
+    }
 
     std::vector<char> buf(capSize);
     DWORD bytesRead = 0;
     if (!ReadFile(hFile, buf.data(), capSize, &bytesRead, nullptr) || bytesRead < 2) {
         CloseHandle(hFile);
-        return "[\"Failed to read service log\"]";
+        return "[\"Failed to read " + WstrToUtf8(logFileName) + "\"]";
     }
     CloseHandle(hFile);
 
@@ -1767,6 +1787,14 @@ std::string EnrollmentWizard::GetServiceLogLines() {
     if (utf16) {
         // Legacy UTF-16LE file — decode to UTF-8, then share the byte-level
         // line parsing below.
+        // A mid-file cut can land mid-UTF-16-character; legacy files are
+        // near-pure ASCII (high byte 0x00), so a leading 0x00 before a
+        // non-zero byte marks a one-byte misalignment — drop it before
+        // pairing the bytes into wide chars.
+        if (bytesRead >= 2 && (unsigned char)buf[0] == 0x00 && (unsigned char)buf[1] != 0x00) {
+            buf.erase(buf.begin());
+            bytesRead--;
+        }
         int wlen = bytesRead / sizeof(wchar_t);
         std::wstring wide(wlen, L'\0');
         memcpy(&wide[0], buf.data(), wlen * sizeof(wchar_t));
@@ -1783,6 +1811,16 @@ std::string EnrollmentWizard::GetServiceLogLines() {
         }
     } else {
         text.assign(buf.data(), bytesRead);
+    }
+
+    // When the tail cut landed mid-line, the first line in `text` is a
+    // partial line cut mid-write — drop it so the viewer never shows a
+    // garbled fragment. (No newline at all means the whole cap window is one
+    // fragment of a single huge line; show nothing rather than garbage.)
+    if (truncated) {
+        size_t nl = text.find('\n');
+        if (nl == std::string::npos) text.clear();
+        else text.erase(0, nl + 1);
     }
 
     // Parse lines: each log line ends with \r\n. Bytes pass through verbatim

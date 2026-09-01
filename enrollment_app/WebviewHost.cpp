@@ -341,6 +341,8 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"RefreshAccountIdentity") *ids = 29;
     else if (n == L"GetCaptureStatus") *ids = 30;
     else if (n == L"ClearStaleAccountUpn") *ids = 31;
+    else if (n == L"GetAuthWorkerLogLines") *ids = 32;
+    else if (n == L"GetCredentialProviderLogLines") *ids = 33;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -447,6 +449,8 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         }
         case 15: if (res) *res = MakeStr(m_wizard->GetLogLines()); break;
         case 16: if (res) *res = MakeStr(m_wizard->GetServiceLogLines()); break;
+        case 32: if (res) *res = MakeStr(m_wizard->GetAuthWorkerLogLines()); break;
+        case 33: if (res) *res = MakeStr(m_wizard->GetCredentialProviderLogLines()); break;
         case 17: m_wizard->ClearLog(); break;
         case 18: if (res) *res = MakeStr(m_wizard->GetUserSid()); break;
         case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
