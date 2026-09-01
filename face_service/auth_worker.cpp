@@ -182,9 +182,15 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     // preload, not on the first authenticated frame.
     WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);
 
-    // DirectShow graph construction does not activate a device until
-    // initializeCamera() runs after AUTH_START.
+    // Camera preload during lock-screen idle: registry-level device
+    // enumeration + graph skeleton (device-independent filters). The device
+    // ACTIVATION (BindToObject) stays behind AUTH_START, so the camera is
+    // not opened here. On preload failure the AUTH_START path falls back to
+    // the full legacy construction.
     auto camera = std::make_unique<WebcamCaptureDS>();
+    if (!camera->Preload(config.cameraDevice)) {
+        FACELOGIN_WARN(L"Camera preload failed — full initialization at AUTH_START");
+    }
     bool cameraReady = false;
     const auto initializeCamera = [&camera, &cameraReady, &config]() {
         if (cameraReady) return true;
@@ -200,8 +206,9 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         LogWorkerResources(L"camera released");
     };
 
-    // READY means only runtime/model preload. Camera device enumeration and
-    // activation are hard-deferred until the one allowed AUTH_START. The
+    // READY means only runtime/model preload. Camera device ACTIVATION is
+    // hard-deferred until the one allowed AUTH_START (enumeration and the
+    // graph skeleton are preloaded above without touching the device). The
     // ready-time resource snapshot is logged by the parent (ModelWorkerLoop)
     // from outside this process; the camera release/failure snapshots below
     // have no parent-side equivalent and stay here.

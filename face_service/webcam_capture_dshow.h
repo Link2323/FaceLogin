@@ -92,6 +92,15 @@ public:
     // Empty (default) = first enumerated device.
     bool Initialize(int preferredWidth = 1280, int preferredHeight = 720,
                     const std::wstring& devicePath = L"");
+    // Preload the device-independent halves of a later Initialize():
+    // registry-level device enumeration (resolving the target moniker) and
+    // the graph skeleton (FilterGraph + SampleGrabber + Null Renderer).
+    // Nothing here ACTIVATES the capture device — BindToObject, pin
+    // connection and Run stay in Initialize(), so the camera LED stays off
+    // while the desktop is locked. Initialize() consumes the preload when
+    // its devicePath matches; on any mismatch or failure it silently falls
+    // back to the full legacy construction.
+    bool Preload(const std::wstring& devicePath = L"");
     bool IsInitialized() const { return m_initialized; }
     // frameSequence (optional): receives the sequence number of the frame
     // that was copied out, read under the same lock as the copy. The counter
@@ -129,14 +138,29 @@ private:
         LONG m_refCount = 1;
     };
 
+    // Enumeration only: resolve the moniker for the configured DevicePath
+    // (or the first device). Registry reads — never activates the camera.
+    bool FindMoniker(const std::wstring& devicePath, IMoniker** ppMoniker);
+    // Bind a moniker to the capture filter. THIS is the device activation.
+    bool BindMoniker(IMoniker* pMoniker, IBaseFilter** ppFilter);
     bool FindCamera(const std::wstring& devicePath, IBaseFilter** ppFilter);
-    bool BuildGraph(IBaseFilter* pCapture, int width, int height);
+    // Device-independent graph construction (FilterGraph/SampleGrabber/Null
+    // Renderer); AttachCapture adds the capture filter, negotiates the
+    // format, connects the pins and queries IMediaControl.
+    bool BuildSkeleton();
+    bool AttachCapture(IBaseFilter* pCapture, int width, int height);
+    // Release every COM interface and the held moniker. Keeps the thread's
+    // COM reference; callers that own their COM init pair it separately.
+    void DiscardPreload();
 
     IGraphBuilder*   m_pGraph        = nullptr;
     IMediaControl*   m_pControl      = nullptr;
     IBaseFilter*     m_pCapture      = nullptr;
     ISampleGrabber*  m_pGrabber      = nullptr;
     IBaseFilter*     m_pNullRenderer = nullptr;
+    IMoniker*        m_pMoniker      = nullptr;
+    std::wstring     m_preloadDevicePath;
+    bool             m_preloadValid  = false;
 
     GrabberCB m_callback;
 

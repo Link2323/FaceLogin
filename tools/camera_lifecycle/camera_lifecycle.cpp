@@ -128,6 +128,14 @@ bool RunOneCameraCycle(const Options&, int cycle) {
     }
 
     auto camera = std::make_unique<facelogin::WebcamCaptureDS>();
+    // Alternate the production worker path (Preload during idle, activation
+    // in Initialize) with the legacy single-shot path so both are covered in
+    // every run against the real camera.
+    const bool usePreload = (cycle % 2) == 1;
+    if (usePreload && !camera->Preload(L"")) {
+        std::cerr << "camera preload failed at cycle " << cycle << "\n";
+        return false;
+    }
     const auto activateStart = Clock::now();
     if (!camera->Initialize(640, 480, L"")) {
         std::cerr << "camera initialization failed at cycle " << cycle << "\n";
