@@ -901,12 +901,20 @@ std::string EnrollmentWizard::GetCaptureStatus() {
     return js.str();
 }
 
+static bool SendControlAck(HANDLE hPipe) {
+    std::wstring ack(ipc::MSG_CONTROL_ACK);
+    ack.push_back(L'\0');
+    const DWORD expected = static_cast<DWORD>(ack.size() * sizeof(wchar_t));
+    DWORD written = 0;
+    return WriteFile(hPipe, ack.c_str(), expected, &written, nullptr) &&
+           written == expected;
+}
+
 // Notify the FaceLogin service to reload the user database after a write and
-// keep the connection alive until the service acknowledges RELOAD_OK.  A
-// fire-and-forget client can connect, write, and close between two iterations
-// of the service's cancellable ConnectNamedPipe polling loop. Windows reports
-// that case as ERROR_NO_DATA and the unread message is lost, leaving the
-// service's in-memory store stale even though users.dat was saved correctly.
+// keep the connection alive until the service acknowledges RELOAD_OK. The
+// service accepts connections with an event-driven ConnectNamedPipe and waits
+// for CONTROL_ACK before disconnecting, so both directions have an explicit,
+// bounded delivery handshake.
 static bool NotifyServiceReload() {
     constexpr DWORD kAttempts = 5;
     constexpr DWORD kBusyWaitMs = 1000;
@@ -970,6 +978,10 @@ static bool NotifyServiceReload() {
                     --responseLength;
                 }
                 const std::wstring response(responseBuffer, responseLength);
+                if (!SendControlAck(hPipe)) {
+                    FACELOGIN_WARN(L"Failed to acknowledge database reload response: %lu",
+                                   GetLastError());
+                }
                 CloseHandle(hPipe);
                 if (response == ipc::MSG_RELOAD_OK) {
                     FACELOGIN_INFO(L"Service confirmed database reload");
@@ -1649,6 +1661,10 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
                         responseLength--;
                     }
                     std::wstring response(responseBuffer, responseLength);
+                    if (!SendControlAck(hPipe)) {
+                        FACELOGIN_WARN(L"Failed to acknowledge configuration reload response: %lu",
+                                       GetLastError());
+                    }
                     reloadConfirmed = (response == ipc::MSG_CONFIG_RELOAD_OK);
                     if (!reloadConfirmed) {
                         FACELOGIN_ERROR(L"Service rejected configuration reload: %s",

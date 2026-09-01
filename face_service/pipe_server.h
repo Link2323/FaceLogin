@@ -9,23 +9,23 @@
 namespace facelogin {
 
 // Named pipe server for communication with the credential provider DLL.
-// Uses synchronous I/O for message reads/writes. Connection acceptance is
-// polled in PIPE_NOWAIT mode so a service-stop request is never held hostage
-// by a synchronous ConnectNamedPipe call.
+// Uses OVERLAPPED connect/read/write operations. Each pending operation waits
+// on its completion event together with the service shutdown event, so data,
+// timeout and cancellation are immediate without polling.
 // Security: SYSTEM + Administrators + current interactive user can connect;
 // PIPE_REJECT_REMOTE_CLIENTS rejects remote clients at the transport level.
 
 class PipeServer {
 public:
-    PipeServer() = default;
+    PipeServer();
     ~PipeServer();
 
     // Non-copyable
     PipeServer(const PipeServer&) = delete;
     PipeServer& operator=(const PipeServer&) = delete;
 
-    // Create the named pipe and wait for a client connection. The wait is
-    // bounded by timeoutMs and observes RequestShutdown() at short intervals.
+    // Create the named pipe and wait for a client connection. The event-driven
+    // wait is bounded by timeoutMs and observes RequestShutdown() immediately.
     // pipeName overrides ipc::PIPE_NAME (dev/test tools only, to avoid
     // colliding with a live service's single instance); nullptr = production
     // name. Returns true when a client has connected.
@@ -47,21 +47,14 @@ public:
     // used to leak per pipe instance. Must read 0 after every Close().
     static long OutstandingAclAllocations() { return g_aclAllocations.load(); }
 
-    // Read a null-terminated UTF-16LE message from the pipe (synchronous).
-    // Returns true and sets outMessage on success. Honors timeoutMs by polling
-    // PeekNamedPipe so the caller can never block indefinitely.
+    // Read a null-terminated UTF-16LE message from the pipe. Returns true and
+    // sets outMessage on success. The OVERLAPPED wait is bounded by timeoutMs
+    // and can be cancelled by RequestShutdown().
     bool ReadMessage(std::wstring& outMessage, DWORD timeoutMs = 30000);
 
-    // Write a null-terminated UTF-16LE message to the pipe (synchronous).
+    // Write a null-terminated UTF-16LE message and wait for the bounded
+    // OVERLAPPED operation to complete.
     bool WriteMessage(const std::wstring& message);
-
-    // Wait (bounded) until the client has consumed pending output and the
-    // pipe is idle — i.e. no more bytes remain to be read. This replaces the
-    // unbounded ReadFile(dummy) handshake: it never blocks forever, and
-    // returns immediately if the client has already closed its end.
-    // Returns true if the pipe drained (or the client closed); false on
-    // timeout.
-    bool DrainOutput(DWORD timeoutMs = 5000);
 
     // Disconnect current client (allows a new client to connect).
     void Disconnect();
@@ -72,9 +65,6 @@ public:
 
     // Close the pipe entirely. Call only after the server loop has stopped.
     void Close();
-
-    // Get the raw pipe handle (for FlushFileBuffers, etc.)
-    HANDLE GetHandle() const { return m_hPipe; }
 
     bool IsConnected() const { return m_connected; }
 
@@ -100,6 +90,7 @@ private:
     static std::atomic<long> g_aclAllocations;
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
+    HANDLE m_hShutdownEvent = nullptr;
     bool m_connected = false;
     std::atomic<bool> m_shutdownRequested{false};
 };

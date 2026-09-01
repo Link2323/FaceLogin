@@ -24,11 +24,14 @@ constexpr wchar_t MSG_AUTH_SUCCESS_PREFIX[] = L"AUTH_SUCCESS:";
 constexpr wchar_t MSG_AUTH_TIMEOUT[] = L"AUTH_TIMEOUT";
 constexpr wchar_t MSG_AUTH_ERROR_PREFIX[] = L"AUTH_ERROR:";
 constexpr wchar_t MSG_STATUS_PREFIX[] = L"STATUS:";
+constexpr wchar_t MSG_AUTH_ACK[] = L"AUTH_ACK";
 constexpr wchar_t MSG_RELOAD_DB[] = L"RELOAD_DB";
 constexpr wchar_t MSG_RELOAD_OK[] = L"RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD[] = L"CONFIG_RELOAD";
 constexpr wchar_t MSG_CONFIG_RELOAD_OK[] = L"CONFIG_RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD_ERROR[] = L"CONFIG_RELOAD_ERROR";
+constexpr wchar_t MSG_CONTROL_ACK[] = L"CONTROL_ACK";
+constexpr DWORD PIPE_ACK_TIMEOUT_MS = 2000;
 
 // Parsed authentication result
 struct AuthResult {

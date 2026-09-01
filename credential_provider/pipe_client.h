@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <atomic>
 #include <string>
 #include <functional>
 
@@ -10,9 +11,10 @@ namespace facelogin {
 // Connects to the FaceLogin service to send/receive authentication messages.
 //
 // Runs in LogonUI.exe (SYSTEM context on Secure Desktop).
-// The background read thread polls the pipe (PeekNamedPipe + short ReadFile)
-// so it can also watch the stop event, and delivers every message through
-// callbacks — terminal results have NO second polling channel.
+// The background read thread waits on an OVERLAPPED ReadFile event and the
+// stop event together, so data delivery and cancellation are both immediate.
+// Every message is delivered through callbacks — terminal results have NO
+// second polling channel.
 //
 // OnResponseCallback: called from the background read thread exactly once,
 // when the terminal message arrives or the pipe breaks.  The credential
@@ -33,7 +35,8 @@ public:
 
     // Connect to the FaceLogin named pipe server.
     // Retries for up to ~5 seconds (pipe server may not be ready yet).
-    bool Connect(DWORD timeoutMs = 5000);
+    // pipeName overrides ipc::PIPE_NAME for dev/test tools only.
+    bool Connect(DWORD timeoutMs = 5000, const wchar_t* pipeName = nullptr);
 
     // Send a message to the server. Returns true on success.
     bool SendMessage(const std::wstring& message);
@@ -42,14 +45,16 @@ public:
     // STATUS: messages trigger onStatus (if set).
     // Terminal messages (AUTH_SUCCESS/AUTH_TIMEOUT/AUTH_ERROR/etc.) trigger
     // onResponse once and the thread exits.
-    void StartBackgroundRead(OnResponseCallback onResponse = nullptr,
+    // Returns false if the reader could not be started; no callback will run.
+    bool StartBackgroundRead(OnResponseCallback onResponse = nullptr,
                              OnStatusCallback onStatus = nullptr);
 
     // Check if connected
     bool IsConnected() const { return m_connected; }
 
-    // Close the connection (closes the pipe handle, which unblocks the
-    // background read thread, then joins the thread).
+    // Cancel any pending read, join the background thread, then close the
+    // pipe. The OVERLAPPED state and buffer stay alive until cancellation has
+    // completed.
     void Disconnect();
 
 private:
@@ -58,10 +63,8 @@ private:
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
     // Written by the read thread (pipe breakage) and by the owning thread
-    // (send failure / disconnect); read by IsConnected as a guard. A plain
-    // bool torn read is impossible on x64 and the guard only degrades
-    // gracefully, so no lock is taken around it.
-    bool m_connected = false;
+    // (send failure / disconnect); read concurrently by IsConnected.
+    std::atomic<bool> m_connected{false};
 
     // Background read
     HANDLE m_hReadThread = nullptr;

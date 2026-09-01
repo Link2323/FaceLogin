@@ -98,11 +98,14 @@ private:
         std::wstring& initialSid,
         float* identityMissDistance = nullptr) const;
 
-    // Public-pipe message helpers. Status pushes keep the round alive (no
-    // drain); terminal messages flush and wait for the client to consume
-    // before the caller disconnects. Returns the WriteMessage result.
+    // Public-pipe message helpers. STATUS is advisory and needs no ACK;
+    // terminal/control responses use explicit bounded acknowledgements before
+    // disconnect so no path depends on unbounded FlushFileBuffers.
     bool SendStatusMessage(const std::wstring& text);
     bool SendTerminalMessage(const std::wstring& message);
+    bool SendControlResponse(const std::wstring& message);
+    bool SendAcknowledgedMessage(const std::wstring& message,
+                                 const wchar_t* expectedAck);
     bool SendAuthErrorMessage(const std::wstring& message);
 
     // Model residency follows the interactive session: preload all inference

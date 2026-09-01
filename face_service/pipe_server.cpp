@@ -6,7 +6,32 @@
 
 namespace facelogin {
 
+namespace {
+
+constexpr DWORD kPipeWriteTimeoutMs = 5000;
+
+bool IsPipeClosedError(DWORD error) {
+    return error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA ||
+           error == ERROR_PIPE_NOT_CONNECTED;
+}
+
+// A stack OVERLAPPED and its buffer may not go out of scope until the kernel
+// has completed or cancelled the operation. This helper performs the required
+// cancel-and-reap sequence and intentionally ignores ERROR_NOT_FOUND (the I/O
+// won the race and GetOverlappedResult still observes its final state).
+void CancelAndReap(HANDLE pipe, OVERLAPPED& overlapped) {
+    CancelIoEx(pipe, &overlapped);
+    DWORD ignored = 0;
+    GetOverlappedResult(pipe, &overlapped, &ignored, TRUE);
+}
+
+} // namespace
+
 std::atomic<long> PipeServer::g_aclAllocations{0};
+
+PipeServer::PipeServer() {
+    m_hShutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+}
 
 PipeServer::PipeSecurity::~PipeSecurity() {
     // Absolute-format SDs do not own their DACL: both allocations must be
@@ -23,6 +48,10 @@ PipeServer::PipeSecurity::~PipeSecurity() {
 
 PipeServer::~PipeServer() {
     Close();
+    if (m_hShutdownEvent) {
+        CloseHandle(m_hShutdownEvent);
+        m_hShutdownEvent = nullptr;
+    }
 }
 
 bool PipeServer::CreateSecurityDescriptor(PipeSecurity& out) {
@@ -134,14 +163,13 @@ bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
     sa.lpSecurityDescriptor = sec.sd;
     sa.bInheritHandle = FALSE;
 
-    // Message reads/writes remain synchronous. PIPE_NOWAIT is used only while
-    // accepting a connection; WaitForClient polls ConnectNamedPipe and can
-    // therefore observe RequestShutdown without relying on CloseHandle from
-    // another thread to cancel a synchronous operation.
+    // Every operation on an OVERLAPPED handle supplies its own OVERLAPPED
+    // state. PIPE_WAIT keeps ordinary message-mode semantics; cancellation is
+    // driven by m_hShutdownEvent + CancelIoEx rather than PIPE_NOWAIT polling.
     m_hPipe = CreateNamedPipeW(
         name,
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT |
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT |
             PIPE_REJECT_REMOTE_CLIENTS,
         1,                                          // Max 1 instance
         ipc::PIPE_BUFFER_SIZE,
@@ -159,141 +187,128 @@ bool PipeServer::CreatePipeInstance(DWORD timeoutMs, const wchar_t* pipeName) {
         return false;
     }
 
-        // Per-reconnect marker — DEBUG; fires once per auth. The request
-        // dispatch ("Received request: ...") logged in FaceService::Run is the
-        // INFO-level signal that a client arrived.
-        FACELOGIN_DEBUG(L"Named pipe created, waiting for client...");
+    // Per-reconnect marker — DEBUG; fires once per auth. The request
+    // dispatch ("Received request: ...") logged in FaceService::Run is the
+    // INFO-level signal that a client arrived.
+    FACELOGIN_DEBUG(L"Named pipe created, waiting for client...");
 
     return true;
 }
 
 bool PipeServer::WaitForClient(DWORD timeoutMs, const wchar_t* pipeName) {
-    if (m_shutdownRequested.load()) return false;
+    if (m_shutdownRequested.load() || !m_hShutdownEvent) return false;
     if (!CreatePipeInstance(timeoutMs, pipeName)) return false;
 
-    constexpr DWORD kPollIntervalMs = 25;
-    DWORD waited = 0;
-    while (!m_shutdownRequested.load() && waited < timeoutMs) {
-        if (ConnectNamedPipe(m_hPipe, nullptr)) {
-            m_connected = true;
-        } else {
-            const DWORD err = GetLastError();
-            if (err == ERROR_PIPE_CONNECTED) {
-                m_connected = true;
-            } else if (err == ERROR_PIPE_LISTENING) {
-                const DWORD sleepMs = (timeoutMs - waited < kPollIntervalMs)
-                    ? (timeoutMs - waited) : kPollIntervalMs;
-                Sleep(sleepMs);
-                waited += sleepMs;
-                continue;
-            } else if (err == ERROR_NO_DATA || err == ERROR_PIPE_NOT_CONNECTED) {
-                // A client connected and went away before the service accepted
-                // it. Reset this instance and continue waiting within the same
-                // bounded interval.
-                DisconnectNamedPipe(m_hPipe);
-                continue;
-            } else {
-                FACELOGIN_WARN(L"Client connection failed: %lu", err);
-                Close();
-                return false;
-            }
-        }
-
-        DWORD mode = PIPE_READMODE_MESSAGE | PIPE_WAIT;
-        if (!SetNamedPipeHandleState(m_hPipe, &mode, nullptr, nullptr)) {
-            FACELOGIN_ERROR(L"SetNamedPipeHandleState(PIPE_WAIT) failed: %lu", GetLastError());
-            Close();
-            return false;
-        }
-        FACELOGIN_DEBUG(L"Client connected");
-        return true;
+    HANDLE connectEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!connectEvent) {
+        FACELOGIN_ERROR(L"CreateEvent for pipe connect failed: %lu", GetLastError());
+        Close();
+        return false;
     }
+    OVERLAPPED overlapped = {};
+    overlapped.hEvent = connectEvent;
 
+    BOOL connected = ConnectNamedPipe(m_hPipe, &overlapped);
+    DWORD error = connected ? ERROR_SUCCESS : GetLastError();
+    if (!connected && error == ERROR_IO_PENDING) {
+        HANDLE waits[] = { m_hShutdownEvent, connectEvent };
+        const DWORD wait = WaitForMultipleObjects(ARRAYSIZE(waits), waits, FALSE,
+                                                  timeoutMs);
+        if (wait == WAIT_OBJECT_0 + 1) {
+            DWORD ignored = 0;
+            connected = GetOverlappedResult(m_hPipe, &overlapped, &ignored, FALSE);
+            error = connected ? ERROR_SUCCESS : GetLastError();
+        } else {
+            CancelAndReap(m_hPipe, overlapped);
+            error = wait == WAIT_TIMEOUT ? ERROR_SEM_TIMEOUT : ERROR_OPERATION_ABORTED;
+            connected = FALSE;
+        }
+    } else if (!connected && error == ERROR_PIPE_CONNECTED) {
+        // The client opened the instance between CreateNamedPipeW and
+        // ConnectNamedPipe. This is a completed connection, not an error.
+        connected = TRUE;
+        error = ERROR_SUCCESS;
+    } else if (connected) {
+        DWORD ignored = 0;
+        connected = GetOverlappedResult(m_hPipe, &overlapped, &ignored, FALSE);
+        error = connected ? ERROR_SUCCESS : GetLastError();
+    }
+    CloseHandle(connectEvent);
+
+    if (!connected) {
+        if (m_shutdownRequested.load() || error == ERROR_OPERATION_ABORTED) {
+            FACELOGIN_INFO(L"Pipe wait cancelled by service stop request");
+        } else if (error != ERROR_SEM_TIMEOUT) {
+            FACELOGIN_WARN(L"Client connection failed: %lu", error);
+        }
+        Close();
+        return false;
+    }
     if (m_shutdownRequested.load()) {
         FACELOGIN_INFO(L"Pipe wait cancelled by service stop request");
+        Close();
+        return false;
     }
-    Close();
-    return false;
+
+    m_connected = true;
+    FACELOGIN_DEBUG(L"Client connected");
+    return true;
 }
 
 bool PipeServer::ReadMessage(std::wstring& outMessage, DWORD timeoutMs) {
-    if (!m_connected || m_hPipe == INVALID_HANDLE_VALUE) return false;
-
-    // Bounded synchronous read on a message-mode pipe. ReadFile on a sync
-    // pipe would block forever if the client never sends/never disconnects,
-    // so we first poll PeekNamedPipe for either available data or a broken
-    // connection, up to timeoutMs.
-    DWORD bytesAvail = 0, totalBytes = 0;
-    for (DWORD waited = 0; waited < timeoutMs; ) {
-        if (m_shutdownRequested.load()) return false;
-        if (PeekNamedPipe(m_hPipe, nullptr, 0, nullptr, &bytesAvail, &totalBytes)) {
-            if (bytesAvail > 0) {
-                // Data ready — the ReadFile below returns immediately.
-                break;
-            }
-            // Connected but idle — wait briefly, keep polling.
-            DWORD sleepMs = (timeoutMs - waited < 50) ? (timeoutMs - waited) : 50;
-            Sleep(sleepMs);
-            waited += sleepMs;
-            continue;
-        }
-        // PeekNamedPipe failed — client closed its end or pipe is broken.
-        DWORD err = GetLastError();
-        if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA ||
-            err == ERROR_PIPE_NOT_CONNECTED) {
-            FACELOGIN_INFO(L"Pipe broken by client while waiting for message");
-            m_connected = false;
-            return false;
-        }
-        FACELOGIN_ERROR(L"PeekNamedPipe failed: %lu", err);
-        m_connected = false;
-        return false;
-    }
-
-    // Polling window exhausted. Re-check once: a message that arrived just as
-    // the window closed must still be read, but a connected-and-silent client
-    // must NOT fall through to the synchronous ReadFile below — that would
-    // block forever and let one client hold the single pipe instance hostage
-    // (all later unlock attempts fail). Return a timeout instead; the caller
-    // disconnects and accepts the next client.
-    DWORD bytesAvailAfter = 0, totalBytesAfter = 0;
-    if (!PeekNamedPipe(m_hPipe, nullptr, 0, nullptr, &bytesAvailAfter, &totalBytesAfter)) {
-        DWORD err = GetLastError();
-        if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA ||
-            err == ERROR_PIPE_NOT_CONNECTED) {
-            FACELOGIN_INFO(L"Pipe broken by client at read deadline");
-        } else {
-            FACELOGIN_ERROR(L"PeekNamedPipe failed at read deadline: %lu", err);
-        }
-        m_connected = false;
-        return false;
-    }
-    if (bytesAvailAfter == 0) {
-        // Client is alive but silent past the deadline. Keep m_connected so
-        // the caller can Disconnect() cleanly; never block on ReadFile.
-        FACELOGIN_WARN(L"ReadMessage timed out after %lu ms with no data", timeoutMs);
-        return false;
-    }
+    if (!m_connected || m_hPipe == INVALID_HANDLE_VALUE || !m_hShutdownEvent ||
+        m_shutdownRequested.load()) return false;
 
     wchar_t buffer[ipc::PIPE_BUFFER_SIZE / sizeof(wchar_t)] = {};
+    HANDLE readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!readEvent) {
+        FACELOGIN_ERROR(L"CreateEvent for pipe read failed: %lu", GetLastError());
+        return false;
+    }
+    OVERLAPPED overlapped = {};
+    overlapped.hEvent = readEvent;
     DWORD bytesRead = 0;
     BOOL result = ReadFile(m_hPipe, buffer,
                            static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t)),
-                           &bytesRead, nullptr);
+                           nullptr, &overlapped);
+    DWORD error = result ? ERROR_SUCCESS : GetLastError();
+    if (!result && error == ERROR_IO_PENDING) {
+        HANDLE waits[] = { m_hShutdownEvent, readEvent };
+        const DWORD wait = WaitForMultipleObjects(ARRAYSIZE(waits), waits, FALSE,
+                                                  timeoutMs);
+        if (wait == WAIT_OBJECT_0 + 1) {
+            result = GetOverlappedResult(m_hPipe, &overlapped, &bytesRead, FALSE);
+            error = result ? ERROR_SUCCESS : GetLastError();
+        } else {
+            CancelAndReap(m_hPipe, overlapped);
+            error = wait == WAIT_TIMEOUT ? ERROR_SEM_TIMEOUT : ERROR_OPERATION_ABORTED;
+            result = FALSE;
+        }
+    } else if (result) {
+        result = GetOverlappedResult(m_hPipe, &overlapped, &bytesRead, FALSE);
+        error = result ? ERROR_SUCCESS : GetLastError();
+    }
+    CloseHandle(readEvent);
 
     if (!result || bytesRead == 0) {
-        DWORD err = GetLastError();
-        if (err == ERROR_BROKEN_PIPE) {
+        if (error == ERROR_SEM_TIMEOUT) {
+            FACELOGIN_WARN(L"ReadMessage timed out after %lu ms with no data", timeoutMs);
+        } else if (m_shutdownRequested.load() || error == ERROR_OPERATION_ABORTED) {
+            FACELOGIN_INFO(L"Pipe read cancelled by service stop request");
+        } else if (IsPipeClosedError(error)) {
             FACELOGIN_INFO(L"Pipe broken by client");
-        } else if (err == ERROR_MORE_DATA) {
+            m_connected = false;
+        } else if (error == ERROR_MORE_DATA) {
             // Message larger than the fixed buffer; the protocol has no
             // fragmentation. Fail closed and let the caller disconnect.
             FACELOGIN_ERROR(L"ReadMessage: message exceeds %u bytes; "
                             L"closing connection", ipc::PIPE_BUFFER_SIZE);
-        } else if (!result) {
-            FACELOGIN_ERROR(L"ReadFile failed: %lu", err);
+            m_connected = false;
+        } else {
+            FACELOGIN_ERROR(L"Overlapped ReadFile failed: %lu", error);
+            m_connected = false;
         }
-        m_connected = false;
+        SecureZeroMemory(buffer, sizeof(buffer));
         return false;
     }
 
@@ -303,61 +318,55 @@ bool PipeServer::ReadMessage(std::wstring& outMessage, DWORD timeoutMs) {
         len--;
     }
     outMessage.assign(buffer, len);
+    SecureZeroMemory(buffer, sizeof(buffer));
     return true;
 }
 
-// Bounded "wait for the client to drain what we wrote". Previously the code
-// did an unbounded ReadFile(dummy) after every WriteMessage to handshake the
-// disconnect; if the client never read or never closed, the service blocked
-// forever (SCM killed it → 7034, no crash event). We poll PeekNamedPipe:
-// when no bytes remain to be read, the client has consumed everything (or
-// closed its end) and it is safe to Disconnect().
-bool PipeServer::DrainOutput(DWORD timeoutMs) {
-    if (!m_connected || m_hPipe == INVALID_HANDLE_VALUE) return true;
+bool PipeServer::WriteMessage(const std::wstring& message) {
+    if (m_shutdownRequested.load() || !m_connected ||
+        m_hPipe == INVALID_HANDLE_VALUE || !m_hShutdownEvent) return false;
 
-    DWORD bytesAvail = 0, totalBytes = 0;
-    for (DWORD waited = 0; waited < timeoutMs; ) {
-        if (m_shutdownRequested.load()) return false;
-        if (PeekNamedPipe(m_hPipe, nullptr, 0, nullptr, &bytesAvail, &totalBytes)) {
-            if (bytesAvail == 0) {
-                // All output consumed (or client already closed). Done.
-                return true;
-            }
-            DWORD sleepMs = (timeoutMs - waited < 50) ? (timeoutMs - waited) : 50;
-            Sleep(sleepMs);
-            waited += sleepMs;
-            continue;
-        }
-        // PeekNamedPipe failed → client closed its end. Fine, nothing to drain.
-        DWORD err = GetLastError();
-        if (err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA ||
-            err == ERROR_PIPE_NOT_CONNECTED) {
-            m_connected = false;
-            return true;
-        }
-        FACELOGIN_ERROR(L"DrainOutput: PeekNamedPipe failed: %lu", err);
+    DWORD byteSize = static_cast<DWORD>((message.size() + 1) * sizeof(wchar_t));
+    HANDLE writeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!writeEvent) {
+        FACELOGIN_ERROR(L"CreateEvent for pipe write failed: %lu", GetLastError());
         return false;
     }
-    // Timed out with unread bytes still pending — do NOT block further.
-    FACELOGIN_WARN(L"DrainOutput: timed out with unread bytes pending");
-    return false;
-}
-
-bool PipeServer::WriteMessage(const std::wstring& message) {
-    if (m_shutdownRequested.load() || !m_connected || m_hPipe == INVALID_HANDLE_VALUE) return false;
-
+    OVERLAPPED overlapped = {};
+    overlapped.hEvent = writeEvent;
     DWORD bytesWritten = 0;
-    DWORD byteSize = static_cast<DWORD>((message.size() + 1) * sizeof(wchar_t));
-
     BOOL result = WriteFile(m_hPipe, message.c_str(), byteSize,
-                            &bytesWritten, nullptr);
+                            nullptr, &overlapped);
+    DWORD error = result ? ERROR_SUCCESS : GetLastError();
+    if (!result && error == ERROR_IO_PENDING) {
+        HANDLE waits[] = { m_hShutdownEvent, writeEvent };
+        const DWORD wait = WaitForMultipleObjects(ARRAYSIZE(waits), waits, FALSE,
+                                                  kPipeWriteTimeoutMs);
+        if (wait == WAIT_OBJECT_0 + 1) {
+            result = GetOverlappedResult(m_hPipe, &overlapped,
+                                         &bytesWritten, FALSE);
+            error = result ? ERROR_SUCCESS : GetLastError();
+        } else {
+            CancelAndReap(m_hPipe, overlapped);
+            error = wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : ERROR_OPERATION_ABORTED;
+            result = FALSE;
+        }
+    } else if (result) {
+        result = GetOverlappedResult(m_hPipe, &overlapped,
+                                     &bytesWritten, FALSE);
+        error = result ? ERROR_SUCCESS : GetLastError();
+    }
+    CloseHandle(writeEvent);
 
-    if (!result || bytesWritten == 0) {
-        DWORD err = GetLastError();
-        if (err == ERROR_BROKEN_PIPE) {
+    if (!result || bytesWritten != byteSize) {
+        if (IsPipeClosedError(error)) {
             FACELOGIN_INFO(L"Pipe broken during write");
-        } else if (!result) {
-            FACELOGIN_ERROR(L"WriteFile failed: %lu", err);
+        } else if (error == ERROR_TIMEOUT) {
+            FACELOGIN_WARN(L"Pipe write timed out after %lu ms", kPipeWriteTimeoutMs);
+        } else if (m_shutdownRequested.load() || error == ERROR_OPERATION_ABORTED) {
+            FACELOGIN_INFO(L"Pipe write cancelled by service stop request");
+        } else {
+            FACELOGIN_ERROR(L"Overlapped WriteFile failed: %lu", error);
         }
         m_connected = false;
         return false;
@@ -381,8 +390,10 @@ bool PipeServer::IsClientDisconnected() const {
 }
 
 void PipeServer::Disconnect() {
-    if (m_hPipe != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(m_hPipe);
+    if (m_hPipe != INVALID_HANDLE_VALUE && m_connected) {
+        // Delivery guarantees belong to the explicit bounded ACK protocol.
+        // FlushFileBuffers on a server pipe can wait forever for a broken or
+        // non-reading client and must never be used as a disconnect primitive.
         DisconnectNamedPipe(m_hPipe);
         m_connected = false;
     }
@@ -390,6 +401,7 @@ void PipeServer::Disconnect() {
 
 void PipeServer::RequestShutdown() {
     m_shutdownRequested.store(true);
+    if (m_hShutdownEvent) SetEvent(m_hShutdownEvent);
 }
 
 void PipeServer::Close() {

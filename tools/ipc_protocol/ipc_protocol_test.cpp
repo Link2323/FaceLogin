@@ -78,6 +78,15 @@ void TestTerminalMessages() {
           "error terminal round trips");
 }
 
+void TestAcknowledgementMessages() {
+    Check(std::wstring(facelogin::ipc::MSG_AUTH_ACK) == L"AUTH_ACK",
+          "authentication delivery ACK wire value is stable");
+    Check(std::wstring(facelogin::ipc::MSG_CONTROL_ACK) == L"CONTROL_ACK",
+          "control-response delivery ACK wire value is stable");
+    Check(facelogin::ipc::PIPE_ACK_TIMEOUT_MS == 2000,
+          "response ACK deadline remains bounded at two seconds");
+}
+
 void TestMalformedMessagesFailClosed() {
     const AuthResult empty = facelogin::ipc::ParseAuthMessage(L"");
     Check(empty.status == AuthResult::Status::Error && !empty.errorMessage.empty(),
@@ -102,6 +111,7 @@ int wmain() {
     TestLocalAccountRoundTrip();
     TestLegacyFormatIsRejected();
     TestTerminalMessages();
+    TestAcknowledgementMessages();
     TestMalformedMessagesFailClosed();
     if (g_failures != 0) {
         std::fprintf(stderr, "IpcProtocolTest: %d failure(s)\n", g_failures);

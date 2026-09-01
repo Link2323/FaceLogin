@@ -29,11 +29,16 @@
 //      must reject transport-level remote connects. On a single dev box this
 //      is exercised via loopback SMB (\\localhost / \\127.0.0.1 / \\<hostname>),
 //      the same redirector path a real second machine takes.
+//   6. The production credential-provider client preserves STATUS/terminal
+//      ordering, cancels a pending event-driven read promptly, and can be
+//      destroyed synchronously by its terminal callback without self-waiting.
 //
 // Uses a distinct test pipe name, so it runs even while the FaceLogin service
 // is up (the service's single instance of ipc::PIPE_NAME would otherwise make
 // CreateNamedPipeW fail with ERROR_PIPE_BUSY).
 #include "pipe_server.h"
+#include "pipe_client.h"
+#include "ipc_protocol.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +46,8 @@
 #include <chrono>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <thread>
 
 #include <windows.h>
@@ -108,6 +115,204 @@ bool VerifyStopCancelsPipeWait() {
 // for a client). The DACL includes the current interactive user, so a dev
 // run can connect.
 constexpr wchar_t kReadTestPipeName[] = L"\\\\.\\pipe\\FaceLoginPipeReadTest";
+constexpr wchar_t kClientEventTestPipeName[] =
+    L"\\\\.\\pipe\\FaceLoginPipeClientEventTest";
+
+// The production PipeClient uses an OVERLAPPED read. Verify that the
+// production service endpoint receives its overlapped write, that STATUS and
+// terminal messages remain ordered when written back-to-back, and that
+// Disconnect cancels a pending read without a late failure callback.
+bool VerifyEventDrivenClient() {
+    facelogin::PipeServer server;
+    std::atomic<bool> serverOk{false};
+    std::thread serverThread([&]() {
+        if (!server.WaitForClient(5000, kClientEventTestPipeName)) return;
+        std::wstring request;
+        if (!server.ReadMessage(request, 5000) || request != L"CLIENT_EVENT_TEST") {
+            return;
+        }
+        if (!server.WriteMessage(std::wstring(facelogin::ipc::MSG_STATUS_PREFIX) +
+                                 L"event-ready")) {
+            return;
+        }
+        if (!server.WriteMessage(facelogin::ipc::MSG_AUTH_TIMEOUT)) return;
+        std::wstring ack;
+        serverOk.store(server.ReadMessage(ack, facelogin::ipc::PIPE_ACK_TIMEOUT_MS) &&
+                       ack == facelogin::ipc::MSG_AUTH_ACK);
+    });
+
+    Sleep(50);
+    facelogin::PipeClient client;
+    if (!client.Connect(5000, kClientEventTestPipeName) ||
+        !client.SendMessage(L"CLIENT_EVENT_TEST")) {
+        std::cerr << "FAIL: overlapped client connect/write failed\n";
+        client.Disconnect();
+        serverThread.join();
+        server.Close();
+        return false;
+    }
+
+    HANDLE terminalEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!terminalEvent) {
+        std::cerr << "FAIL: terminal test event creation failed\n";
+        client.Disconnect();
+        serverThread.join();
+        server.Close();
+        return false;
+    }
+    std::mutex callbackMutex;
+    bool statusSeen = false;
+    bool orderOk = false;
+    int terminalCallbacks = 0;
+    if (!client.StartBackgroundRead(
+        [&](bool success, const std::wstring& message) {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            ++terminalCallbacks;
+            orderOk = success && statusSeen && message == facelogin::ipc::MSG_AUTH_TIMEOUT;
+            SetEvent(terminalEvent);
+        },
+        [&](const std::wstring& message) {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            statusSeen = message == L"event-ready";
+        })) {
+        std::cerr << "FAIL: event client reader did not start\n";
+        client.Disconnect();
+        serverThread.join();
+        server.Close();
+        CloseHandle(terminalEvent);
+        return false;
+    }
+
+    const DWORD terminalWait = WaitForSingleObject(terminalEvent, 5000);
+    client.Disconnect();
+    serverThread.join();
+    server.Close();
+    CloseHandle(terminalEvent);
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        if (terminalWait != WAIT_OBJECT_0 || !serverOk.load() || !orderOk ||
+            terminalCallbacks != 1) {
+            std::cerr << "FAIL: event client delivery/order terminal_wait="
+                      << terminalWait << " server_ok=" << serverOk.load()
+                      << " order_ok=" << orderOk
+                      << " callbacks=" << terminalCallbacks << "\n";
+            return false;
+        }
+    }
+
+    facelogin::PipeServer cancelServer;
+    HANDLE acceptedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE releaseEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!acceptedEvent || !releaseEvent) {
+        if (acceptedEvent) CloseHandle(acceptedEvent);
+        if (releaseEvent) CloseHandle(releaseEvent);
+        std::cerr << "FAIL: cancel test event creation failed\n";
+        return false;
+    }
+    std::thread cancelServerThread([&]() {
+        if (cancelServer.WaitForClient(5000, kClientEventTestPipeName)) {
+            SetEvent(acceptedEvent);
+            WaitForSingleObject(releaseEvent, 5000);
+        }
+    });
+    Sleep(50);
+    facelogin::PipeClient cancelClient;
+    std::atomic<int> lateCallbacks{0};
+    if (!cancelClient.Connect(5000, kClientEventTestPipeName)) {
+        std::cerr << "FAIL: cancel client could not connect\n";
+        SetEvent(releaseEvent);
+        cancelServerThread.join();
+        cancelServer.Close();
+        CloseHandle(acceptedEvent);
+        CloseHandle(releaseEvent);
+        return false;
+    }
+    cancelClient.StartBackgroundRead(
+        [&](bool, const std::wstring&) { ++lateCallbacks; });
+    if (WaitForSingleObject(acceptedEvent, 5000) != WAIT_OBJECT_0) {
+        std::cerr << "FAIL: cancel server did not accept client\n";
+        cancelClient.Disconnect();
+        SetEvent(releaseEvent);
+        cancelServerThread.join();
+        cancelServer.Close();
+        CloseHandle(acceptedEvent);
+        CloseHandle(releaseEvent);
+        return false;
+    }
+    Sleep(50); // ensure ReadFile is pending before cancellation
+    const auto cancelStart = std::chrono::steady_clock::now();
+    cancelClient.Disconnect();
+    const long long cancelMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - cancelStart).count();
+    SetEvent(releaseEvent);
+    cancelServerThread.join();
+    cancelServer.Close();
+    CloseHandle(acceptedEvent);
+    CloseHandle(releaseEvent);
+    if (cancelMs > 250 || lateCallbacks.load() != 0) {
+        std::cerr << "FAIL: pending read cancellation took " << cancelMs
+                  << " ms callbacks=" << lateCallbacks.load() << "\n";
+        return false;
+    }
+
+    // AUTH_SUCCESS calls CredentialsChanged, which may synchronously invoke
+    // UnAdvise and destroy PipeClient on its own read thread. Reproduce that
+    // ownership edge: it must neither deadlock nor pay the former 2-second
+    // self-wait penalty.
+    facelogin::PipeServer selfDestroyServer;
+    std::thread selfDestroyServerThread([&]() {
+        if (selfDestroyServer.WaitForClient(5000, kClientEventTestPipeName)) {
+            if (selfDestroyServer.WriteMessage(facelogin::ipc::MSG_AUTH_TIMEOUT)) {
+                std::wstring ack;
+                selfDestroyServer.ReadMessage(
+                    ack, facelogin::ipc::PIPE_ACK_TIMEOUT_MS);
+            }
+        }
+    });
+    Sleep(50);
+    auto selfDestroyClient = std::make_unique<facelogin::PipeClient>();
+    HANDLE selfDestroyedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<bool> selfDestroyOk{false};
+    if (!selfDestroyedEvent ||
+        !selfDestroyClient->Connect(5000, kClientEventTestPipeName)) {
+        std::cerr << "FAIL: self-destroy client setup failed\n";
+        if (selfDestroyClient) selfDestroyClient->Disconnect();
+        selfDestroyClient.reset();
+        selfDestroyServerThread.join();
+        selfDestroyServer.Close();
+        if (selfDestroyedEvent) CloseHandle(selfDestroyedEvent);
+        return false;
+    }
+    const auto selfDestroyStart = std::chrono::steady_clock::now();
+    selfDestroyClient->StartBackgroundRead(
+        [&](bool success, const std::wstring& message) {
+            const bool terminalOk =
+                success && message == facelogin::ipc::MSG_AUTH_TIMEOUT;
+            selfDestroyClient.reset();
+            selfDestroyOk.store(terminalOk);
+            SetEvent(selfDestroyedEvent);
+        });
+    const DWORD selfDestroyWait = WaitForSingleObject(selfDestroyedEvent, 1000);
+    const long long selfDestroyMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - selfDestroyStart).count();
+    if (selfDestroyClient) {
+        selfDestroyClient->Disconnect();
+        selfDestroyClient.reset();
+    }
+    selfDestroyServerThread.join();
+    selfDestroyServer.Close();
+    CloseHandle(selfDestroyedEvent);
+    if (selfDestroyWait != WAIT_OBJECT_0 || !selfDestroyOk.load()) {
+        std::cerr << "FAIL: terminal callback self-destroy wait="
+                  << selfDestroyWait << " elapsed_ms=" << selfDestroyMs
+                  << " result=" << selfDestroyOk.load() << "\n";
+        return false;
+    }
+    std::cout << "event_client_cancel_ms=" << cancelMs << "\n";
+    std::cout << "event_client_self_destroy_ms=" << selfDestroyMs << "\n";
+    return true;
+}
 
 HANDLE ConnectTestClient() {
     HANDLE h = CreateFileW(kReadTestPipeName, GENERIC_READ | GENERIC_WRITE, 0,
@@ -495,6 +700,7 @@ int main(int argc, char** argv) {
     }
 
     if (verify30s && !VerifyDefaultDeadlineReleaseInstance()) return 1;
+    if (!VerifyEventDrivenClient()) return 1;
     if (!VerifyRemoteRejection()) return 1;
     if (!VerifyStopCancelsPipeWait()) return 1;
     if (!VerifyReadTimeoutReleasesInstance()) return 1;

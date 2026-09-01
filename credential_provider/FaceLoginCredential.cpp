@@ -821,6 +821,7 @@ void FaceLoginCredential::StartAuth() {
     if (m_pipeClient->Connect()) {
         if (!m_pipeClient->SendMessage(facelogin::ipc::MSG_AUTH_REQUEST)) {
             FACELOGIN_WARN(L"Failed to send authentication request");
+            m_pipeClient->Disconnect();
             PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
             return;
         }
@@ -834,13 +835,18 @@ void FaceLoginCredential::StartAuth() {
             m_pCredentialEvents->SetFieldString(this, 1, m_statusText.c_str());
         }
 
-        m_pipeClient->StartBackgroundRead(
+        if (!m_pipeClient->StartBackgroundRead(
             [this](bool success, const std::wstring& msg) {
                 OnPipeResponse(success, msg);
             },
             [this](const std::wstring& msg) {
                 OnPipeStatus(msg);
-            });
+            })) {
+            FACELOGIN_WARN(L"Failed to start authentication response reader");
+            m_pipeClient->Disconnect();
+            PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+            return;
+        }
         FACELOGIN_INFO(L"Pipe connected, auth request sent");
     } else {
         FACELOGIN_WARN(L"Failed to connect to face service pipe");

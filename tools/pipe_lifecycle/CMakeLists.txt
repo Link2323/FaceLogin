@@ -2,6 +2,7 @@
 add_executable(PipeLifecycleTest
     pipe_lifecycle.cpp
     ${CMAKE_SOURCE_DIR}/face_service/pipe_server.cpp
+    ${CMAKE_SOURCE_DIR}/credential_provider/pipe_client.cpp
 )
 
 target_link_libraries(PipeLifecycleTest PRIVATE
@@ -12,6 +13,7 @@ target_link_libraries(PipeLifecycleTest PRIVATE
 
 target_include_directories(PipeLifecycleTest PRIVATE
     ${CMAKE_SOURCE_DIR}/face_service
+    ${CMAKE_SOURCE_DIR}/credential_provider
 )
 
 set_target_properties(PipeLifecycleTest PROPERTIES

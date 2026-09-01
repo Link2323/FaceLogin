@@ -730,11 +730,11 @@ void FaceService::Run() {
             // causing every subsequent auth to fail as "no registered users"
             // until the service is restarted. Surface the failure instead.
             if (m_store->LoadDatabase()) {
-                m_pipeServer->WriteMessage(ipc::MSG_RELOAD_OK);
+                SendControlResponse(ipc::MSG_RELOAD_OK);
                 m_pipeServer->Disconnect();
                 FACELOGIN_INFO(L"Database reloaded");
             } else {
-                m_pipeServer->WriteMessage(ipc::MSG_CONFIG_RELOAD_ERROR);
+                SendControlResponse(ipc::MSG_CONFIG_RELOAD_ERROR);
                 m_pipeServer->Disconnect();
                 FACELOGIN_ERROR(L"Database reload failed — users.dat parse error; "
                                 L"previous in-memory database retained");
@@ -806,7 +806,7 @@ void FaceService::Run() {
                       m_loadedWorkerConfigGeneration >= requiredWorkerGeneration));
             }
 
-            m_pipeServer->WriteMessage(modelStateOk
+            SendControlResponse(modelStateOk
                 ? ipc::MSG_CONFIG_RELOAD_OK
                 : ipc::MSG_CONFIG_RELOAD_ERROR);
             m_pipeServer->Disconnect();
@@ -942,17 +942,39 @@ BindingDecision FaceService::VerifyIdentityBinding(
 }
 
 bool FaceService::SendStatusMessage(const std::wstring& text) {
-    const bool ok = m_pipeServer->WriteMessage(
+    // STATUS is advisory UI text. Message-mode pipes preserve ordering, and
+    // the Credential Provider keeps an event-driven read pending, so forcing
+    // FlushFileBuffers here only blocks the authentication supervisor until
+    // LogonUI consumes a non-terminal update. Terminal messages use the
+    // explicit bounded ACK contract below.
+    return m_pipeServer->WriteMessage(
         std::wstring(ipc::MSG_STATUS_PREFIX) + text);
-    FlushFileBuffers(m_pipeServer->GetHandle());
-    return ok;
 }
 
 bool FaceService::SendTerminalMessage(const std::wstring& message) {
-    const bool ok = m_pipeServer->WriteMessage(message);
-    FlushFileBuffers(m_pipeServer->GetHandle());
-    m_pipeServer->DrainOutput(5000);
-    return ok;
+    return SendAcknowledgedMessage(message, ipc::MSG_AUTH_ACK);
+}
+
+bool FaceService::SendControlResponse(const std::wstring& message) {
+    return SendAcknowledgedMessage(message, ipc::MSG_CONTROL_ACK);
+}
+
+bool FaceService::SendAcknowledgedMessage(const std::wstring& message,
+                                          const wchar_t* expectedAck) {
+    if (!m_pipeServer->WriteMessage(message)) return false;
+
+    std::wstring ack;
+    if (!m_pipeServer->ReadMessage(ack, ipc::PIPE_ACK_TIMEOUT_MS)) {
+        FACELOGIN_WARN(L"Pipe response ACK not received within %lu ms",
+                       ipc::PIPE_ACK_TIMEOUT_MS);
+        return false;
+    }
+    const bool valid = ack == expectedAck;
+    if (!valid) {
+        FACELOGIN_WARN(L"Unexpected pipe response ACK");
+    }
+    SecureClearWString(ack);
+    return valid;
 }
 
 bool FaceService::SendAuthErrorMessage(const std::wstring& message) {
@@ -1080,11 +1102,10 @@ bool FaceService::ProcessWorkerAuthRequest() {
     std::wstring message = ipc::BuildAuthSuccessMessage(
         credential->sid, credential->upn, domain, credential->username,
         credential->password);
-    // Success handoff: write + flush now, drain LAST (after the logs, worker
-    // teardown and registry writes) so waiting for the client to consume the
-    // message never delays resource reclamation on the unlock critical path.
-    const bool writeOk = m_pipeServer->WriteMessage(message);
-    FlushFileBuffers(m_pipeServer->GetHandle());
+    // The CP acknowledges as soon as it has copied and scrubbed the transport
+    // buffer, before entering LogonUI callbacks. This bounded handshake
+    // replaces the former unbounded FlushFileBuffers call.
+    const bool writeOk = SendTerminalMessage(message);
     SecureClearWString(message);
     if (!writeOk) {
         MarkAuthWorkerConsumed(true);
@@ -1111,7 +1132,6 @@ bool FaceService::ProcessWorkerAuthRequest() {
     // AUTH_REQUEST, the ordinary fallback starts one then.
     MarkAuthWorkerConsumed(false);
     WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
-    m_pipeServer->DrainOutput(5000);
     return true;
 }
 
@@ -1238,10 +1258,9 @@ bool FaceService::ProcessAuthRequest() {
     std::wstring message = ipc::BuildAuthSuccessMessage(
         credential->sid, credential->upn, domain, credential->username,
         credential->password);
-    // Success handoff: write + flush now, drain LAST (after logs, registry
-    // write and camera shutdown) — see the worker path for the reasoning.
-    const bool writeOk = m_pipeServer->WriteMessage(message);
-    FlushFileBuffers(m_pipeServer->GetHandle());
+    // See the service-worker path above: delivery is an explicit bounded ACK,
+    // never a server-side flush.
+    const bool writeOk = SendTerminalMessage(message);
     SecureClearWString(message);
     if (!writeOk) {
         FACELOGIN_WARN(L"Failed to send authentication credentials");
@@ -1257,7 +1276,6 @@ bool FaceService::ProcessAuthRequest() {
     if (m_webcamDS) {
         m_webcamDS->Shutdown();
     }
-    m_pipeServer->DrainOutput(5000);
     return true;
 }
 
