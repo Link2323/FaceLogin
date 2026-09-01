@@ -233,6 +233,27 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     // persistent parent is never affinity-pinned.
     const ScopedPerformanceCoreAffinity affinityGuard(GetPerformanceCoreMask());
 
+    // Keep this one-shot worker out of Windows' power-throttling (EcoQoS)
+    // policy for the auth burst — pinning the affinity does not. A/B measured
+    // on the slow test laptop (2026-09-01, three instrumented builds): without
+    // the opt-out ~80% of rounds ran the P-cores at 1466-1833 of 2200 MHz for
+    // the whole loop (face detect 150-177 ms/frame, E2E ~1.9 s), on battery
+    // AND occasionally on AC; with the opt-out every round held 2200 MHz
+    // (detect 44-78 ms, E2E ~1.2 s). The heuristic targets this Session-0
+    // background child exactly when the desktop is locked and idle. The
+    // process self-terminates right after its terminal message, so the
+    // unthrottled window is bounded to the single authentication; failure is
+    // non-fatal — the burst merely runs at whatever clock the policy grants.
+    PROCESS_POWER_THROTTLING_STATE unthrottle{};
+    unthrottle.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    unthrottle.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    unthrottle.StateMask = 0;  // 0 = never throttle execution speed
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                               &unthrottle, sizeof(unthrottle))) {
+        FACELOGIN_WARN(L"Power-throttle opt-out failed: %lu — authentication "
+                       L"may run at reduced clocks", GetLastError());
+    }
+
     const auto authStart = std::chrono::steady_clock::now();
     const auto cameraStart = authStart;
     if (!initializeCamera()) {
