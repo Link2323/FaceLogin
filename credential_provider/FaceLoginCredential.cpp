@@ -1,5 +1,6 @@
 #include "FaceLoginCredential.h"
 #include "FaceLoginProvider.h"
+#include "input_trigger_policy.h"
 #include "resource.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
@@ -22,159 +23,21 @@
 // Input-detection thread (LOGON + unlock scenarios)
 // ============================================================================
 //
-// Runs as a background thread, polling GetLastInputInfo() every 50 ms.
-// When it detects that the user has pressed a key or moved the mouse AFTER
-// the baseline tick (recorded in Advise()), it calls StartAuth() which
-// connects the pipe asynchronously.  Once auth completes, the pipe callback
-// stores credentials and triggers CredentialsChanged(), causing LogonUI to
-// re-enumerate and call GetSerialization(), which then packs and returns
-// the ready credentials.
+// Input intent is edge-based, not time-based. Raw Input supplies keyboard
+// MAKE/BREAK events; physical mouse-button states are sampled because the
+// lock-screen wallpaper swallows its first click. Mouse movement never enters
+// the policy and therefore cannot trigger recognition. The pure policy also
+// drains Win+L residue without assuming any keyboard repeat delay/rate.
 //
-// The SAME watcher, with the SAME qualifying-wave gate, is re-armed for the
-// in-place failure tile (ArmFailureRetryDetection): after a terminal
-// failure any qualifying press (key or mouse button) requests another face
-// round via StartExplicitRetry. The failure tile carries NO command link —
-// the affordance is field 4 ("请按任意键重试", its own field because tile
-// text ignores "\r\n"). Password entry stays structurally excluded: this tile has no editable field, and
-// SetDeselected stops the watcher before the user can type anywhere else.
-// One deliberate hole: when the triggered round fails IMMEDIATELY on the
-// watcher thread itself (pipe connect/send error → "人脸登录服务不可用"),
-// ArmFailureRetryDetection no-ops because that thread still occupies the
-// running slot and nothing re-arms after it exits — acceptable because a
-// dead service makes press-to-retry useless noise anyway; re-selecting the
-// tile (SetSelected → ArmFailureRetryDetection) re-arms once the service
-// recovers.
-//
-// Trigger algorithm (residue quarantine + quiesce):
-//
-//   Lock-shortcut residue. Lock hotkeys fire MID-GESTURE (Win+L activates on
-//   the L keydown), and holding Win+L past the moment the credential view
-//   appears leaves the trailing auto-repeat/KEYUP ticks landing AFTER the
-//   baseline. GetLastInputInfo() alone cannot tell those ticks from a
-//   genuine dismiss press, so the wave would auto-trigger auth and unlock
-//   the user right back (reproduced 2026-08-15: hold Win+L -> self-unlock
-//   ~2s after lock). Advise() therefore snapshots, via GetAsyncKeyState(),
-//   EVERY key still physically held at baseline — any held key at that
-//   moment means the lock action is still mid-gesture. Note it cannot be a
-//   modifier-only fingerprint: Windows clears the Win modifier's async key
-//   state at secure-desktop activation (observed 2026-08-15: snapshot saw
-//   'L' but NOT LWIN), while a held non-modifier keeps refreshing its state
-//   via auto-repeat and stays visible. When any key was held, this thread
-//   first quarantines the residue: polls until every one is released (capped
-//   at RESIDUE_QUARANTINE_CAP_MS so a stuck key state cannot disable
-//   auto-trigger forever), waits RESIDUE_MARGIN_MS for the final KEYUP tick,
-//   then re-seeds lastInputTick past the whole burst so it can never form a
-//   wave. Mouse/touch locking is release-triggered (the gesture completes
-//   before the lock engages), so it has no structural residue and needs no
-//   quarantine.
-//
-//   Wave + quiesce. A new input tick starts a wave. A wave QUALIFIES only
-//   if evidence of a real key press or mouse click arrived while it ran.
-//   Final product semantics (user decision 2026-08-29): any keyboard key
-//   triggers with ONE press — even a quick tap on the wallpaper — via the
-//   raw-input KEYUP evidence below; a mouse CLICK takes two (first click
-//   wakes the wallpaper, second click triggers once the credential view is
-//   up, where GetAsyncKeyState finally sees mouse buttons); a mouse MOVE
-//   never triggers. GetLastInputInfo cannot tell input types apart, and on
-//   Win11 a mere mouse MOVE dismisses the lock-screen wallpaper, so without
-//   the qualifier brushing the mouse would auto-start face recognition
-//   against the tile's own "按下任意按键" prompt (the original 2026-08-29
-//   bug).
-//
-//   Secure-desktop channel matrix (装机实测 2026-08-29, do NOT retry
-//   these): GetAsyncKeyState sees keyboard keys AND mouse buttons only
-//   once the credential view is up, never during wallpaper dismissal;
-//   WH_MOUSE_LL installs but the system never dispatches callbacks in
-//   LogonUI; Raw Input (RIDEV_INPUTSINK on a message-only window owned by
-//   this thread) works, and during wallpaper dismissal the system swallows
-//   the KEYDOWN half of a key press — but the matching KEYUP leaks through,
-//   which is exactly the one-press keyboard trigger — while a whole mouse
-//   click (BUTTON_DOWN and BUTTON_UP) is swallowed with nothing leaking,
-//   which is why a one-press click trigger is physically impossible.
-//
-//   Once no further tick arrives for QUIESCE_MS AND no key is currently
-//   physically held (a held key keeps generating auto-repeat ticks, so it
-//   must never count as a finished wave), the wave has ended: a
-//   qualifying wave fires StartAuth() IMMEDIATELY — the user's single
-//   dismiss PRESS is the trigger (trade-off: there is no way to "just
-//   dismiss" with a press without starting face recognition) — while a
-//   movement-only wave is discarded and the watcher keeps waiting:
-//   moving the mouse wakes the screen but never opens the camera. QUIESCE_MS only needs to clear the keyboard
-//   auto-repeat interval (~33–76 ms observed) and event jitter; the
-//   typing-gap floor that kept it at 200 ms was dropped 2026-08-15: the
-//   waiting view is face-first with no focused password field, typing a
-//   password requires a deliberate tile switch first, and the interaction
-//   policy already guarantees auth starting mid-typing can't interrupt the
-//   input.
-//
-//   State per iteration:
-//     lastInputTick     — highest input timestamp seen so far (>= baseline)
-//     lastInputEndWall  — wall-clock tick of when we last saw a new input
-//     waveQualifying    — a keyboard key press was observed during this wave
-//                          (monotonic within a wave: never reset on new
-//                          ticks — a KEYUP tick would otherwise erase the
-//                          qualifying press that preceded it; only reset
-//                          when a wave is discarded or the window restarts)
-//     armed             — true once the dismiss wave has gone quiet for
-//                          QUIESCE_MS; on becoming true we fire StartAuth()
-//                          right away and exit the loop.
-//
-// The thread stops when:
-//   - The dismiss wave goes quiet and StartAuth() is auto-triggered, OR
-//   - The stop event is signaled (UnAdvise / destructor), OR
-//   - UnAdvise() sets m_pCredentialEvents = nullptr and the thread notices
+// Secure-desktop observations (physical Windows 11 testing, 2026-08-29):
+// Raw keyboard BREAK reaches this sink during wallpaper dismissal even when
+// MAKE is swallowed; raw mouse DOWN/UP does not. Consequently one keyboard
+// press can trigger, while the first mouse click dismisses the wallpaper and
+// the second click (visible through GetAsyncKeyState on the credential view)
+// triggers recognition.
 
-// Keys still held at the baseline moment are the mid-gesture fingerprint of
-// a lock action (see the algorithm comment above). Any key counts — see the
-// Win-cleared observation there for why modifiers alone are not enough.
-static const int kSnapshotFirstVk = 0x01;   // VK_LBUTTON
-static const int kSnapshotLastVk = 0xFE;    // VK_OEM_CLEAR
-
-void FaceLoginCredential::SnapshotBaselineKeys() {
-    m_baselineKeysHeld.clear();
-    for (int vk = kSnapshotFirstVk; vk <= kSnapshotLastVk; ++vk) {
-        if (GetAsyncKeyState(vk) & 0x8000) {
-            m_baselineKeysHeld.push_back(vk);
-        }
-    }
-}
-
-// True while any key or mouse button is physically held. Used at arm time so
-// a held (auto-repeating) key can never end a wave — its eventual KEYUP
-// restarts the quiet window instead, regardless of the repeat interval.
-// NOTE: inside LogonUI's secure desktop this sees keyboard keys and mouse
-// buttons ONLY once the credential view is up — never during wallpaper
-// dismissal (装机实测 2026-08-29; see the trigger algorithm comment for the
-// full channel matrix).
-static bool AnyKeyPhysicallyDown() {
-    for (int vk = kSnapshotFirstVk; vk <= kSnapshotLastVk; ++vk) {
-        if (GetAsyncKeyState(vk) & 0x8000) return true;
-    }
-    return false;
-}
-
-// Keyboard press evidence from Raw Input since the last pump. The sink window
-// belongs to the input-detection thread and WM_INPUT is dispatched only while
-// that same thread pumps — no lock needed.
-//
-// This is the ONLY channel that sees a key press while the lock-screen
-// wallpaper is dismissing: the system swallows the KEYDOWN half of the
-// dismiss gesture on every side channel, but the matching KEYUP leaks through
-// Raw Input (装机实测 2026-08-29). An UP alone proves a complete press, so
-// both MAKE and BREAK qualify the wave — that is what makes a quick tap on
-// the wallpaper trigger auth with ONE press. Residue safety: a key still
-// held at baseline is captured by the Advise snapshot and its trailing UP is
-// swallowed by the residue-quarantine watermark; a key released before
-// baseline never forms a wave. Either way an UP can only qualify a genuine
-// post-baseline press.
-//
-// Keyboard ONLY. Mouse is deliberately NOT registered: during wallpaper
-// dismissal the system swallows the whole click (BUTTON_DOWN and BUTTON_UP,
-// same 实测), so a first-press click trigger is physically impossible and
-// the mouse stays at "first click wakes, second click triggers" via the
-// GetAsyncKeyState scan (mouse buttons are visible to it once the
-// credential view is up).
-static thread_local LONG t_rawKeyboardSeen = 0;
+static thread_local facelogin::credential_provider::InputTriggerPolicy*
+    t_inputTriggerPolicy = nullptr;
 
 static LRESULT CALLBACK RawInputSinkWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_INPUT) {
@@ -183,9 +46,12 @@ static LRESULT CALLBACK RawInputSinkWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
         if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT,
                             &raw, &size, sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
             raw.header.dwType == RIM_TYPEKEYBOARD) {
-            // Both MAKE and BREAK qualify the wave — an UP alone proves a
-            // complete press happened, so the release flag needs no handling.
-            t_rawKeyboardSeen = 1;
+            const RAWKEYBOARD& kb = raw.data.keyboard;
+            // 0xFF is the documented fake-key marker and must be ignored.
+            if (t_inputTriggerPolicy && kb.VKey != 0 && kb.VKey != 0xFF) {
+                t_inputTriggerPolicy->ObserveKey(
+                    kb.VKey, (kb.Flags & RI_KEY_BREAK) == 0);
+            }
         }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -263,183 +129,117 @@ void RawInputSink::Unregister() noexcept {
 
 unsigned __stdcall FaceLoginCredential::InputDetectionThreadProc(void* pParam) {
     FaceLoginCredential* pCred = static_cast<FaceLoginCredential*>(pParam);
+    using facelogin::credential_provider::InputTriggerPolicy;
 
-    const DWORD pollIntervalMs = 25;
-    const DWORD QUIESCE_MS = 100;         // gap that ends an input "wave" (held keys are excluded by the arm-time guard below)
-    const DWORD RESIDUE_MARGIN_MS = 150;  // swallow the final KEYUP ticks after residue keys release
-    const DWORD RESIDUE_QUARANTINE_CAP_MS = 5000;  // stuck key state must not disable auto-trigger
-    const DWORD timeoutSec = 30;
-    DWORD startTick = GetTickCount();
+    constexpr DWORD kPollIntervalMs = 10;
+    constexpr int kFirstVk = 0x01;
+    constexpr int kLastVk = 0xFE;
+    constexpr int kMouseButtons[] = {
+        VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2
+    };
 
-    // Adaptive-quiescence state.  lastInputTick is seeded with the baseline
-    // so any input that occurred BEFORE our DLL loaded (i.e. the dismiss
-    // KEYDOWN) is ignored and never counts as a new wave.
-    DWORD baseline = pCred->m_waitingStartTick;
-    DWORD lastInputTick = baseline;     // input-timestamp space (GetLastInputInfo)
-    DWORD lastInputEndWall = 0;         // wall-clock space (GetTickCount)
-    bool waveQualifying = false;        // wave contains a real key/button press
-    bool armed = false;                 // current wave has gone quiet
-
-    // Residue quarantine. Keys were still held when this credential appeared
-    // (see the algorithm comment above): without this, their trailing
-    // auto-repeat/KEYUP ticks would read as a dismiss wave and auto-unlock
-    // the user right after they locked. Wait until every one is physically
-    // released, let the final KEYUP land inside the margin, then raise the
-    // seen-input watermark past the whole burst. The 30s idle restart below
-    // never re-quarantines — baseline residue only exists at thread start.
-    if (!pCred->m_baselineKeysHeld.empty()) {
-        const DWORD quarantineStart = GetTickCount();
-        for (;;) {
-            if (WaitForSingleObject(pCred->m_hInputStop, 0) == WAIT_OBJECT_0) {
-                pCred->m_inputThreadRunning = false;
-                return 0;
-            }
-            if (GetTickCount() - quarantineStart >= RESIDUE_QUARANTINE_CAP_MS) {
-                FACELOGIN_WARN(L"[InputThread] Residue keys not released within %lums — capping quarantine",
-                               RESIDUE_QUARANTINE_CAP_MS);
-                break;
-            }
-            bool allReleased = true;
-            for (int vk : pCred->m_baselineKeysHeld) {
-                if (GetAsyncKeyState(vk) & 0x8000) { allReleased = false; break; }
-            }
-            if (allReleased) break;
-            SleepEx(pollIntervalMs, TRUE);
+    auto isMouseButton = [&](int vk) noexcept {
+        for (int button : kMouseButtons) {
+            if (vk == button) return true;
         }
-        SleepEx(RESIDUE_MARGIN_MS, TRUE);
-        LASTINPUTINFO residueLii = {};
-        residueLii.cbSize = sizeof(residueLii);
-        if (GetLastInputInfo(&residueLii) && residueLii.dwTime > lastInputTick) {
-            lastInputTick = residueLii.dwTime;
+        return false;
+    };
+
+    InputTriggerPolicy policy(pCred->m_inputDetectionRound);
+    const bool failureRetryRound =
+        pCred->m_inputDetectionRound ==
+        facelogin::credential_provider::InputDetectionRound::FailureRetry;
+    t_inputTriggerPolicy = &policy;
+
+    RawInputSink rawSink;
+    const bool rawKeyboardAvailable = rawSink.Register();
+
+    std::array<bool, 256> sampledKeyDown{};
+    std::array<bool, 256> sampledMouseDown{};
+
+    // Seed inputs already held at watcher start. Mouse buttons are always
+    // conservative because the first click belongs to the wallpaper. Keyboard
+    // keys are seeded only for a visible failure tile; on the initial lock
+    // round an already-started ordinary press must still trigger on BREAK,
+    // while the policy independently drains the ambiguous L/Win tail.
+    for (int vk = kFirstVk; vk <= kLastVk; ++vk) {
+        const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (isMouseButton(vk)) {
+            sampledMouseDown[vk] = down;
+            if (down) policy.SeedMouseButtonDown(static_cast<std::uint16_t>(vk));
+        } else if (!rawKeyboardAvailable) {
+            sampledKeyDown[vk] = down;
+            if (down && failureRetryRound) {
+                policy.SeedKeyDown(static_cast<std::uint16_t>(vk));
+            }
+        } else if (down && failureRetryRound) {
+            policy.SeedKeyDown(static_cast<std::uint16_t>(vk));
         }
     }
 
-    // The keyboard raw-input sink is created AFTER residue quarantine (which
-    // does not pump messages — a WM_INPUT arriving meanwhile just queues up
-    // and the first main-loop pump consumes it) and before the wait loop, so
-    // every wait is a message-pumping wait that dispatches WM_INPUT.
-    RawInputSink rawSink;
-    rawSink.Register();
-
-    // Loop forever (until the stop event is signaled).  The 30s timeout does
-    // NOT kill the thread — it only restarts the idle window so a user who
-    // waits longer than 30s before pressing a key can still trigger auth.
-    while (true) {
-        // Check stop signal (non-blocking)
-        DWORD waitResult = WaitForSingleObject(pCred->m_hInputStop, 0);
-        if (waitResult == WAIT_OBJECT_0) {
-            break;
+    bool shouldTrigger = false;
+    while (WaitForSingleObject(pCred->m_hInputStop, 0) != WAIT_OBJECT_0) {
+        MSG msg = {};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            DispatchMessageW(&msg);
         }
 
-        // Idle-window timeout: restart the window instead of exiting, so a
-        // late keypress still works. (Previously the thread exited after 30s
-        // of no input, leaving no path to restart it — a later keypress did
-        // nothing.)  Also reset the adaptive state so the next wave is
-        // evaluated cleanly.
-        DWORD elapsedMs = GetTickCount() - startTick;
-        if (elapsedMs > timeoutSec * 1000) {
-            startTick = GetTickCount();
-            baseline = pCred->m_waitingStartTick;
-            lastInputTick = baseline;
-            lastInputEndWall = 0;
-            waveQualifying = false;
-            armed = false;
-            continue;
+        // Mouse movement is deliberately absent. Only physical button state
+        // transitions reach the policy, so brushing the mouse cannot open the
+        // camera. The wallpaper consumes the first click; the second is seen
+        // here after the credential view becomes active.
+        for (int vk : kMouseButtons) {
+            const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+            if (down != sampledMouseDown[vk]) {
+                sampledMouseDown[vk] = down;
+                policy.ObserveMouseButton(static_cast<std::uint16_t>(vk), down);
+            }
         }
 
-        // Poll GetLastInputInfo
-        LASTINPUTINFO lii = {};
-        lii.cbSize = sizeof(lii);
-        if (GetLastInputInfo(&lii)) {
-            bool newInput = (lii.dwTime > lastInputTick);
-
-            if (newInput) {
-                // Part of (or the start of) the dismiss wave (KEYDOWN/KEYUP).
-                // Note the wall-clock moment we saw it so we can detect when
-                // the wave goes quiet, then auto-trigger. waveQualifying is
-                // deliberately NOT reset here — see its state comment above.
-                lastInputTick = lii.dwTime;
-                lastInputEndWall = GetTickCount();
-                armed = false;
-            }
-
-            // Qualifier scan, every cycle: a press is observable via
-            // GetAsyncKeyState only while physically held, which frequently
-            // falls between the ticks of one poll interval. Inside LogonUI
-            // this sees keyboard keys and mouse buttons once the credential
-            // view is up (the mouse's second-click trigger rides on this).
-            if (AnyKeyPhysicallyDown()) {
-                waveQualifying = true;
-            }
-
-            // Arm once the current wave has been quiet for QUIESCE_MS AND no
-            // key is physically held (a held key is still generating its
-            // wave). lastInputEndWall==0 means we've never seen a
-            // post-baseline input yet, so there's nothing to arm against.
-            if (!armed && lastInputEndWall != 0 &&
-                GetTickCount() - lastInputEndWall >= QUIESCE_MS &&
-                !AnyKeyPhysicallyDown()) {
-                if (!waveQualifying) {
-                    // Movement-only wave (e.g. the mouse move that dismissed
-                    // the wallpaper): discard it and keep waiting — the tile
-                    // still says "按下任意按键". Zeroing lastInputEndWall
-                    // makes this branch run once per discarded wave.
-                    lastInputEndWall = 0;
-                    waveQualifying = false;
-                } else {
-                    armed = true;
-                    // Auto-trigger: the dismiss wave (KEYDOWN+KEYUP) has fully
-                    // ended, so the user's single dismiss press is enough.
-                    // Start auth immediately instead of waiting for another wave.
-                    // Failure-tile round: route through the explicit-retry
-                    // entry so the terminal pipe from the failed round is
-                    // destroyed first (a direct StartAuth could see the dead
-                    // client as "already connected" and skip, or reuse it).
-                    // First-attempt round: straight to StartAuth.
-                    if (facelogin::credential_provider::IsRetryableFailure(
-                            pCred->m_state)) {
-                        FACELOGIN_INFO(L"[InputThread] Qualifying press on "
-                                      L"failure tile — requesting explicit "
-                                      L"retry");
-                        pCred->StartExplicitRetry();
-                    } else {
-                        pCred->StartAuth();
-                    }
-                    break;
+        // If Raw Input registration fails, retain a credential-view-only
+        // fallback using physical keyboard edges. It cannot see the wallpaper
+        // keypress, but it still avoids movement and held-key false triggers.
+        if (!rawKeyboardAvailable) {
+            for (int vk = kFirstVk; vk <= kLastVk; ++vk) {
+                if (isMouseButton(vk)) continue;
+                const bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+                if (down != sampledKeyDown[vk]) {
+                    sampledKeyDown[vk] = down;
+                    policy.ObserveKey(static_cast<std::uint16_t>(vk), down);
                 }
             }
         }
 
-        // Sleep (alertable so the stop event can wake us). While a wave is
-        // being timed out, wake exactly when the quiet window can complete
-        // instead of drifting up to a full poll interval past it. This is a
-        // message-pumping wait: DispatchMessage routes WM_INPUT to the sink
-        // wndproc, whose key-press flag qualifies the current wave. The pump
-        // runs even when the sink failed to register — it is then an empty
-        // no-op and the wait is just an alertable sleep.
-        DWORD sleepMs = pollIntervalMs;
-        if (lastInputEndWall != 0) {
-            const DWORD quietSoFar = GetTickCount() - lastInputEndWall;
-            if (quietSoFar < QUIESCE_MS && QUIESCE_MS - quietSoFar < sleepMs) {
-                sleepMs = QUIESCE_MS - quietSoFar + 1;
-            }
+        if (policy.triggered()) {
+            shouldTrigger = true;
+            break;
         }
-        MSG msg;
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            DispatchMessageW(&msg);
-        }
-        if (InterlockedExchange(&t_rawKeyboardSeen, 0) != 0) {
-            waveQualifying = true;
-        }
+
         DWORD wait = MsgWaitForMultipleObjectsEx(
-            1, &pCred->m_hInputStop, sleepMs, QS_ALLINPUT,
+            1, &pCred->m_hInputStop, kPollIntervalMs, QS_ALLINPUT,
             MWMO_ALERTABLE | MWMO_INPUTAVAILABLE);
         if (wait == WAIT_OBJECT_0) {
             break;
         }
     }
 
+    t_inputTriggerPolicy = nullptr;
     rawSink.Unregister();  // idempotent no-op if registration failed
+
+    // Deselect/UnAdvise wins a race with the qualifying edge: once the stop
+    // event is signaled this watcher must not open a new pipe while its owner
+    // is joining the thread and tearing the selected tile down.
+    if (shouldTrigger &&
+        WaitForSingleObject(pCred->m_hInputStop, 0) != WAIT_OBJECT_0) {
+        if (facelogin::credential_provider::IsRetryableFailure(pCred->m_state)) {
+            FACELOGIN_INFO(L"[InputThread] Qualifying press on failure tile — "
+                           L"requesting explicit retry");
+            pCred->StartExplicitRetry();
+        } else {
+            pCred->StartAuth();
+        }
+    }
+
     pCred->m_inputThreadRunning = false;
     return 0;
 }
@@ -553,8 +353,8 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     // here would interpret password-entry keystrokes elsewhere as face
     // retries. The failure watcher is armed only from
     // PresentRetryableFailure/SetSelected, i.e. strictly while this tile is
-    // the selected one. No baseline is seeded here either —
-    // ArmFailureRetryDetection seeds its own.
+    // the selected one. ArmFailureRetryDetection selects retry-round edge
+    // semantics itself.
     if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
         FACELOGIN_INFO(L"Advise: terminal failure — retry watcher NOT started "
                        L"here (armed tile-scoped instead)");
@@ -573,19 +373,16 @@ STDMETHODIMP FaceLoginCredential::Advise(ICredentialProviderCredentialEvents* pc
     // tile (the MSA PIN reset wizard reuses the LogonUI credential list) —
     // and the input watcher polls GLOBAL input, so starting it at Advise let
     // typing in those flows trigger the camera and interrupt the wizard.
-    // Advise still records the baseline tick and held-key snapshot as early
-    // as possible; SetSelected starts the watcher only when the user
-    // actually lands on this tile. (CredUI/PLAP never reach this point —
-    // SetUsageScenario already returned E_NOTIMPL for them.)
+    // Advise still selects initial-lock edge semantics; SetSelected starts the
+    // watcher only when the user actually lands on this tile.
+    // (CredUI/PLAP never reach this point — SetUsageScenario already
+    // returned E_NOTIMPL for them.)
     if (!facelogin::credential_provider::ShouldStartInputDetection(m_state)) {
         FACELOGIN_INFO(L"Advise: state does not permit passive input detection");
         return S_OK;
     }
-    m_waitingStartTick = GetTickCount();
-    FACELOGIN_INFO(L"Advise: baseline tick = %lu", m_waitingStartTick);
-    // Same instant as the baseline tick: capture which lock-shortcut
-    // modifiers are still physically held, before the input thread starts.
-    SnapshotBaselineKeys();
+    m_inputDetectionRound =
+        facelogin::credential_provider::InputDetectionRound::InitialLock;
 
     return S_OK;
 }
@@ -623,9 +420,8 @@ STDMETHODIMP FaceLoginCredential::SetSelected(BOOL* pbAutoLogon) {
     // latency identical while never listening during flows that only Advise
     // us (PIN reset wizard, other tiles focused). Re-selecting after a
     // deselect restarts the watcher the same way; a re-selected FAILED tile
-    // re-arms the failure watcher (fresh baseline — Advise did not seed one
-    // in failure state), so the residue quarantine also applies to the
-    // key/click that performed the re-selection itself.
+    // re-arms the failure watcher with fresh-edge semantics, so the tail of
+    // the key/click that performed the re-selection cannot trigger a retry.
     if (facelogin::credential_provider::ShouldStartInputDetection(m_state) &&
         !m_inputThreadRunning) {
         if (facelogin::credential_provider::IsRetryableFailure(m_state)) {
@@ -1047,14 +843,18 @@ void FaceLoginCredential::StartInputDetectionThread() {
         return;
     }
 
+    // A naturally completed watcher clears m_inputThreadRunning itself, but
+    // its signaled thread handle and stop event are still owner resources.
+    // Reap them before starting another round instead of overwriting/leaking
+    // the old handles.
+    if (m_hInputThread || m_hInputStop) {
+        StopInputDetectionThread();
+    }
+
+    m_hInputStop = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!m_hInputStop) {
-        m_hInputStop = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!m_hInputStop) {
-            FACELOGIN_ERROR(L"Failed to create input stop event");
-            return;
-        }
-    } else {
-        ResetEvent(m_hInputStop);
+        FACELOGIN_ERROR(L"Failed to create input stop event");
+        return;
     }
 
     m_inputThreadRunning = true;
@@ -1068,14 +868,18 @@ void FaceLoginCredential::StartInputDetectionThread() {
 }
 
 void FaceLoginCredential::StopInputDetectionThread() {
-    if (!m_inputThreadRunning) {
+    if (!m_inputThreadRunning && !m_hInputThread && !m_hInputStop) {
         return;
     }
 
-    FACELOGIN_INFO(L"Stopping input detection thread...");
+    const bool wasRunning = m_inputThreadRunning;
+    if (wasRunning) {
+        FACELOGIN_INFO(L"Stopping input detection thread...");
+    }
 
-    // Signal stop
-    if (m_hInputStop) {
+    // Signal only a live watcher. A naturally completed watcher merely needs
+    // its already-signaled thread handle and event reaped.
+    if (wasRunning && m_hInputStop) {
         SetEvent(m_hInputStop);
     }
 
@@ -1096,7 +900,9 @@ void FaceLoginCredential::StopInputDetectionThread() {
     }
 
     m_inputThreadRunning = false;
-    FACELOGIN_INFO(L"Input detection thread stopped");
+    if (wasRunning) {
+        FACELOGIN_INFO(L"Input detection thread stopped");
+    }
 }
 
 void FaceLoginCredential::ArmFailureRetryDetection() {
@@ -1104,18 +910,11 @@ void FaceLoginCredential::ArmFailureRetryDetection() {
         return;
     }
 
-    // Seed the baseline HERE, not in Advise: Advise early-returns in failure
-    // state, and for a re-selected failed tile the Advise-time baseline is
-    // stale by a whole round. The fresh baseline ignores everything from the
-    // finished round — including mouse movement while the camera filmed — so
-    // only presses after this moment can request a retry.
-    m_waitingStartTick = GetTickCount();
-    // Same instant: snapshot keys still physically held at failure
-    // presentation (e.g. the user hammering keys through the failed round).
-    // The thread quarantines their auto-repeat/KEYUP ticks, so a key held
-    // across the transition cannot trigger an instant re-retry — only a NEW
-    // press qualifies.
-    SnapshotBaselineKeys();
+    // Failure tiles are already fully visible: require a fresh MAKE/button
+    // down and seed every physically held input before the watcher loop. This
+    // rejects auto-repeat and release tails without a timing window.
+    m_inputDetectionRound =
+        facelogin::credential_provider::InputDetectionRound::FailureRetry;
     StartInputDetectionThread();
 }
 
