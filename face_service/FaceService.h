@@ -140,7 +140,7 @@ private:
 
     // Configuration
     AppConfig m_config;
-    float m_antiSpoofThreshold = 0.281f;
+    float m_antiSpoofThreshold = 0.28f;
 
     bool m_isServiceMode = false;  // set by ServiceMain
 

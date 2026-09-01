@@ -45,7 +45,7 @@ struct AuthPipelineCallbacks {
 };
 
 struct AuthPipelineConfig {
-    float antiSpoofThreshold = 0.281f;
+    float antiSpoofThreshold = 0.28f;
     int authTimeoutSeconds = 15;
     int cameraRotation = 0;
 };

@@ -141,16 +141,16 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.match_threshold);
         cfg.match_threshold = 0.80f;
     }
-    cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.281f);
-    // The UI only permits [0.281, 0.50]. Enforce the same range in the
+    cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.28f);
+    // The UI only permits [0.15, 0.50]. Enforce the same range in the
     // security boundary because config.json can also be edited by hand.
     // In particular, a negative threshold would make Predict()'s -1 error
     // sentinel pass the comparison and turn an inference failure into success.
     if (!std::isfinite(cfg.anti_spoof_threshold) ||
-        cfg.anti_spoof_threshold < 0.281f || cfg.anti_spoof_threshold > 0.50f) {
-        FACELOGIN_WARN(L"Unsafe anti_spoof_threshold=%.3f; enforcing calibrated default 0.281",
+        cfg.anti_spoof_threshold < 0.15f || cfg.anti_spoof_threshold > 0.50f) {
+        FACELOGIN_WARN(L"Unsafe anti_spoof_threshold=%.3f; enforcing default 0.28",
                        cfg.anti_spoof_threshold);
-        cfg.anti_spoof_threshold = 0.281f;
+        cfg.anti_spoof_threshold = 0.28f;
     }
     // Missing key adopts the current default (true); an explicit value is
     // honored as written. Configs persisted by older builds carry an explicit

@@ -8,7 +8,7 @@ import (
 
 const (
 	defaultMatchThreshold     = 0.80
-	defaultAntiSpoofThreshold = 0.281
+	defaultAntiSpoofThreshold = 0.28
 )
 
 // EnsureConfigDefaults creates the current config.json for a fresh install.

@@ -150,7 +150,7 @@ private:
 
 struct WorkerConfig {
     int cameraRotation = 0;
-    float antiSpoofThreshold = 0.281f;
+    float antiSpoofThreshold = 0.28f;
     int authTimeoutSeconds = 15;
     bool lowLightEnhance = false;
     std::wstring cameraDevice;

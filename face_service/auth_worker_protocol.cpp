@@ -244,7 +244,7 @@ bool DecodeConfig(const std::vector<uint8_t>& payload, WorkerConfig& config) {
     }
     if ((rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) ||
         !std::isfinite(config.antiSpoofThreshold) ||
-        config.antiSpoofThreshold < 0.281f || config.antiSpoofThreshold > 0.50f ||
+        config.antiSpoofThreshold < 0.15f || config.antiSpoofThreshold > 0.50f ||
         timeout < 1 || timeout > 60 || lowLight > 1) {
         return false;
     }

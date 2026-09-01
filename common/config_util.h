@@ -6,7 +6,7 @@ namespace facelogin {
 
 struct AppConfig {
     float          match_threshold        = 0.80f;       // 512-D calibrated; EmbeddingThresholdForDim clamps to [0.70, 1.00]
-    float          anti_spoof_threshold   = 0.281f;      // calibrated 50/50 MiniFAS fusion threshold
+    float          anti_spoof_threshold   = 0.28f;       // 50/50 MiniFAS fusion threshold; UI default on a 0.01 grid (calibration point 0.281)
     // Low-light enhancement. true (default since 2026-08-31) = normalize
     // brightness of dark face chips before recognition. Measured on the
     // production chain: underexposed chips (luma 14-22) cost +0.25-0.30

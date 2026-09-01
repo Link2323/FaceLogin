@@ -62,8 +62,10 @@ void TestConfigRoundTrip() {
           "invalid camera rotation is rejected");
     Check(!DecodeConfig(MakeConfigPayload(0, std::numeric_limits<float>::quiet_NaN(), 15, 0), output),
           "non-finite PAD threshold is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(0, 0.280f, 15, 0), output),
-          "below-calibration PAD threshold is rejected");
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.10f, 15, 0), output),
+          "below-range PAD threshold is rejected");
+    Check(DecodeConfig(MakeConfigPayload(0, 0.15f, 15, 0), output),
+          "lower-bound PAD threshold 0.15 is accepted");
     Check(!DecodeConfig(MakeConfigPayload(0, 0.281f, 15, 2), output),
           "invalid low-light flag is rejected");
 
