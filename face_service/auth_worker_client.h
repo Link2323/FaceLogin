@@ -50,10 +50,15 @@ private:
     bool Spawn(std::wstring& errorMessage);
     bool ReadStartupMessage(auth_worker::MessageType expected,
                             DWORD timeoutMs, std::wstring& errorMessage);
-    // A validated terminal message commits the authentication result, but the
-    // worker Job must be fully reclaimed before credentials are released.
-    // Reclaim the one-shot Job before returning terminal ownership to the
-    // caller, keeping camera/ORT resources outside the persistent parent.
+    // A validated terminal message commits the authentication result, and the
+    // one-shot worker has already self-terminated; reclaiming its Job keeps
+    // camera/ORT resources out of the persistent parent. Failure and timeout
+    // paths reclaim before returning. The success path deliberately returns
+    // unreclaimed — the teardown wait (15–40 ms on slow machines) must land
+    // after AUTH_SUCCESS delivery, not between the match verdict and the
+    // Credential Provider — so the caller owns the final Stop() (FaceService
+    // reaps right after the CP acknowledges the credentials; the shared_ptr
+    // destructor backstops every other exit).
     void CompleteTerminal();
     void CloseProcessHandles();
 

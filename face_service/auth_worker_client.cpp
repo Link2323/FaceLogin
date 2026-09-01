@@ -322,13 +322,19 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
             result.succeeded = true;
             result.hasTiming = true;
             result.timing = timing;
-            const auto terminalAt = std::chrono::steady_clock::now();
-            CompleteTerminal();
-            const auto cleanupDone = std::chrono::steady_clock::now();
             result.supervisorElapsedMs =
-                std::chrono::duration<double, std::milli>(terminalAt - authStart).count();
-            result.cleanupMs =
-                std::chrono::duration<double, std::milli>(cleanupDone - terminalAt).count();
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - authStart).count();
+            // The worker self-terminated before this message arrived
+            // (SendTerminalAndExit), so no worker code can run again —
+            // reclaiming the Job only waits for kernel process teardown
+            // (0–2 ms dev machine, 15–40 ms measured on the slow machine).
+            // That wait must not sit between the match verdict and the
+            // AUTH_SUCCESS delivery, so this path returns without reaping:
+            // the caller owns the final Stop() (FaceService reaps right
+            // after the Credential Provider acknowledges the credentials)
+            // and the shared_ptr destructor backstops every other exit.
+            result.cleanupMs = 0.0;
             return result;
         }
         if (message.type == auth_worker::MessageType::AuthTimedOut &&

@@ -299,6 +299,13 @@ void RunSuccessfulCycle() {
           result.timing.pipelineMs == 34.5f &&
           result.timing.totalMs == 47.0f,
           "mock auth completes exactly three bindings and returns timing");
+    Check(result.cleanupMs == 0.0,
+          "deferred-reap success path reports zero cleanup; the caller measures the reap");
+    // The success path deliberately returns without reaping (production reaps
+    // only after AUTH_SUCCESS delivery so the teardown wait never sits
+    // between the match verdict and the Credential Provider). Emulate the
+    // caller contract before asserting the child is gone.
+    worker.Stop();
     Check(!worker.IsAlive(), "successful one-shot worker exits");
 }
 

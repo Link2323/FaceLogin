@@ -540,9 +540,10 @@ void FaceService::MarkAuthWorkerConsumed(bool preloadReplacement) {
             }
         }
     }
-    // Authenticate() has already terminated the child after its terminal
-    // message. Reset outside the lifecycle lock so the Job close cannot block
-    // a WTS handler or model state transition.
+    // The supervisor exchange has already terminated the child (failure
+    // paths inside Authenticate(); the success path reaps right after the
+    // AUTH_SUCCESS ACK). Reset outside the lifecycle lock so the Job close
+    // cannot block a WTS handler or model state transition.
     consumed.reset();
     m_modelCv.notify_all();
 }
@@ -992,6 +993,9 @@ bool FaceService::ProcessWorkerAuthRequest() {
     std::wstring initialSid;
     AuthWorkerResult workerResult;
     float identityMissDistance = -1.0f;
+    // Outlives the ModelUseGuard scope below: the success path reaps the
+    // worker only after AUTH_SUCCESS has been delivered to the CP.
+    std::shared_ptr<AuthWorkerClient> worker;
 
     {
         // Prevent SESSION_UNLOCK from killing the worker between the public
@@ -1019,7 +1023,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
         }
         m_modelCv.notify_all();
 
-        auto worker = AcquireAuthWorkerForAuth();
+        worker = AcquireAuthWorkerForAuth();
         if (!worker || !worker->IsReady()) {
             std::wstring loadError;
             {
@@ -1113,6 +1117,16 @@ bool FaceService::ProcessWorkerAuthRequest() {
         SecureClearMatchPassword(credential);
         return false;
     }
+
+    // The worker self-terminated when it sent AuthSucceeded; reclaim its Job
+    // only now. CompleteTerminal used to run inside Authenticate(), placing
+    // the process-teardown wait (0–2 ms dev machine, 15–40 ms slow machine)
+    // between the match verdict and AUTH_SUCCESS. Delivery — the ACK above —
+    // is the critical path; the reap is not.
+    const auto reapStart = std::chrono::steady_clock::now();
+    worker->Stop();
+    workerResult.cleanupMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - reapStart).count();
 
     FACELOGIN_INFO(L"Credentials sent for %s\\%s", domain.c_str(),
                    credential->username.c_str());
