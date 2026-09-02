@@ -112,7 +112,7 @@ body{
 .logs-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-shrink:0}
 .logs-toolbar h2{font-size:20px;font-weight:300;letter-spacing:-0.3px;color:#111827}
 .logs-toolbar .btn{width:auto;padding:6px 18px;margin-top:0;font-size:12px}
-.log-viewer{flex:1;min-height:0;overflow-y:auto;background:#f9fafb;border:1px solid #e5e7eb;padding:8px 12px;font-family:"Cascadia Code","Consolas","Courier New",monospace;font-size:11px;line-height:1.6;color:#374151;white-space:pre-wrap;word-break:break-all}
+.log-viewer{flex:1;min-height:0;overflow-y:auto;background:#f9fafb;border:1px solid #e5e7eb;padding:8px 12px;font-family:"Cascadia Code","Consolas","Courier New",monospace;font-size:11px;line-height:1.6;color:#374151;white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text;cursor:text}
 .log-viewer .log-debug{color:#9ca3af}
 .log-viewer .log-info{color:#111827}
 .log-viewer .log-warn{color:#d97706}
@@ -398,7 +398,9 @@ body{
           <option value="worker">AuthWorker</option>
           <option value="cp">CredentialProvider</option>
         </select>
-        <button class="btn btn-secondary" onclick="clearLogs()">清空日志</button>
+        <button class="btn btn-secondary" id="btn-copy-log" onclick="copyLogs()">复制</button>
+        <button class="btn btn-secondary" id="btn-clear-log" onclick="clearLogs()"
+                title="清空当前来源的当日日志（按天轮转的历史文件保留）">清空日志</button>
       </div>
     </div>
     <div class="log-viewer" id="log-viewer"></div>
@@ -1270,6 +1272,13 @@ function onSave() {
 
 function refreshLogs() {
   try {
+    var viewer = document.getElementById('log-viewer');
+    // The 2s auto-refresh repaints innerHTML, which destroys any in-progress
+    // text selection — that made it impossible to select a log line to copy.
+    // Skip this tick while a selection inside the viewer is active; refreshing
+    // resumes on the next tick after the user clicks away.
+    var selection = window.getSelection();
+    if (selection && !selection.isCollapsed && viewer.contains(selection.anchorNode)) return;
     var src = document.getElementById('log-source').value;
     var json;
     if (src === 'service') {
@@ -1294,7 +1303,6 @@ function refreshLogs() {
       else if (lines[i].indexOf('[ERROR]') >= 0) cls = 'log-error';
       html += '<div class="' + cls + '">' + escapeHtml(lines[i]) + '</div>';
     }
-    var viewer = document.getElementById('log-viewer');
     var atBottom = (viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight) < 60;
     viewer.innerHTML = html;
     if (atBottom) viewer.scrollTop = viewer.scrollHeight;
@@ -1307,10 +1315,66 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// 四个来源行为一致:清空 = 截断当日日志文件(console 同时清内存环形缓冲)。
+// writer 以追加模式(FILE_APPEND_DATA)打开文件,截断安全,下一条日志自动落在新末尾;
+// 按天轮转的历史文件不受影响。
 function clearLogs() {
-  try { H.ClearLog(); } catch(e) {}
+  var src = document.getElementById('log-source').value;
+  try {
+    if (src === 'console') H.ClearLog();
+    else H.ClearFileLog(src);
+  } catch(e) { return; }
   document.getElementById('log-viewer').textContent = '';
+  var btn = document.getElementById('btn-clear-log');
+  btn.textContent = '已清空';
+  setTimeout(function() { btn.textContent = '清空日志'; }, 1500);
 }
+
+// Copy exactly what the viewer currently shows (the selected source). The app
+// is loaded via NavigateToString (about:blank origin), where the async
+// Clipboard API may be unavailable — fall back to execCommand.
+function copyLogs() {
+  var text = document.getElementById('log-viewer').innerText;
+  if (!text) return;
+  var btn = document.getElementById('btn-copy-log');
+  var done = function() {
+    btn.textContent = '已复制';
+    setTimeout(function() { btn.textContent = '复制'; }, 1500);
+  };
+  var fallback = function() {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { if (document.execCommand('copy')) done(); } catch(e) {}
+    document.body.removeChild(ta);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done, fallback);
+  } else {
+    fallback();
+  }
+}
+
+// Enter submits the form the field belongs to. All screens share this
+// document (hidden ones only via CSS), but a hidden field can never take
+// focus, so one binding per field is enough. Ignore Enter while the target
+// button is disabled (a save is already in flight) and during IME composition
+// (Chinese face-label input commits with Enter).
+function bindEnterKey(fieldId, btnId, submit) {
+  document.getElementById(fieldId).addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    var btn = document.getElementById(btnId);
+    if (btn && btn.disabled) return;
+    submit();
+  });
+}
+bindEnterKey('fld-pass', 'btn-save', onSave);
+bindEnterKey('fld-face-label', 'btn-save', onSave);
+bindEnterKey('append-face-label', 'btn-append', onAppendConfirm);
+bindEnterKey('refresh-pass', 'refresh-confirm', onRefreshConfirm);
 
 // ==================================================================
 // First-run camera picker: if config has no camera_device (fresh install

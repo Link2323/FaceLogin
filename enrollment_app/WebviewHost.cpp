@@ -247,6 +247,17 @@ LRESULT WebviewHost::HandleMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
         ResizeWebView(hWnd);
         return 0;
 
+    case WM_MOVE:
+        // Moving without resizing sends no WM_SIZE, and Chromium keeps a
+        // cached copy of the webview's screen origin for placing native
+        // popups (the <select> dropdowns). Re-asserting put_Bounds with an
+        // unchanged rect is a no-op — NotifyParentWindowPositionChanged is
+        // the documented "parent window moved" signal that refreshes that
+        // cached origin. Without it the first dropdown after a move flashes
+        // at the old location before snapping to the new one.
+        if (m_controller) m_controller->NotifyParentWindowPositionChanged();
+        return 0;
+
     case WM_WTSSESSION_CHANGE:
         if (m_wizard) {
             switch (wp) {
@@ -343,6 +354,7 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"ClearStaleAccountUpn") *ids = 31;
     else if (n == L"GetAuthWorkerLogLines") *ids = 32;
     else if (n == L"GetCredentialProviderLogLines") *ids = 33;
+    else if (n == L"ClearFileLog") *ids = 34;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -452,6 +464,11 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 32: if (res) *res = MakeStr(m_wizard->GetAuthWorkerLogLines()); break;
         case 33: if (res) *res = MakeStr(m_wizard->GetCredentialProviderLogLines()); break;
         case 17: m_wizard->ClearLog(); break;
+        case 34: {
+            std::wstring source = OptionalArg(p, 0);  // "service" | "worker" | "cp"
+            if (res) *res = MakeBool(m_wizard->ClearFileLog(source));
+            break;
+        }
         case 18: if (res) *res = MakeStr(m_wizard->GetUserSid()); break;
         case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
         case 20: if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces()); break;

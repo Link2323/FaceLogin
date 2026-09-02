@@ -71,7 +71,7 @@
 ├── log/service.log
 ├── log/auth_worker.log
 ├── log/credential_provider.log
-├── log/enrollment.log
+├── log/console.log
 └── models/*.onnx
 ```
 

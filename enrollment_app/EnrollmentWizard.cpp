@@ -175,7 +175,13 @@ EnrollmentWizard::EnrollmentWizard() {
     }
     CreateDirectoryW(m_dataDir.c_str(), nullptr);
 
-    std::wstring logPath = m_dataDir + L"\\log\\enrollment.log";
+    // The console's own log file, read back by the log viewer's "Console"
+    // source like any other file-based source. v1.7.x named it enrollment.log:
+    // MoveFile carries that file over on the first run of the renamed build
+    // (fails silently when console.log already exists); pre-UTF-8 content is
+    // still rotated aside by RotateAsideLegacyUtf16 inside SetLogFile.
+    std::wstring logPath = m_dataDir + L"\\log\\console.log";
+    MoveFileW((m_dataDir + L"\\log\\enrollment.log").c_str(), logPath.c_str());
     Logger::Instance().SetLogFile(logPath);
     Logger::Instance().SetMinLevel(LogLevel::Info);
     Logger::Instance().SetEnableDebugOutput(true);
@@ -1703,26 +1709,11 @@ bool EnrollmentWizard::RestartPreview() {
 // ============================================================================
 
 std::string EnrollmentWizard::GetLogLines() {
-    auto lines = Logger::Instance().GetRecentLogs(500);
-    std::ostringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < lines.size(); i++) {
-        if (i > 0) ss << ",";
-        ss << "\"";
-        for (wchar_t ch : lines[i]) {
-            if (ch == L'\\') ss << "\\\\";
-            else if (ch == L'"') ss << "\\\"";
-            else if (ch == L'\r' || ch == L'\n') {} // strip newlines — JS renders as <div>
-            else {
-                char mb[4] = {};
-                int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, mb, 4, nullptr, nullptr);
-                if (n > 0) ss.write(mb, n);
-            }
-        }
-        ss << "\"";
-    }
-    ss << "]";
-    return ss.str();
+    // The "Console" source reads console.log from disk, exactly like the
+    // Service/AuthWorker/CP sources read their files — one mechanism for all
+    // four. (It used to return the in-memory ring buffer; the file view is
+    // equivalent because the Logger writes every line through immediately.)
+    return ReadLogFileLines(L"console.log");
 }
 
 std::string EnrollmentWizard::GetServiceLogLines() {
@@ -1735,6 +1726,39 @@ std::string EnrollmentWizard::GetAuthWorkerLogLines() {
 
 std::string EnrollmentWizard::GetCredentialProviderLogLines() {
     return ReadLogFileLines(L"credential_provider.log");
+}
+
+// Truncate the active file of a file-based log source ("service", "worker",
+// "cp" — same names the log-source dropdown uses). See
+// TruncateLogFileByName for why this is safe against live writers.
+bool EnrollmentWizard::ClearFileLog(const std::wstring& source) {
+    std::wstring fileName;
+    if (source == L"service") fileName = L"service.log";
+    else if (source == L"worker") fileName = L"auth_worker.log";
+    else if (source == L"cp") fileName = L"credential_provider.log";
+    else return false;
+    return TruncateLogFileByName(fileName);
+}
+
+// Collapse <m_dataDir>\log\<fileName> to zero length. Safe against the live
+// writers because the common Logger opens its file with FILE_APPEND_DATA
+// (the kernel writes every record at the file's CURRENT end) and shares
+// read/write, so collapsing the file to zero length just moves the append
+// point — the next log line lands at offset 0, no holes, no corruption.
+// Rotated <stem>.YYYY-MM-DD.log files are never shown in the viewer and are
+// left untouched. A missing file counts as success (nothing to clear).
+bool EnrollmentWizard::TruncateLogFileByName(const std::wstring& fileName) {
+    std::wstring logPath = m_dataDir + L"\\log\\" + fileName;
+    HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return GetLastError() == ERROR_FILE_NOT_FOUND;
+    }
+    SetFilePointer(hFile, 0, nullptr, FILE_BEGIN);
+    bool ok = SetEndOfFile(hFile) != 0;
+    CloseHandle(hFile);
+    return ok;
 }
 
 std::string EnrollmentWizard::ReadLogFileLines(const std::wstring& logFileName) {
@@ -1753,7 +1777,9 @@ std::string EnrollmentWizard::ReadLogFileLines(const std::wstring& logFileName) 
     DWORD fileSize = GetFileSize(hFile, nullptr);
     if (fileSize == INVALID_FILE_SIZE || fileSize < 2) {
         CloseHandle(hFile);
-        return "[\"" + WstrToUtf8(logFileName) + " is empty\"]";
+        // Empty file (e.g. just cleared via ClearFileLog) renders as a blank
+        // viewer, matching the Console source after ClearLog — no placeholder.
+        return "[]";
     }
 
     // Cap at ~256KB of raw bytes, reading from the END — the viewer cares
@@ -1854,7 +1880,12 @@ std::string EnrollmentWizard::ReadLogFileLines(const std::wstring& logFileName) 
 }
 
 void EnrollmentWizard::ClearLog() {
+    // Console clears like the file sources now: truncate today's console.log
+    // (the append-mode writers land their next line at the new end). The
+    // in-memory ring is cleared as well — the UI no longer reads it, but this
+    // keeps Logger state and the disk file consistent.
     Logger::Instance().ClearLogs();
+    TruncateLogFileByName(L"console.log");
 }
 
 } // namespace facelogin

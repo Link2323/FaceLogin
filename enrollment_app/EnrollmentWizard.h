@@ -136,6 +136,7 @@ public:
     std::string GetAuthWorkerLogLines();
     std::string GetCredentialProviderLogLines();
     void ClearLog();
+    bool ClearFileLog(const std::wstring& source);
 
     // Per-frame data for JS canvas rendering (pull model — JS calls these from rAF)
     std::string GetLatestFrameBase64(); // JPEG base64, ~200KB
@@ -152,6 +153,9 @@ private:
     // Reads <m_dataDir>\log\<logFileName> and returns a JSON array of lines
     // for the JS log viewer (shared by Service/AuthWorker/CredentialProvider).
     std::string ReadLogFileLines(const std::wstring& logFileName);
+    // Collapses <m_dataDir>\log\<fileName> to zero length (ClearLog /
+    // ClearFileLog). Missing file counts as success.
+    bool TruncateLogFileByName(const std::wstring& fileName);
 
     bool SaveEnrollmentImpl(const std::wstring& password,
                             const std::wstring& label);
