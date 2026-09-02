@@ -549,12 +549,18 @@ function drawBackgroundAndOverlay() {
   var c = document.getElementById('bg-canvas');
   var vp = document.getElementById('viewport');
   var cw = vp.clientWidth, ch = vp.clientHeight;
-  c.width = cw;
-  c.height = ch;
+  // Backing store at PHYSICAL resolution (devicePixelRatio), drawing coords
+  // still CSS px — without this a 125/150% display upscales the 1x bitmap and
+  // the overlay text goes fuzzy. CSS pins both canvases to 100% of the
+  // viewport, so a larger bitmap renders sharper, never larger.
+  var dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(cw * dpr);
+  c.height = Math.round(ch * dpr);
   var srcW = faceImg.naturalWidth || 1280;
   var srcH = faceImg.naturalHeight || 720;
   var m = containMapping(srcW, srcH, cw, ch);
   var ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, cw, ch);       // letterbox bars
   ctx.drawImage(faceImg, m.ox, m.oy, srcW * m.sx, srcH * m.sy);
@@ -580,16 +586,38 @@ function renderFrame() {
   timer = setTimeout(renderFrame, 33);
 }
 
+// Path helper for the guidance pill (arcTo rounding works on every WebView2
+// runtime, unlike ctx.roundRect which needs a newer Chromium).
+function roundedRectPath(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
 function drawOverlay(json) {
   var canvas = document.getElementById('face-canvas');
   var vp = document.getElementById('viewport');
   var ctx = canvas.getContext('2d');
-  canvas.width = vp.clientWidth;
-  canvas.height = vp.clientHeight;
+  // Same physical-resolution backing store as the background canvas — see
+  // drawBackgroundAndOverlay. Coordinates below stay in CSS px; only the
+  // bitmap is dpr-dense, so text/lines render crisp on scaled displays.
+  var dpr = window.devicePixelRatio || 1;
+  var cw = vp.clientWidth, ch = vp.clientHeight;
+  var bw = Math.round(cw * dpr), bh = Math.round(ch * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   var faces;
   try { faces = JSON.parse(json); } catch(e) { return; }
-  if (faces.length === 0) { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
+  if (faces.length === 0) { ctx.clearRect(0, 0, cw, ch); return; }
 
   // Use the ACTUAL video frame size (from the loaded image), NOT a hardcoded
   // 1280x720 — the camera may negotiate a different resolution. And use the
@@ -598,35 +626,73 @@ function drawOverlay(json) {
   // from a stretch overlay, so both share containMapping()).
   var srcW = faceImg.naturalWidth || 1280;
   var srcH = faceImg.naturalHeight || 720;
-  var cw = canvas.width, ch = canvas.height;
   var m = containMapping(srcW, srcH, cw, ch);
   var sx = m.sx, sy = m.sy, ox = m.ox, oy = m.oy;
 
   ctx.clearRect(0, 0, cw, ch);
-  ctx.strokeStyle = '#22c55e';
-  ctx.lineWidth = 2;
-  ctx.fillStyle = '#22c55e';
 
   for (var fi = 0; fi < faces.length; fi++) {
     var f = faces[fi];
-    ctx.strokeRect(f.x * sx + ox, f.y * sy + oy, f.w * sx, f.h * sy);
-    for (var i = 0; i < f.landmarks.length; i += 2) {
-      ctx.fillRect(f.landmarks[i] * sx + ox - 1, f.landmarks[i + 1] * sy + oy - 1, 2, 2);
+    var bx = f.x * sx + ox, by = f.y * sy + oy;
+    var bw = f.w * sx, bh = f.h * sy;
+
+    // Gate state drives the frame color: green in gate, amber = keep turning.
+    // targetYaw is only present while capturing (backend contract).
+    var col = '#22c55e', hint = '';
+    if (typeof f.targetYaw !== 'undefined' && typeof f.yaw !== 'undefined') {
+      var diff = f.targetYaw - f.yaw;      // >0 keep turning own-left, <0 own-right
+      var inGate = Math.abs(diff) <= 10;   // same ±10° gate the collector uses
+      col = inGate ? '#22c55e' : '#f59e0b';
+      hint = inGate ? '角度到位 · 请保持'
+                    : '再' + (diff > 0 ? '左转 ' : '右转 ') +
+                      Math.round(Math.abs(diff)) + '°';
     }
-    // Live head-yaw readout: positive = turned toward your own left. While
-    // capturing, it is color-coded against the current angle's gate (±10°):
-    // green = in gate (samples count), amber = out of gate (keep turning).
-    if (typeof f.yaw !== 'undefined') {
-      ctx.font = '15px Consolas, monospace';
-      var yawTxt = (f.yaw > 0 ? '+' : '') + f.yaw.toFixed(1) + '°';
-      var yawColor = '#22c55e';
-      if (typeof f.targetYaw !== 'undefined') {
-        var off = Math.abs(f.yaw - f.targetYaw);
-        yawColor = off <= 10 ? '#22c55e' : '#f59e0b';
-        yawTxt += ' / 目标 ' + (f.targetYaw > 0 ? '+' : '') + f.targetYaw + '°';
-      }
-      ctx.fillStyle = yawColor;
-      ctx.fillText(yawTxt, f.x * sx + f.w * sx + 8, f.y * sy + 16);
+
+    // Viewfinder-style corner brackets instead of the old hard rectangle —
+    // same gate color, softened with rounded joins and a faint glow.
+    ctx.save();
+    ctx.strokeStyle = col;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = col;
+    ctx.shadowBlur = 6;
+    ctx.lineWidth = 3.5;
+    var cl = Math.max(16, Math.min(bw, bh) * 0.22);   // bracket arm length
+    var cr = 10;                                       // corner rounding
+    ctx.beginPath();
+    ctx.moveTo(bx, by + cl); ctx.lineTo(bx, by + cr);
+    ctx.quadraticCurveTo(bx, by, bx + cr, by); ctx.lineTo(bx + cl, by);
+    ctx.moveTo(bx + bw - cl, by); ctx.lineTo(bx + bw - cr, by);
+    ctx.quadraticCurveTo(bx + bw, by, bx + bw, by + cr); ctx.lineTo(bx + bw, by + cl);
+    ctx.moveTo(bx + bw, by + bh - cl); ctx.lineTo(bx + bw, by + bh - cr);
+    ctx.quadraticCurveTo(bx + bw, by + bh, bx + bw - cr, by + bh); ctx.lineTo(bx + bw - cl, by + bh);
+    ctx.moveTo(bx + cl, by + bh); ctx.lineTo(bx + cr, by + bh);
+    ctx.quadraticCurveTo(bx, by + bh, bx, by + bh - cr); ctx.lineTo(bx, by + bh - cl);
+    ctx.stroke();
+    ctx.restore();
+
+    // Guidance pill above the box (capturing only): tells the user what to DO
+    // instead of exposing the raw "+12.3° / 目标 +30°" numbers.
+    if (hint) {
+      ctx.save();
+      ctx.font = '600 13px "Segoe UI", "Microsoft YaHei", sans-serif';
+      var tw = ctx.measureText(hint).width;
+      var padX = 12, pillH = 26, dotR = 4, dotGap = 8;
+      var pillW = padX * 2 + dotR * 2 + dotGap + tw;
+      var px = Math.max(8, Math.min(bx + bw / 2 - pillW / 2, cw - pillW - 8));
+      var py = by - pillH - 10;
+      if (py < 8) py = 8;   // box near the top edge — pin the pill to the top
+      roundedRectPath(ctx, px, py, pillW, pillH, 13);
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(px + padX + dotR, py + pillH / 2, dotR, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(hint, px + padX + dotR * 2 + dotGap, py + pillH / 2 + 0.5);
+      ctx.restore();
     }
   }
 }
