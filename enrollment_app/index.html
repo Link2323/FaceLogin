@@ -185,7 +185,7 @@ body{
     </label>
     <button class="btn btn-primary" id="btn-capture" onclick="onCapture()">
       <span class="spinner" id="cap-spinner"></span>
-      开始采集
+      <span id="cap-btn-text">开始采集</span>
     </button>
     <div id="cap-progress">
       <div class="progress-bar"><div class="fill" id="cap-fill" style="width:0%"></div></div>
@@ -460,6 +460,55 @@ var capturing = false;
 var captureAngleIndex = 0;  // angle being captured; used to name/describe a single-angle append
 var camReady = false, currentTab = 'cam';
 var refreshState = 0;  // account-type-change state shown in the refresh modal (0/1/2)
+var capturePoll = 0;        // capture status poll; module-level so cancel can stop it
+var cancelRequested = false; // set by onCancelCapture — a cancel during the gap
+                             // between two angles must suppress the next angle
+
+// Stop the capture status poll wherever it is (module-level id).
+function stopCapturePoll() {
+  if (capturePoll) { clearInterval(capturePoll); capturePoll = 0; }
+}
+
+// Button modes. Idle = primary「开始采集」; while capturing it becomes an
+// enabled outline「取消采集」— previously a started capture was locked in
+// until it finished or hit the 25s watchdog.
+function enterCaptureCancelMode() {
+  var btn = document.getElementById('btn-capture');
+  btn.disabled = false;
+  btn.classList.remove('btn-primary');
+  btn.classList.add('btn-secondary');
+  document.getElementById('cap-btn-text').textContent = '取消采集';
+  document.getElementById('cap-spinner').style.display = 'none';
+}
+function resetCaptureUi() {
+  capturing = false;
+  var btn = document.getElementById('btn-capture');
+  btn.disabled = false;
+  btn.classList.add('btn-primary');
+  btn.classList.remove('btn-secondary');
+  document.getElementById('cap-btn-text').textContent = '开始采集';
+  document.getElementById('cap-spinner').style.display = 'none';
+}
+function hideCaptureProgress() {
+  document.getElementById('cap-progress').style.display = 'none';
+  document.getElementById('cap-fill').style.width = '0%';
+  document.getElementById('cap-pct').textContent = '0%';
+  document.getElementById('cap-step').textContent = '采集人脸样本...';
+}
+
+// User pressed the cancel affordance mid-capture: stop the poll first (so no
+// later tick paints over the reset), then tell the host to stop the capture
+// thread cooperatively (both phases check m_capturing between frames). The
+// partial samples stay in host memory exactly like a failed capture does.
+function onCancelCapture() {
+  cancelRequested = true;
+  stopCapturePoll();
+  try { H.CancelCapture(); } catch(e) {}
+  resetCaptureUi();
+  hideCaptureProgress();
+  document.getElementById('samples-tag').textContent = '已采 0 帧';
+  showBanner('cam', '已取消采集。', 'ok');
+}
 
 faceImg.onload = function() {
   drawBackgroundAndOverlay();
@@ -669,8 +718,9 @@ function onSaveSettings() {
 }
 
 function onCapture() {
-  var btn = document.getElementById('btn-capture');
-  var spinner = document.getElementById('cap-spinner');
+  // While a capture runs, the primary button doubles as its cancel control.
+  if (capturing) { onCancelCapture(); return; }
+
   var prog = document.getElementById('cap-progress');
 
   // Pre-check face slot limit for single-angle mode.
@@ -685,11 +735,11 @@ function onCapture() {
   }
 
   captureMultiAngle = multi;  // remember for finishCapture / showAppendScreen
+  cancelRequested = false;    // fresh run — drop any stale cancel from a prior one
 
-  btn.disabled = true;
-  spinner.style.display = 'inline-block';
+  enterCaptureCancelMode();
   prog.style.display = 'block';
-  document.getElementById('cap-pct').textContent = '';
+  document.getElementById('cap-pct').textContent = '0%';
   document.getElementById('cap-fill').style.width = '0%';
 
   var angles = 1;
@@ -701,9 +751,8 @@ function onCapture() {
     captureAngleIndex = multi ? 0 : pickMissingAngle(faceCount);
     captureAngleSequence(captureAngleIndex, angles);
   } catch(e) {
-    btn.disabled = false;
-    spinner.style.display = 'none';
-    prog.style.display = 'none';
+    resetCaptureUi();
+    hideCaptureProgress();
     showBanner('cam', '开始采集失败: ' + e.message, 'error');
   }
 }
@@ -735,9 +784,9 @@ var ANGLE_INSTR = {
 // Drive one capture angle at a time: call CaptureFaceSamples(angle), poll
 // GetCaptureStatus, show the instruction + live progress, then move on.
 function captureAngleSequence(idx, total) {
-  var btn = document.getElementById('btn-capture');
-  var prog = document.getElementById('cap-progress');
-  var spinner = document.getElementById('cap-spinner');
+  // A cancel pressed during the gap between two angles must also stop this
+  // angle from starting — onCancelCapture already reset the whole UI.
+  if (cancelRequested) { cancelRequested = false; return; }
 
   // Mark the whole angle sequence as in-flight; only finishCapture / an abort
   // path clears it. Keeps the idle status poll from clobbering samples-tag
@@ -749,10 +798,8 @@ function captureAngleSequence(idx, total) {
   var started = true;
   try { started = H.CaptureFaceSamples(idx); } catch(e) { started = false; }
   if (started === false) {
-    capturing = false;
-    prog.style.display = 'none';
-    btn.disabled = false;
-    spinner.style.display = 'none';
+    resetCaptureUi();
+    hideCaptureProgress();
     document.getElementById('cap-step').textContent = '等待中...';
     showBanner('cam', '采集未能启动：上一次采集可能仍在进行，请稍候几秒再试。', 'error');
     return;
@@ -761,28 +808,41 @@ function captureAngleSequence(idx, total) {
   // Reset the bar for the new angle: the completed-angle poll takes the
   // "done" branch and never repaints, so without this the previous angle's
   // last painted value (80% = 4/5 frames) stays frozen through the whole
-  // liveness phase of this angle.
+  // liveness phase of this angle. Paint this angle's instruction right away
+  // too — the previous angle's「完成」/「活体检测中」texts otherwise linger
+  // until the first poll (~200ms), which reads as a stuck bar.
   document.getElementById('cap-fill').style.width = '0%';
   document.getElementById('cap-pct').textContent = '0%';
+  document.getElementById('cap-step').textContent = ANGLE_INSTR[idx] || '采集人脸样本...';
+  document.getElementById('samples-tag').textContent =
+    total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · 准备'
+              : '采集「' + ANGLE_LABELS[idx] + '」';
 
   // Watchdog: if the server reports no activity for 25s, the capture thread
   // is stuck (e.g. camera stall) — fail visibly instead of hanging forever.
   var pollStart = Date.now();
   var gotProgress = false;
 
-  var poll = setInterval(function() {
+  stopCapturePoll();
+  capturePoll = setInterval(function() {
     var st;
     try { st = JSON.parse(H.GetCaptureStatus()); } catch(e) { return; }
 
+    // A cancel landed server-side while a poll was still in flight — the
+    // cancel path has already reset the UI; just stand down.
+    if (st.cancelled) {
+      stopCapturePoll();
+      resetCaptureUi();
+      hideCaptureProgress();
+      return;
+    }
+
     if (st.collected > 0) gotProgress = true;
     if (!gotProgress && !st.done && st.collected === 0 && Date.now() - pollStart > 25000) {
-      clearInterval(poll);
-      capturing = false;
-      prog.style.display = 'none';
-      btn.disabled = false;
-      spinner.style.display = 'none';
+      stopCapturePoll();
+      resetCaptureUi();
+      hideCaptureProgress();
       document.getElementById('cap-step').textContent = '采集未完成...';
-      document.getElementById('cap-pct').textContent = '0%';
       showBanner('cam', '采集超时未开始：摄像头无响应，请检查摄像头后重试。', 'error');
       return;
     }
@@ -791,8 +851,6 @@ function captureAngleSequence(idx, total) {
     // inherit a stale proof from a previous capture.
     if (st.livenessChecking) {
       document.getElementById('cap-step').textContent = '正在进行活体检测...';
-      // The tag still says the PREVIOUS angle is done here (the completing
-      // poll repaints nothing) — show which angle is actually being checked.
       document.getElementById('samples-tag').textContent =
         (total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · ' : '') + '活体检测中';
       return;
@@ -800,13 +858,9 @@ function captureAngleSequence(idx, total) {
 
     // Liveness failed -> abort with the classic error banner.
     if (st.done && !st.livenessPassed) {
-      clearInterval(poll);
-      capturing = false;
-      prog.style.display = 'none';
-      btn.disabled = false;
-      spinner.style.display = 'none';
-      document.getElementById('cap-step').textContent = '采集人脸样本...';
-      document.getElementById('cap-pct').textContent = '0%';
+      stopCapturePoll();
+      resetCaptureUi();
+      hideCaptureProgress();
       showBanner('cam', '活体检测失败，请确保是真人并重试。', 'error');
       return;
     }
@@ -824,12 +878,15 @@ function captureAngleSequence(idx, total) {
       return;
     }
 
-    // This angle is complete — move on to the next one. Paint 100% first:
-    // the collected==target poll lands here without touching the bar, which
-    // otherwise never shows beyond the last partial update (80% at 4/5).
-    clearInterval(poll);
+    // This angle is complete — move on to the next one. Paint 100% AND a
+    // matching step text: the step used to keep saying「活体检测中」here,
+    // which next to「角度 N · 完成」and a frozen 100% bar read as stuck.
+    stopCapturePoll();
     document.getElementById('cap-fill').style.width = '100%';
     document.getElementById('cap-pct').textContent = '100%';
+    document.getElementById('cap-step').textContent =
+      total > 1 ? '角度 ' + (idx + 1) + ' 完成'
+                : '「' + ANGLE_LABELS[idx] + '」采集完成';
     document.getElementById('samples-tag').textContent =
       total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' · 完成'
                : '「' + ANGLE_LABELS[idx] + '」采集完成';
@@ -844,14 +901,9 @@ function captureAngleSequence(idx, total) {
 
 // All angles captured — the original post-capture flow (append vs password).
 function finishCapture() {
-  var btn = document.getElementById('btn-capture');
-  var prog = document.getElementById('cap-progress');
-  var spinner = document.getElementById('cap-spinner');
-  prog.style.display = 'none';
-  btn.disabled = false;
-  spinner.style.display = 'none';
+  resetCaptureUi();
+  hideCaptureProgress();
 
-  capturing = false;
   viewing = false;
   clearTimeout(timer);
   H.StopPreview();
@@ -1192,6 +1244,11 @@ function onAppendCancel() {
   } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
 }
 
+// Per-screen hide timers: re-showing a banner on the SAME screen must clear
+// that screen's previous timer, or the old deadline fires early and hides
+// the new banner (a 4s message died at ~2.9s in practice). Timers stay
+// per-screen so a banner on another screen is never cut short.
+var bannerTimers = {};
 function showBanner(screen, text, type, durationMs) {
   var el = document.getElementById(screen + '-banner');
   el.className = 'banner ' + type;
@@ -1199,7 +1256,11 @@ function showBanner(screen, text, type, durationMs) {
   // Optional duration override; default 4s. Guidance messages (e.g. the
   // lock-screen password-refresh hint) need longer to be readable.
   var ms = (typeof durationMs === 'number') ? durationMs : 4000;
-  setTimeout(function() { el.className = 'banner'; }, ms);
+  if (bannerTimers[screen]) clearTimeout(bannerTimers[screen]);
+  bannerTimers[screen] = setTimeout(function() {
+    el.className = 'banner';
+    bannerTimers[screen] = 0;
+  }, ms);
 }
 
 // Cancel from the password screen: discard the just-captured samples and
@@ -1457,7 +1518,9 @@ function onCamPickerSkip() {
     try {
       var st = JSON.parse(H.GetCaptureStatus());
       // Only after the whole sequence has ended do we show the running total.
-      if (st.done && !st.livenessChecking) {
+      // A cancelled capture (st.cancelled) leaves a partial total behind —
+      // don't resurrect it after the user asked to reset to zero.
+      if (st.done && !st.livenessChecking && !st.cancelled) {
         document.getElementById('samples-tag').textContent = '已采 ' + st.total + ' 帧';
       }
     } catch(e) {}

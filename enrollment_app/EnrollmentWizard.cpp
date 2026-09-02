@@ -657,6 +657,7 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
     }
 
     m_capturing = true;
+    m_captureCancelled = false;
     m_captureAngle = angleIndex;
     if (angleIndex == 0) {
         // New capture round: reset everything. Later angles append to the
@@ -754,7 +755,12 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         m_livenessChecking = false;
 
         if (!livenessPassed) {
-            FACELOGIN_WARN(L"Enrollment liveness check failed");
+            if (m_captureCancelled) {
+                FACELOGIN_INFO(L"Enrollment capture cancelled during liveness for angle %d",
+                               angleIndex);
+            } else {
+                FACELOGIN_WARN(L"Enrollment liveness check failed");
+            }
             m_capturing = false;
             return;
         }
@@ -828,7 +834,9 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
         const bool complete = livenessPassed &&
             m_angleSampleCounts[angleIndex] == kAngleTargetFrames;
         m_livenessPassed = complete;
-        if (!complete) {
+        if (m_captureCancelled) {
+            FACELOGIN_INFO(L"Enrollment capture cancelled for angle %d", angleIndex);
+        } else if (!complete) {
             FACELOGIN_WARN(L"Enrollment capture incomplete for angle %d: %d/%d samples",
                            angleIndex, m_angleSampleCounts[angleIndex].load(),
                            kAngleTargetFrames);
@@ -838,6 +846,18 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
     });
 
     return true;
+}
+
+// Cooperative stop for the JS cancel button: both capture phases check
+// m_capturing between frames, so the thread exits within one poll interval
+// (~33-150ms). The cancelled flag lets GetCaptureStatus distinguish a user
+// cancel from a liveness failure until the next CaptureFaceSamples resets it.
+void EnrollmentWizard::CancelCapture() {
+    if (m_capturing) {
+        FACELOGIN_INFO(L"Enrollment: capture cancelled by user");
+        m_captureCancelled = true;
+        m_capturing = false;
+    }
 }
 
 // Helper: convert wstring to UTF-8 string for JS
@@ -903,6 +923,7 @@ std::string EnrollmentWizard::GetCaptureStatus() {
        << ",\"total\":" << total
        << ",\"livenessChecking\":" << (m_livenessChecking ? "true" : "false")
        << ",\"livenessPassed\":" << (m_livenessPassed ? "true" : "false")
+       << ",\"cancelled\":" << (m_captureCancelled ? "true" : "false")
        << ",\"done\":" << (m_capturing ? "false" : "true") << "}";
     return js.str();
 }

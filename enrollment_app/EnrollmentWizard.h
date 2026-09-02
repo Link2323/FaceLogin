@@ -44,10 +44,13 @@ public:
     // m_embeddings, grouped in angle order), so SaveEnrollment can create one
     // face record per angle without ever averaging across angles.
     bool CaptureFaceSamples(int angleIndex);
+    // Cooperative stop: both capture phases check m_capturing between frames,
+    // so the thread exits within one poll interval. No-op when not capturing.
+    void CancelCapture();
     // Capture progress for the JS UI:
     // {"angle":0,"label":"正面","targetYaw":0,"collected":3,"target":5,
     //  "yaw":12.3,"total":8,"livenessChecking":false,"livenessPassed":true,
-    //  "done":false}
+    //  "cancelled":false,"done":false}
     std::string GetCaptureStatus();
     bool IsLivenessPassed() const { return m_livenessPassed; }
     bool IsLivenessChecking() const { return m_livenessChecking; }
@@ -193,6 +196,10 @@ private:
     std::vector<std::vector<float>> m_embeddings;
     std::atomic<int> m_samplesCollected{0};
     std::atomic<bool> m_capturing{false};
+    // Set together with m_capturing=false by CancelCapture; lets
+    // GetCaptureStatus (and the logs) distinguish a user cancel from a
+    // liveness failure until the next CaptureFaceSamples resets it.
+    std::atomic<bool> m_captureCancelled{false};
     std::atomic<bool> m_livenessPassed{false};
     std::atomic<bool> m_livenessChecking{false};
     std::thread m_captureThread;
