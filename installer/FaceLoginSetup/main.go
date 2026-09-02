@@ -18,7 +18,7 @@ var assets embed.FS
 // appVersion is shown in Windows' Add/Remove Programs list. Keep in sync
 // with wails.json Info.productVersion, build/windows/info.json and the
 // README badge.
-const appVersion = "1.7.5"
+const appVersion = "1.8.0"
 
 const SERVICE_NAME = "FaceLoginService"
 
