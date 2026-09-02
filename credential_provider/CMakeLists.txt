@@ -7,6 +7,9 @@ add_library(FaceLoginCredentialProvider SHARED
     credential_provider.def
 )
 
+facelogin_add_version_rc(FaceLoginCredentialProvider VFT_DLL
+    "FaceLogin credential provider" FaceLoginCredentialProvider.dll)
+
 # IMPORTANT: This DLL is loaded by LogonUI.exe (lock screen) and is registered
 # by the installer via an in-process DllRegisterServer call (see
 # installer/FaceLoginSetup/internal/com.go). Both contexts run with a restricted

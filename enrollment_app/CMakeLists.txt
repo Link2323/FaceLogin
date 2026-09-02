@@ -7,6 +7,8 @@ add_executable(FaceLoginConsole
     ${CMAKE_SOURCE_DIR}/face_service/onnx_models.cpp
     ${CMAKE_SOURCE_DIR}/face_service/credential_store.cpp
 )
+facelogin_add_version_rc(FaceLoginConsole VFT_APP
+    "FaceLogin enrollment console" FaceLoginConsole.exe)
 
 target_link_libraries(FaceLoginConsole PRIVATE
     facelogin_common

@@ -1,6 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
 project(FaceLogin VERSION 1.8.0 LANGUAGES CXX)
 
+# Stamps a VERSIONINFO resource (project() version) into a Windows target.
+# Usage after add_executable/add_library:
+#   facelogin_add_version_rc(<target> VFT_APP|VFT_DLL "<description>" <original.exe>)
+function(facelogin_add_version_rc target filetype description originalname)
+    set(RC_FILEVERSION ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0)
+    set(RC_FILEVERSION_STR ${PROJECT_VERSION})
+    set(RC_FILETYPE ${filetype})
+    set(RC_FILEDESCRIPTION ${description})
+    set(RC_INTERNALNAME ${target})
+    set(RC_ORIGINALFILENAME ${originalname})
+    configure_file(${PROJECT_SOURCE_DIR}/version.rc.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/version_${target}.rc @ONLY)
+    target_sources(${target} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/version_${target}.rc)
+endfunction()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

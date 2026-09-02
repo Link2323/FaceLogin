@@ -12,6 +12,9 @@ add_executable(FaceLoginService
     credential_store.cpp
 )
 
+facelogin_add_version_rc(FaceLoginService VFT_APP
+    "FaceLogin authentication service" FaceLoginService.exe)
+
 target_link_libraries(FaceLoginService PRIVATE
     facelogin_common
 
