@@ -148,6 +148,16 @@ body{
 .cam-picker .btn{margin-top:0}
 .cam-picker .btn-secondary{margin-top:8px}
 
+/* ========== In-app modal (confirm/prompt replacement) ========== */
+/* Reuses the .cam-picker card; OK stays the dark primary — no red variant. */
+.app-modal .modal-actions{display:flex;gap:8px;margin-top:16px}
+.app-modal .modal-actions .btn{margin-top:0;flex:1}
+.app-modal input[type=text]{width:100%;border:1px solid #e5e7eb;padding:8px 12px;
+  font-size:13px;outline:none;background:#f9fafb;color:#1f2937}
+.app-modal input[type=text]:focus{border-color:#9ca3af;background:#fff}
+/* Demoted SID readout: diagnostic value, not a form field — one small line. */
+.sid-note{font-size:11px;color:#9ca3af;margin:-6px 0 12px;word-break:break-all}
+
 /* ========== Footer ========== */
 .footer{width:100%;max-width:640px;padding:8px 0;flex-shrink:0;border-top:1px solid #f3f4f6}
 .footer p{font-size:11px;color:#d1d5db}
@@ -214,10 +224,7 @@ body{
       <label>账户类型</label>
       <input type="text" id="fld-acct-type" readonly>
     </div>
-    <div class="field">
-      <label>SID</label>
-      <input type="text" id="fld-sid" readonly>
-    </div>
+    <p class="sid-note" id="fld-sid-note">SID：<span id="fld-sid"></span></p>
     <div class="field">
       <label id="fld-pass-label">Windows 密码</label>
       <input type="password" id="fld-pass" placeholder="输入你的登录密码" autofocus>
@@ -284,10 +291,7 @@ body{
       <label>用户名 (UPN)</label>
       <input type="text" id="append-user" readonly>
     </div>
-    <div class="field">
-      <label>SID</label>
-      <input type="text" id="append-sid" readonly>
-    </div>
+    <p class="sid-note" id="append-sid-note">SID：<span id="append-sid"></span></p>
     <div class="field" id="append-label-field">
       <label>给这张脸命名</label>
       <input type="text" id="append-face-label" placeholder="可留空，默认如“脸N”" maxlength="32">
@@ -441,6 +445,20 @@ body{
     <button class="btn btn-secondary" id="refresh-dismiss" onclick="onRefreshDismiss()">
       暂不处理
     </button>
+  </div>
+</div>
+
+<!-- In-app modal: replaces native confirm()/prompt(), which render Chromium's
+     out-of-place script dialogs. Callback-driven — see showAppModal(). -->
+<div class="cam-picker-overlay" id="modal-overlay">
+  <div class="cam-picker app-modal">
+    <h2 id="modal-title"></h2>
+    <p class="dim" id="modal-message" style="display:none"></p>
+    <input type="text" id="modal-input" style="display:none" maxlength="32">
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="modal-cancel" onclick="onModalCancel()">取消</button>
+      <button class="btn btn-primary" id="modal-ok" onclick="onModalOk()">确定</button>
+    </div>
   </div>
 </div>
 
@@ -1015,7 +1033,11 @@ function finishCapture() {
   document.getElementById('screen-pwd').classList.add('active');
   try { document.getElementById('fld-user').value = H.GetUsername(); } catch(e) {}
   try { document.getElementById('fld-acct-type').value = H.GetAccountType(); } catch(e) {}
-  try { document.getElementById('fld-sid').value = H.GetUserSid(); } catch(e) {}
+  try {
+    var sid = H.GetUserSid();
+    document.getElementById('fld-sid').textContent = sid;
+    document.getElementById('fld-sid-note').style.display = sid ? '' : 'none';
+  } catch(e) {}
   try { document.getElementById('fld-face-label').value = ''; } catch(e) {}
 
   // Label the password field by account type: MSA accounts use the
@@ -1068,6 +1090,60 @@ function loadFaces() {
   } catch(e) { showBanner('faces', '读取人脸失败: ' + e.message, 'error'); }
 }
 
+// ================================================================
+// In-app modal engine: showAppModal({title, message, okText, cancelText,
+// danger, input, value, onOk(value), onCancel}). Hide-then-callback so a
+// handler may open another dialog if it needs to.
+// ================================================================
+var modalCb = null;
+
+function showAppModal(opts) {
+  modalCb = { onOk: opts.onOk || null, onCancel: opts.onCancel || null };
+  document.getElementById('modal-title').textContent = opts.title || '';
+  var msg = document.getElementById('modal-message');
+  msg.textContent = opts.message || '';
+  msg.style.display = opts.message ? '' : 'none';
+  var input = document.getElementById('modal-input');
+  input.style.display = opts.input ? '' : 'none';
+  input.value = opts.value || '';
+  document.getElementById('modal-ok').textContent = opts.okText || '确定';
+  document.getElementById('modal-cancel').textContent = opts.cancelText || '取消';
+  document.getElementById('modal-overlay').classList.add('active');
+  if (opts.input) { input.focus(); input.select(); }
+}
+
+function hideAppModal() {
+  document.getElementById('modal-overlay').classList.remove('active');
+}
+
+function onModalOk() {
+  var value = document.getElementById('modal-input').value;
+  var cb = modalCb;
+  hideAppModal();
+  modalCb = null;
+  if (cb && cb.onOk) cb.onOk(value);
+}
+
+function onModalCancel() {
+  var cb = modalCb;
+  hideAppModal();
+  modalCb = null;
+  if (cb && cb.onCancel) cb.onCancel();
+}
+
+// Modal keyboard: Enter confirms (including from the text input), Esc cancels.
+(function() {
+  document.getElementById('modal-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); onModalOk(); }
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' &&
+        document.getElementById('modal-overlay').classList.contains('active')) {
+      onModalCancel();
+    }
+  });
+})();
+
 function goAddFace() {
   var faceCount = 0;
   try { faceCount = H.GetFaceCount(); } catch(e) {}
@@ -1076,16 +1152,23 @@ function goAddFace() {
 
   // Multi-angle re-enrollment REPLACES all old faces — destructive, so confirm
   // whenever the account already has faces (not only at the per-account cap).
-  // Declining switches to single-angle append (auto-picks the missing angle).
+  // The two buttons ARE the two paths: declining switches to single-angle
+  // append (auto-picks the missing angle), so both get explicit labels.
   if (multi && faceCount > 0) {
-    if (confirm('当前账号已有 ' + faceCount + ' 张人脸。多角度录入将覆盖全部旧脸（正面/左转/右转各一张）。' + '\n\n' + '「确定」覆盖重录，「取消」改为单角度追加。')) {
-      switchTab('cam');
-      showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
-      return;
-    }
-    try { document.getElementById('chk-multi-angle').checked = false; } catch(e) {}
-    switchTab('cam');
-    showBanner('cam', '点击「开始采集」即可补录缺失角度（正面/左转/右转）。', 'ok', 6000);
+    showAppModal({
+      title: '覆盖重录？',
+      message: '当前账号已有 ' + faceCount + ' 张人脸。多角度录入将覆盖全部旧脸（正面/左转/右转各一张）。',
+      okText: '覆盖重录', cancelText: '单角度追加',
+      onOk: function() {
+        switchTab('cam');
+        showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
+      },
+      onCancel: function() {
+        try { document.getElementById('chk-multi-angle').checked = false; } catch(e) {}
+        switchTab('cam');
+        showBanner('cam', '点击「开始采集」即可补录缺失角度（正面/左转/右转）。', 'ok', 6000);
+      }
+    });
     return;
   }
 
@@ -1093,9 +1176,15 @@ function goAddFace() {
   // multi-angle replacement instead.
   if (faceCount >= 3) {
     try { document.getElementById('chk-multi-angle').checked = true; } catch(e) {}
-    if (!confirm('当前账号已有 3 张人脸，已达上限。继续将使用多角度录入（正面/左转/右转）覆盖全部旧脸。' + '\n\n' + '是否覆盖？')) return;
-    switchTab('cam');
-    showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
+    showAppModal({
+      title: '覆盖重录？',
+      message: '当前账号已有 3 张人脸，已达上限。继续将使用多角度录入（正面/左转/右转）覆盖全部旧脸。',
+      okText: '覆盖重录',
+      onOk: function() {
+        switchTab('cam');
+        showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
+      }
+    });
     return;
   }
 
@@ -1104,41 +1193,58 @@ function goAddFace() {
 }
 
 function onDeleteFace(id) {
-  if (!confirm('确定删除这张脸吗？')) return;
-  try {
-    if (H.DeleteFace(id)) {
-      showBanner('faces', '已删除。', 'ok');
-      loadFaces();
-    } else {
-      showBanner('faces', '删除失败，请重试。', 'error');
+  showAppModal({
+    title: '删除这张脸？',
+    message: '删除后不可恢复。',
+    okText: '删除',
+    onOk: function() {
+      try {
+        if (H.DeleteFace(id)) {
+          showBanner('faces', '已删除。', 'ok');
+          loadFaces();
+        } else {
+          showBanner('faces', '删除失败，请重试。', 'error');
+        }
+      } catch(e) { showBanner('faces', '删除失败: ' + e.message, 'error'); }
     }
-  } catch(e) { showBanner('faces', '删除失败: ' + e.message, 'error'); }
+  });
 }
 
 function onRenameFace(id) {
-  var name = prompt('为这张脸命名：');
-  if (name === null) return;  // cancelled
-  name = name.trim();
-  try {
-    if (H.RenameFace(id, name)) {
-      showBanner('faces', '已重命名。', 'ok');
-      loadFaces();
-    } else {
-      showBanner('faces', '重命名失败，请重试。', 'error');
+  showAppModal({
+    title: '为这张脸命名',
+    input: true,
+    okText: '保存',
+    onOk: function(name) {
+      name = (name || '').trim();
+      try {
+        if (H.RenameFace(id, name)) {
+          showBanner('faces', '已重命名。', 'ok');
+          loadFaces();
+        } else {
+          showBanner('faces', '重命名失败，请重试。', 'error');
+        }
+      } catch(e) { showBanner('faces', '重命名失败: ' + e.message, 'error'); }
     }
-  } catch(e) { showBanner('faces', '重命名失败: ' + e.message, 'error'); }
+  });
 }
 
 function onClearAllFaces() {
-  if (!confirm('确定清空当前账号的全部人脸吗？将无法使用人脸登录。')) return;
-  try {
-    if (H.ClearAllFaces()) {
-      showBanner('faces', '已清空全部人脸。', 'ok');
-      loadFaces();
-    } else {
-      showBanner('faces', '清空失败，请重试。', 'error');
+  showAppModal({
+    title: '清空全部人脸？',
+    message: '清空后将无法使用人脸登录。',
+    okText: '清空',
+    onOk: function() {
+      try {
+        if (H.ClearAllFaces()) {
+          showBanner('faces', '已清空全部人脸。', 'ok');
+          loadFaces();
+        } else {
+          showBanner('faces', '清空失败，请重试。', 'error');
+        }
+      } catch(e) { showBanner('faces', '清空失败: ' + e.message, 'error'); }
     }
-  } catch(e) { showBanner('faces', '清空失败: ' + e.message, 'error'); }
+  });
 }
 
 // ================================================================
@@ -1262,7 +1368,11 @@ function showAppendScreen(faceCount, isReplace) {
   document.getElementById('screen-cam').classList.remove('active');
   document.getElementById('screen-append').classList.add('active');
   try { document.getElementById('append-user').value = H.GetUsername(); } catch(e) {}
-  try { document.getElementById('append-sid').value = H.GetUserSid(); } catch(e) {}
+  try {
+    var appendSid = H.GetUserSid();
+    document.getElementById('append-sid').textContent = appendSid;
+    document.getElementById('append-sid-note').style.display = appendSid ? '' : 'none';
+  } catch(e) {}
   try { document.getElementById('append-face-label').value = ''; } catch(e) {}
 
   if (isReplace) {
