@@ -457,6 +457,7 @@ body{
     <input type="text" id="modal-input" style="display:none" maxlength="32">
     <div class="modal-actions">
       <button class="btn btn-secondary" id="modal-cancel" onclick="onModalCancel()">取消</button>
+      <button class="btn btn-secondary" id="modal-mid" onclick="onModalMid()" style="display:none"></button>
       <button class="btn btn-primary" id="modal-ok" onclick="onModalOk()">确定</button>
     </div>
   </div>
@@ -1113,13 +1114,15 @@ function loadFaces() {
 
 // ================================================================
 // In-app modal engine: showAppModal({title, message, okText, cancelText,
-// danger, input, value, onOk(value), onCancel}). Hide-then-callback so a
-// handler may open another dialog if it needs to.
+// midText, onMid, onOk(value), onCancel}). midText renders an extra secondary
+// button (e.g. the「单角度追加」alternative). Hide-then-callback so a handler
+// may open another dialog if it needs to.
 // ================================================================
 var modalCb = null;
 
 function showAppModal(opts) {
-  modalCb = { onOk: opts.onOk || null, onCancel: opts.onCancel || null };
+  modalCb = { onOk: opts.onOk || null, onCancel: opts.onCancel || null,
+              onMid: opts.onMid || null };
   document.getElementById('modal-title').textContent = opts.title || '';
   var msg = document.getElementById('modal-message');
   msg.textContent = opts.message || '';
@@ -1129,6 +1132,9 @@ function showAppModal(opts) {
   input.value = opts.value || '';
   document.getElementById('modal-ok').textContent = opts.okText || '确定';
   document.getElementById('modal-cancel').textContent = opts.cancelText || '取消';
+  var mid = document.getElementById('modal-mid');
+  mid.style.display = opts.midText ? '' : 'none';
+  mid.textContent = opts.midText || '';
   document.getElementById('modal-overlay').classList.add('active');
   if (opts.input) { input.focus(); input.select(); }
 }
@@ -1152,6 +1158,13 @@ function onModalCancel() {
   if (cb && cb.onCancel) cb.onCancel();
 }
 
+function onModalMid() {
+  var cb = modalCb;
+  hideAppModal();
+  modalCb = null;
+  if (cb && cb.onMid) cb.onMid();
+}
+
 // Modal keyboard: Enter confirms (including from the text input), Esc cancels.
 (function() {
   document.getElementById('modal-input').addEventListener('keydown', function(e) {
@@ -1173,22 +1186,24 @@ function goAddFace() {
 
   // Multi-angle re-enrollment REPLACES all old faces — destructive, so confirm
   // whenever the account already has faces (not only at the per-account cap).
-  // The two buttons ARE the two paths: declining switches to single-angle
-  // append (auto-picks the missing angle), so both get explicit labels.
+  // Three explicit choices: replace, append a single angle, or back out —
+  // "覆盖/追加都要继续" vs "什么都不做" must be separately clickable.
   if (multi && faceCount > 0) {
     showAppModal({
       title: '覆盖重录？',
       message: '当前账号已有 ' + faceCount + ' 张人脸。多角度录入将覆盖全部旧脸（正面/左转/右转各一张）。',
-      okText: '覆盖重录', cancelText: '单角度追加',
-      onOk: function() {
-        switchTab('cam');
-        showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
-      },
-      onCancel: function() {
+      okText: '覆盖重录',
+      midText: '单角度追加',
+      onMid: function() {
         try { document.getElementById('chk-multi-angle').checked = false; } catch(e) {}
         switchTab('cam');
         showBanner('cam', '点击「开始采集」即可补录缺失角度（正面/左转/右转）。', 'ok', 6000);
+      },
+      onOk: function() {
+        switchTab('cam');
+        showBanner('cam', '多角度重录入：将覆盖当前账号全部旧脸（正面/左转/右转）。', 'ok', 6000);
       }
+      // 取消: plain dismiss — no side effect, user stays on the faces screen.
     });
     return;
   }
