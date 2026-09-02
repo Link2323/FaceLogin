@@ -135,8 +135,12 @@ int WebviewHost::Run() {
     int scrW = GetSystemMetrics(SM_CXSCREEN), scrH = GetSystemMetrics(SM_CYSCREEN);
 
     // Get the monitor DPI so we can convert CSS pixels to physical pixels.
-    // CSS layout needs ~660 CSS px vertically (viewport 360 + chrome ~240
-    // + progress bar/multi-angle checkbox + breathing room).
+    // CSS layout needs ~600 CSS px vertically: the viewport no longer stretches
+    // to absorb spare height (that read as black/blur bands), so the window is
+    // sized to the cam page's measured capture-state height instead — header
+    // 82 + tabs 27 + 16:9 viewport 360 + checkbox 18 + button 39 + progress
+    // 13 + footer 31 + bottom padding 12 ≈ 596, +4 slack. Other screens
+    // (settings/logs/faces) scroll internally and fit fine at this height.
     HDC hdc = GetDC(nullptr);
     int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
     ReleaseDC(nullptr, hdc);
@@ -144,11 +148,11 @@ int WebviewHost::Run() {
 
     // Desired client area in CSS pixels:
     //   Width: just above content max-width (640px) for comfortable margin
-    //   Height: 660 CSS px covers viewport(360) + chrome(234) + progress
-    //          bar/multi-angle controls + breathing room without scrollbars
+    //   Height: fits the cam page capture state exactly (no dead space below
+    //          the capture button, no viewport stretch, no scrollbars)
     int clientWCss = 680;
 
-    int clientHCss = 660;  // covers viewport + chrome + progress bar without scrollbars
+    int clientHCss = 600;  // cam page capture-state height (596 measured) + 4
 
     // Convert to physical pixels for the window manager
     int clientW = static_cast<int>(clientWCss * dpiScale);

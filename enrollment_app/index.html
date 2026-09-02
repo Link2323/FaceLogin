@@ -35,7 +35,7 @@ body{
 .cam-body{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;
   width:100%;max-width:640px}
 .cam-viewport{position:relative;width:100%;aspect-ratio:16/9;min-height:180px;
-  flex:1 1 auto;overflow:hidden;border-radius:2px;background:#e5e7eb}
+  flex:0 1 auto;overflow:hidden;border-radius:2px;background:#e5e7eb}
 .cam-viewport canvas{position:absolute;top:0;left:0;width:100%;height:100%}
 #face-canvas{z-index:2}
 /* Status / guidance caption overlaid on the video: the eye is already on the
@@ -541,28 +541,45 @@ function containMapping(srcW, srcH, cw, ch) {
   return { sx: s, sy: s, ox: ox, oy: oy };
 }
 
-// Draw the background image AND its paired overlay (same frame). The background
-// fills the viewport with contain-fit (keeps aspect ratio, letterboxes), and
-// the overlay uses the SAME contain mapping so the face box/landmarks always
-// line up with the visible face.
+// Draw the background image AND its paired overlay (same frame). The frame is
+// contain-fit over a blurred cover-scaled backdrop, and the overlay uses the
+// SAME contain mapping so the face box/landmarks always line up with the
+// visible face.
 function drawBackgroundAndOverlay() {
   var c = document.getElementById('bg-canvas');
   var vp = document.getElementById('viewport');
-  var cw = vp.clientWidth, ch = vp.clientHeight;
+  // The viewport stays a flex-fitted full area; the frame is drawn contain-fit
+  // on top of a blurred, darkened cover-scaled copy of itself. Ratio mismatch
+  // (portrait/rotated cameras, stretched box) must leave padding SOMEWHERE —
+  // solid black/white reads as broken letterboxing, so the padding is filled
+  // with a continuation of the picture instead: no hard bars, no crop.
+  var srcW = faceImg.naturalWidth || 1280;
+  var srcH = faceImg.naturalHeight || 720;
   // Backing store at PHYSICAL resolution (devicePixelRatio), drawing coords
   // still CSS px — without this a 125/150% display upscales the 1x bitmap and
   // the overlay text goes fuzzy. CSS pins both canvases to 100% of the
   // viewport, so a larger bitmap renders sharper, never larger.
   var dpr = window.devicePixelRatio || 1;
+  var cw = vp.clientWidth, ch = vp.clientHeight;
   c.width = Math.round(cw * dpr);
   c.height = Math.round(ch * dpr);
-  var srcW = faceImg.naturalWidth || 1280;
-  var srcH = faceImg.naturalHeight || 720;
   var m = containMapping(srcW, srcH, cw, ch);
   var ctx = c.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, cw, ch);       // letterbox bars
+  ctx.fillRect(0, 0, cw, ch);
+  if (faceImg.naturalWidth > 0) {
+    // Backdrop: cover-scale, ~15% oversized so the blur never samples past the
+    // image edge into transparency, then darken so the sharp image reads on top.
+    ctx.save();
+    ctx.filter = 'blur(24px)';
+    var cover = Math.max(cw / srcW, ch / srcH) * 1.15;
+    ctx.drawImage(faceImg, (cw - srcW * cover) / 2, (ch - srcH * cover) / 2,
+                  srcW * cover, srcH * cover);
+    ctx.restore();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fillRect(0, 0, cw, ch);
+  }
   ctx.drawImage(faceImg, m.ox, m.oy, srcW * m.sx, srcH * m.sy);
   drawOverlay(lastFacesJson);
 }
