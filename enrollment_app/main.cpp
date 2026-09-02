@@ -48,6 +48,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     if (EnsureAdmin()) return 0;
 
+    // Single instance: a second console would fight over the camera and show
+    // its own device picker. The mutex dies with the process, so a crash can
+    // never leave a stale lock behind. If mutex creation itself fails, run
+    // unprotected rather than blocking the app.
+    HANDLE instanceMutex = CreateMutexW(nullptr, TRUE,
+                                        L"Local\\FaceLoginConsoleInstance");
+    if (instanceMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(nullptr, L"FaceLogin 控制台已在运行。",
+                    L"FaceLogin Console", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        CloseHandle(instanceMutex);
+        return 0;
+    }
+
     // Check models exist
     std::wstring modelsDir;
     {

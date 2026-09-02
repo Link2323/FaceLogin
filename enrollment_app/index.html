@@ -734,6 +734,23 @@ function drawOverlay(json) {
 
 function switchTab(name) {
   if (currentTab === name) return;
+
+  // A capture in flight owns the DirectShow graph — pausing the preview to
+  // idle the camera would abort it. Block the switch; cancel first instead.
+  if (currentTab === 'cam' && (capturing || capturePoll)) {
+    showBanner('cam', '正在采集，请先取消采集再切换页面。', 'error');
+    return;
+  }
+
+  // Camera lifecycle: preview (and its 33ms frame loop) only runs while the
+  // cam screen is visible — switching away powers the camera off instead of
+  // keeping it live behind screens that need no frames.
+  if (currentTab === 'cam') {
+    viewing = false;
+    clearTimeout(timer);
+    try { H.StopPreview(); } catch(e) {}
+  }
+
   var screens = {cam: 'screen-cam', faces: 'screen-faces', settings: 'screen-settings', logs: 'screen-logs'};
   var newScreen = document.getElementById(screens[name]);
   // Fade out current screen
@@ -745,6 +762,10 @@ function switchTab(name) {
   var allTabs = document.querySelectorAll('.tabs span');
   for (var i = 0; i < allTabs.length; i++) {
     allTabs[i].classList.toggle('active', allTabs[i].textContent === tabNames[name]);
+  }
+  if (name === 'cam') {
+    // Idempotent server-side (no-op if already running).
+    try { if (H.StartPreview()) { viewing = true; renderFrame(); } } catch(e) {}
   }
   if (name === 'settings') loadSettings();
   if (name === 'faces') loadFaces();
