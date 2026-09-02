@@ -54,8 +54,13 @@ func main() {
 
 	app := NewApp()
 
+	title := "FaceLogin 安装程序"
+	if uninstallerBuild {
+		title = "FaceLogin 卸载程序"
+	}
+
 	err := wails.Run(&options.App{
-		Title:            "FaceLogin 安装程序",
+		Title:            title,
 		Width:            640,
 		Height:           520,
 		WindowStartState: options.Normal,

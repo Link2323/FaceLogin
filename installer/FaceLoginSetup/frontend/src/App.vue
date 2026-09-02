@@ -174,7 +174,7 @@ async function doUninstall() {
     <!-- Header -->
     <div class="px-8 pt-8 pb-2">
       <h1 class="text-2xl font-light tracking-tight text-gray-900">FaceLogin</h1>
-      <p class="text-sm text-gray-400 font-light">人脸识别登录系统 · 安装程序</p>
+      <p class="text-sm text-gray-400 font-light">人脸识别登录系统 · {{ showInstall ? '安装程序' : '卸载程序' }}</p>
     </div>
 
     <!-- Mode Tabs (hidden in the uninstaller build) -->
