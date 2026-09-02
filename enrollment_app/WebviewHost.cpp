@@ -2,6 +2,7 @@
 #include "EnrollmentWizard.h"
 #include "../common/logger.h"
 #include "resource.h"
+#include "version.h"
 #include <wtsapi32.h>
 #include <shlobj.h>
 
@@ -91,6 +92,15 @@ STDMETHODIMP CtrlCallback::Invoke(HRESULT hr, ICoreWebView2Controller* ctrl) {
         FACELOGIN_WARN(L"Failed to load HTML from resource, using fallback");
     }
 
+    // Stamp the build version into the page — the footer placeholder in
+    // index.html reads it. Compile-time constant from version.h (CMake
+    // project() version); no IPC needed.
+    const std::string versionPh = "__APP_VERSION__";
+    for (size_t pos = htmlContent.find(versionPh); pos != std::string::npos;
+         pos = htmlContent.find(versionPh, pos + strlen(FACELOGIN_APP_VERSION))) {
+        htmlContent.replace(pos, versionPh.size(), FACELOGIN_APP_VERSION);
+    }
+
     int wlen = MultiByteToWideChar(CP_UTF8, 0, htmlContent.c_str(), -1, nullptr, 0);
     std::wstring whtml(wlen, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, htmlContent.c_str(), -1, &whtml[0], wlen);
@@ -164,7 +174,7 @@ int WebviewHost::Run() {
     int actualWndW = rc.right - rc.left;
     int actualWndH = rc.bottom - rc.top;
 
-    m_hWnd = CreateWindowExW(0, WND_CLASS, L"FaceLogin Console",
+    m_hWnd = CreateWindowExW(0, WND_CLASS, L"FaceLogin Console v" FACELOGIN_APP_VERSION_W,
         style,
         (scrW - actualWndW)/2, (scrH - actualWndH)/2, actualWndW, actualWndH,
         nullptr, nullptr, m_hInstance, this);

@@ -9,6 +9,8 @@ add_executable(FaceLoginConsole
 )
 facelogin_add_version_rc(FaceLoginConsole VFT_APP
     "FaceLogin enrollment console" FaceLoginConsole.exe)
+configure_file(version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h @ONLY)
+target_include_directories(FaceLoginConsole PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(FaceLoginConsole PRIVATE
     facelogin_common
