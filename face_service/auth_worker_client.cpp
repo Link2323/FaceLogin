@@ -1,5 +1,7 @@
 #include "auth_worker_client.h"
 
+#include "timer_resolution.h"
+
 #include <chrono>
 #include <cstdint>
 #include <utility>
@@ -241,6 +243,14 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
 
     const uint64_t requestId = m_nextRequestId++;
     const auto authStart = std::chrono::steady_clock::now();
+    // This loop picks the worker's messages up via PeekNamedPipe+Sleep(1)
+    // polling; on the default ~15.6 ms clock tick that Sleep actually waits a
+    // full tick (measured 2026-09-03: every pickup averages half a tick and
+    // the terminal waits a whole one, ~40 ms total on the dev machine). Raise
+    // the timer resolution for the authentication window; the guard releases
+    // on every return path. The preloaded worker raises its own — see
+    // RunAuthenticationWorker.
+    const ScopedTimerResolution fineTimer(1);
     if (!m_channel.Write(auth_worker::MessageType::StartAuth, requestId)) {
         result.errorMessage = L"认证工作进程通信失败";
         Stop();

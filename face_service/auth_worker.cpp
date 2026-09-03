@@ -2,6 +2,7 @@
 
 #include "auth_pipeline.h"
 #include "auth_worker_protocol.h"
+#include "timer_resolution.h"
 #include "webcam_capture_dshow.h"
 #include "onnx_models.h"
 #include "model_failure.h"
@@ -213,6 +214,16 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     // from outside this process; the camera release/failure snapshots below
     // have no parent-side equivalent and stay here.
     if (!channel.Write(MessageType::Ready, 0)) return ERROR_BROKEN_PIPE;
+
+    // The idle command loop picks AUTH_START up via PeekNamedPipe+Sleep(5)
+    // polling; on the default ~15.6 ms tick that Sleep actually waits a full
+    // tick (measured 2026-09-03: mean 6.6 ms dev / 9.1 ms slow machine, paid
+    // before the camera even starts). Raise the timer resolution from here to
+    // process exit: the one-shot worker terminates right after its terminal
+    // message (TerminateProcess skips this destructor — the kernel reclaims
+    // the resolution request at process exit), and on Win11 the raise only
+    // affects this process, not the locked system's power draw.
+    const ScopedTimerResolution fineTimer(1);
 
     // The worker is preloaded while the desktop is locked. It handles exactly
     // one AUTH_START, then exits so camera-driver and heap high-water are
