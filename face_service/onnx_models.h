@@ -31,14 +31,20 @@ public:
     bool Initialize(const std::wstring& modelPath);
 
     // Compute 512-D embedding from a face chip (already aligned, 112x112 RGB).
-    // Returns empty vector on failure.
-    std::vector<float> ComputeEmbedding(const FrameImage& faceChip);
+    // Returns empty vector on failure. When outPreNorm is non-null it receives
+    // the embedding's L2 norm BEFORE normalization (unchanged on failure) — a
+    // MagFace-style quality signal (higher norm = cleaner chip). The returned
+    // vector is always unit-length, so the raw norm is unrecoverable from the
+    // return value alone.
+    std::vector<float> ComputeEmbedding(const FrameImage& faceChip,
+                                        float* outPreNorm = nullptr);
 
     // Convenience: compute embedding from a full frame + the 5 SCRFD
     // keypoints (source-pixel coordinates). Aligns to 112×112 internally
     // via a similarity transform (see face_align.h).
     std::vector<float> ComputeEmbedding(const FrameImage& image,
-                                        const float kps[10]);
+                                        const float kps[10],
+                                        float* outPreNorm = nullptr);
 
     bool IsInitialized() const { return m_initialized; }
 

@@ -283,6 +283,22 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
     }
 }
 
+// Progressive-learning phase 0 instrumentation: static norm of every stored
+// template at load/reload. Enrollment averages 5 unit-length samples without
+// renormalizing, so the stored norm (<1) tracks how spread the enrollment
+// frames were; changes over time would reveal template drift.
+static void LogTemplateNorms(const CredentialStore& store, const wchar_t* when) {
+    for (const auto& u : store.GetUsers()) {
+        for (const auto& f : u.faces) {
+            double sq = 0.0;
+            for (float v : f.embedding) sq += static_cast<double>(v) * v;
+            FACELOGIN_INFO(L"Template stats [%s]: user=%s face#%u(%s) dim=%zu norm=%.4f",
+                           when, u.username.c_str(), f.id, f.label.c_str(),
+                           f.embedding.size(), std::sqrt(sq));
+        }
+    }
+}
+
 bool FaceService::Initialize() {
     // Resolve the data directory through the security whitelist check
     // (security #3 — DataPath registry redirection defense). The registry
@@ -327,6 +343,7 @@ bool FaceService::Initialize() {
         return false;
     }
     FACELOGIN_INFO(L"Loaded %zu registered user(s)", m_store->GetUserCount());
+    LogTemplateNorms(*m_store, L"load");
 
     m_pipeServer = std::make_unique<PipeServer>();
 
@@ -734,6 +751,7 @@ void FaceService::Run() {
                 SendControlResponse(ipc::MSG_RELOAD_OK);
                 m_pipeServer->Disconnect();
                 FACELOGIN_INFO(L"Database reloaded");
+                LogTemplateNorms(*m_store, L"reload");
             } else {
                 SendControlResponse(ipc::MSG_CONFIG_RELOAD_ERROR);
                 m_pipeServer->Disconnect();

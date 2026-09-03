@@ -816,14 +816,20 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
             }
 
             // Compute the embedding with InsightFace ONNX (the only recognizer).
-            // Store the FULL 512-D embedding (no truncation).
-            auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, onnxDet->kps);
+            // Store the FULL 512-D embedding (no truncation). emb_norm is the
+            // pre-normalization L2 norm (quality signal, progressive-learning
+            // phase 0 calibration).
+            float embNorm = 0.0f;
+            auto onnxEmb = m_onnxRecognizer->ComputeEmbedding(frame, onnxDet->kps,
+                                                              &embNorm);
             if (onnxEmb.empty()) {
                 if (++failCount > 600) { m_capturing = false; break; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
             std::vector<float> emb = onnxEmb;
+            FACELOGIN_INFO(L"Enrollment sample: angle=%d yaw=%.0f pad=%.3f emb_norm=%.3f",
+                           angleIndex, m_lastYaw.load(), samplePadScore, embNorm);
 
             failCount = 0;
             m_embeddings.push_back(std::move(emb));

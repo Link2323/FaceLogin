@@ -131,7 +131,7 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
 }
 
 std::vector<float> OnnxRecognizer::ComputeEmbedding(
-    const FrameImage& faceChip) {
+    const FrameImage& faceChip, float* outPreNorm) {
     if (!m_initialized) return {};
 
     try {
@@ -178,6 +178,7 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
         float norm = 0.0f;
         for (float v : embedding) norm += v * v;
         norm = std::sqrt(norm);
+        if (outPreNorm) *outPreNorm = norm;
         if (norm > 1e-8f) {
             for (float& v : embedding) v /= norm;
         }
@@ -190,12 +191,12 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
 }
 
 std::vector<float> OnnxRecognizer::ComputeEmbedding(
-    const FrameImage& image, const float kps[10]) {
+    const FrameImage& image, const float kps[10], float* outPreNorm) {
     // Align via 5-point similarity transform (InsightFace convention), then
     // ONNX infer. No landmark model involved — SCRFD provides the keypoints.
     FrameImage faceChip;
     if (!AlignFace5(image, kps, 112, faceChip)) return {};
-    return ComputeEmbedding(faceChip);
+    return ComputeEmbedding(faceChip, outPreNorm);
 }
 
 // ============================================================================

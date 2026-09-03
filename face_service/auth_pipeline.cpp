@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <future>
 #include <thread>
 
@@ -59,6 +60,25 @@ AuthPipelineResult AuthPipeline::Run() {
     }
 
     try {
+        // Progressive-learning phase 0 instrumentation: per-round
+        // pre-normalization embedding norms (quality signal), one line per
+        // round at any exit. RAII so cancel/timeout/attack paths log too.
+        struct NormLog {
+            std::vector<float> norms;
+            void add(float n) { if (norms.size() < 16) norms.push_back(n); }
+            ~NormLog() {
+                if (norms.empty()) return;
+                wchar_t buf[16 * 8];
+                size_t off = 0;
+                for (size_t i = 0; i < norms.size() && off + 8 < ARRAYSIZE(buf); i++) {
+                    off += static_cast<size_t>(swprintf(buf + off, 8, L"%.3f,", norms[i]));
+                }
+                if (off > 0 && buf[off - 1] == L',') buf[--off] = L'\0';
+                FACELOGIN_INFO(L"Embedding norms pre-normalize (binding attempts): [%s]",
+                               buf);
+            }
+        } normLog;
+
         const auto pipelineStart = std::chrono::steady_clock::now();
         bool firstFrameLogged = false;
         const auto grabFrame = [this, pipelineStart, &firstFrameLogged](
@@ -331,12 +351,15 @@ AuthPipelineResult AuthPipeline::Run() {
             });
 
             if (isAnchor || isConsensusFrame) {
-                auto embedding = m_recognizer.ComputeEmbedding(cur.frame, cur.det->kps);
+                float preNorm = 0.0f;
+                auto embedding = m_recognizer.ComputeEmbedding(cur.frame, cur.det->kps,
+                                                               &preNorm);
                 if (embedding.empty()) {
                     scoreFuture.get();
                     std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     continue;
                 }
+                normLog.add(preNorm);
 
                 const BindingDecision decision =
                     m_callbacks.verifyBinding(embedding, bindingCount);
