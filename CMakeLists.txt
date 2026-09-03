@@ -67,6 +67,7 @@ function(add_development_tool directory target)
 endfunction()
 
 add_development_tool(tools/pad_calibration PadCalibration)
+add_development_tool(tools/pad_score PadScore)
 add_development_tool(tools/embedding_test EmbeddingTest)
 add_development_tool(tools/camera_lifecycle CameraLifecycleTest)
 add_development_tool(tools/pipe_lifecycle PipeLifecycleTest)
