@@ -45,10 +45,8 @@ package-lock.json
 # Python cache
 __pycache__/
 
-# Claude Code
+# Claude Code 本地会话目录（AGENTS.md/CLAUDE.md 守则入口随仓库公开）
 .claude/
-CLAUDE.md
-AGENTS.md
 
 # Wails
 installer/FaceLoginSetup/build/
@@ -71,5 +69,10 @@ Thumbs.db
 # Star history data (workflow-generated, lives on star-history branch)
 .star-history-data/
 
-# 本地文档（技术文章、配图等），不发布到仓库
-docs/
+# 内部文档不发布：待办/安全清单（避免公开攻击面备忘）、进行中实验方案、已交付的历史设计稿
+# 其余 docs/（构建/契约/模块/设计/运维/标定/性能与迁移记录）随仓库公开
+docs/todo.md
+docs/unlock-flow-security-todo.md
+docs/progressive-learning.md
+docs/progressive-learning-v2.md
+docs/side-face-plan-v2.md
