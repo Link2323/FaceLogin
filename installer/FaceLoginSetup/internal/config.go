@@ -29,8 +29,8 @@ func EnsureConfigDefaults(configPath string) error {
 		"camera_device":             "",
 		"progressive_learning":      true,
 		"learning_alpha":            0.10,
-		"learning_distance_gate":    0.55,
-		"learning_norm_floor":       20.9,
+		"learning_distance_gate":    0.60,
+		"learning_norm_floor":       19.1,
 		"learning_min_interval_sec": 60,
 	}
 	out, err := json.MarshalIndent(cfg, "", "  ")

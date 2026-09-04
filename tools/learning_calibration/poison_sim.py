@@ -14,7 +14,7 @@
 import math
 import sys
 
-GATE = 0.55      # learning_distance_gate(生产默认)
+GATE = 0.60      # learning_distance_gate 上限(2026-09-03 修订;实际门=min(用户纪元 p20, 该值),仿真取上限=最坏)
 AUTH = 0.80      # match_threshold
 ALPHA = 0.10     # learning_alpha(最坏:每日首笔,无衰减)
 
@@ -55,36 +55,33 @@ def main() -> int:
 
     failures = 0
 
-    # ---- P1: 门外攻击者(能通过 0.80 认证,但够不到 0.55 更新门) ----
-    for d in (0.56, 0.65, 0.79):   # 0.79 = 贴着认证线通过解锁的最强门外攻击者
-        attacker = blend(t0, far, alpha=1.0 - (d * d) / 2.0 / 1.0) if False else None
-        # 构造距 t0 恰好 d 的攻击者:沿 t0→far 方向的球面插值
+    # ---- P1: 门外攻击者(能通过 0.80 认证,但够不到更新门) ----
+    for d in (0.61, 0.70, 0.79):   # 0.79 = 贴着认证线通过解锁的最强门外攻击者
+        # 构造距 t0 严格小于 d 的攻击者:沿 t0→far 方向的球面插值,二分取内侧解
         lo, hi = 0.0, 1.0
         for _ in range(60):
             mid = (lo + hi) / 2
-            cand = blend(t0, far, mid)
-            if dist(t0, cand) < d:
+            if dist(t0, blend(t0, far, mid)) < d:
                 lo = mid
             else:
                 hi = mid
-        attacker = blend(t0, far, (lo + hi) / 2)
+        attacker = blend(t0, far, lo)
         t, accepted = run_attacker(t0, attacker, rounds=100)
         moved = dist(t0, t)
         ok = accepted == 0 and moved < 1e-9
-        print(f"P1 d={d:.2f}: 注入 100 次, 接受 {accepted}, 位移 {moved:.2e}  "
+        print(f"P1 d<{d:.2f}: 注入 100 次, 接受 {accepted}, 位移 {moved:.2e}  "
               + ("PASS" if ok else "FAIL"))
         failures += 0 if ok else 1
 
-    # ---- P2: 门内最坏攻击者(距离恰为 gate)----
+    # ---- P2: 门内最坏攻击者(距离恰为 gate,严格内侧)----
     lo, hi = 0.0, 1.0
     for _ in range(60):
         mid = (lo + hi) / 2
-        cand = blend(t0, far, mid)
-        if dist(t0, cand) < GATE:
+        if dist(t0, blend(t0, far, mid)) < GATE:
             lo = mid
         else:
             hi = mid
-    worst = blend(t0, far, (lo + hi) / 2)
+    worst = blend(t0, far, lo)
     for k in (1, 5, 10, 20, 50):
         t, accepted = run_attacker(t0, worst, rounds=k)
         moved = dist(t0, t)

@@ -120,10 +120,16 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         FACELOGIN_INFO(L"Template update skipped: learning disabled");
         return;
     }
-    if (sample.distance > cfg.distanceGate) {
+    // Red line 1 (2026-09-03 revision): the effective gate follows the
+    // user's own era distribution, capped by the configured ceiling.
+    const float gate = (sample.userEraP20 > 0.0f)
+        ? std::min(sample.userEraP20, cfg.distanceGate)
+        : cfg.distanceGate;
+    if (sample.distance > gate) {
         FACELOGIN_INFO(L"Template update skipped: distance %.3f > gate %.3f "
-                       L"(quality floor protects the template)",
-                       sample.distance, cfg.distanceGate);
+                       L"(user era p20 %.3f, cap %.2f)",
+                       sample.distance, gate, sample.userEraP20,
+                       cfg.distanceGate);
         return;
     }
     if (sample.norm < cfg.normFloor) {

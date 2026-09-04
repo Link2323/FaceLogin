@@ -188,19 +188,19 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.learning_alpha);
         cfg.learning_alpha = 0.10f;
     }
-    cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.55f);
+    cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.60f);
     if (!std::isfinite(cfg.learning_distance_gate) ||
-        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.55f) {
-        FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.55",
+        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.60f) {
+        FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.60",
                        cfg.learning_distance_gate);
-        cfg.learning_distance_gate = 0.55f;
+        cfg.learning_distance_gate = 0.60f;
     }
-    cfg.learning_norm_floor = jsonGetFloat(json, "learning_norm_floor", 20.9f);
+    cfg.learning_norm_floor = jsonGetFloat(json, "learning_norm_floor", 19.1f);
     if (!std::isfinite(cfg.learning_norm_floor) ||
         cfg.learning_norm_floor < 15.0f || cfg.learning_norm_floor > 25.0f) {
-        FACELOGIN_WARN(L"Unsafe learning_norm_floor=%.3f; enforcing 20.9",
+        FACELOGIN_WARN(L"Unsafe learning_norm_floor=%.3f; enforcing 19.1",
                        cfg.learning_norm_floor);
-        cfg.learning_norm_floor = 20.9f;
+        cfg.learning_norm_floor = 19.1f;
     }
     cfg.learning_min_interval_sec = jsonGetInt(json, "learning_min_interval_sec", 60);
     if (cfg.learning_min_interval_sec < 10 || cfg.learning_min_interval_sec > 3600) {

@@ -7,6 +7,8 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <deque>
+#include <map>
 
 #include "liveness_types.h"
 #include "model_failure.h"
@@ -108,6 +110,12 @@ private:
     // on the first flush of a local day, then SaveDatabase().
     void FlushLearnedTemplates();
 
+    // Record the round's distance in the user's rolling window, compute the
+    // era p20 for the adaptive update gate, and hand the sample to the
+    // learner. Public-pipe thread only (both auth paths call it after
+    // AUTH_SUCCESS delivery); RELOAD_DB clears the windows (era reset).
+    void SubmitLearningCandidate(const LearningSample& best);
+
     // Public-pipe message helpers. STATUS is advisory and needs no ACK;
     // terminal/control responses use explicit bounded acknowledgements before
     // disconnect so no path depends on unbounded FlushFileBuffers.
@@ -155,6 +163,10 @@ private:
     bool m_storeLockReady = false;
     std::unique_ptr<TemplateLearner> m_learner;
     int m_learningBakDay = 0;   // local yyyymmdd of the last users.dat.bak
+    // Per-account rolling window of recent successful auth distances feeding
+    // the adaptive update gate (era p20). Public-pipe thread only; cleared
+    // on RELOAD_DB, which marks a re-enrollment era boundary.
+    std::map<std::wstring, std::deque<float>> m_eraDistanceWindows;
 
     // Configuration
     AppConfig m_config;

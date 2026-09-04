@@ -25,6 +25,11 @@ struct LearningSample {
     std::vector<float> embedding;   // unit-length probe embedding (owned copy)
     float distance = 0.0f;
     float norm = 0.0f;              // pre-normalization recognizer norm
+    // p20 of this user's current-era successful auth distances (rolling
+    // window, reset on RELOAD_DB = re-enrollment). Negative = window too
+    // small; the effective gate then falls back to the configured cap.
+    // Red line 1 (2026-09-03 revision): gate = min(userEraP20, cap).
+    float userEraP20 = -1.0f;
 };
 
 struct LearningConfig {

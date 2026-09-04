@@ -329,6 +329,28 @@ void FaceService::FlushLearnedTemplates() {
     LeaveCriticalSection(&m_storeLock);
 }
 
+// Era-aware gate data + learner handoff. Public-pipe thread only.
+void FaceService::SubmitLearningCandidate(const LearningSample& best) {
+    if (!best.faceId) return;
+    constexpr size_t kWindowRounds = 30;
+    constexpr size_t kMinWindowForP20 = 5;
+    auto& window = m_eraDistanceWindows[best.sid];
+    window.push_back(best.distance);
+    while (window.size() > kWindowRounds) window.pop_front();
+
+    LearningSample sample = best;
+    if (window.size() >= kMinWindowForP20) {
+        std::vector<float> sorted(window.begin(), window.end());
+        std::sort(sorted.begin(), sorted.end());
+        // ceil(p/100*n)-1 keeps the conventional nearest-rank percentile.
+        sample.userEraP20 =
+            sorted[std::min(sorted.size() - 1, (sorted.size() * 20 + 99) / 100 - 1)];
+    }
+    if (m_learner) {
+        m_learner->Enqueue(std::move(sample));
+    }
+}
+
 bool FaceService::Initialize() {
     // Resolve the data directory through the security whitelist check
     // (security #3 — DataPath registry redirection defense). The registry
@@ -824,6 +846,10 @@ void FaceService::Run() {
                     reloaded = m_store->LoadDatabase();
                     LeaveCriticalSection(&m_storeLock);
                 }
+                // Enrollment changed the templates: the per-user distance
+                // windows describe a gone era — reset (adaptive-gate era
+                // boundary, docs/progressive-learning-v2.md red line 1).
+                m_eraDistanceWindows.clear();
                 if (reloaded) {
                 SendControlResponse(ipc::MSG_RELOAD_OK);
                 m_pipeServer->Disconnect();
@@ -1256,9 +1282,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
 
     // Learning candidate: a memory-only push; the learner thread waits out
     // the post-unlock busy window before any work (template_learner.h).
-    if (roundBest.faceId && m_learner) {
-        m_learner->Enqueue(roundBest);
-    }
+    SubmitLearningCandidate(roundBest);
 
     // The worker self-terminated when it sent AuthSucceeded; reclaim its Job
     // only now. CompleteTerminal used to run inside Authenticate(), placing
@@ -1431,8 +1455,8 @@ bool FaceService::ProcessAuthRequest() {
         return false;
     }
 
-    if (roundBest.faceId && m_learner) {
-        m_learner->Enqueue(roundBest);
+    if (roundBest.faceId) {
+        SubmitLearningCandidate(roundBest);
     }
 
     FACELOGIN_INFO(L"Credentials sent for %s\\%s", domain.c_str(),
