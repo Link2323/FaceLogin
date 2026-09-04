@@ -362,7 +362,7 @@ AuthPipelineResult AuthPipeline::Run() {
                 normLog.add(preNorm);
 
                 const BindingDecision decision =
-                    m_callbacks.verifyBinding(embedding, bindingCount);
+                    m_callbacks.verifyBinding(embedding, bindingCount, preNorm);
                 if (decision.kind == BindingDecisionKind::Retry) {
                     scoreFuture.get();
                     if (!haveRetryConditions) {

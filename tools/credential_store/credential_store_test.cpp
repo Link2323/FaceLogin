@@ -113,6 +113,8 @@ void TestIdentityMatching() {
     auto identity = store.FindBestIdentity(aliceProbe.data(), aliceProbe.size(), 0.80f);
     Check(identity && identity->sid == L"SID-A",
           "identity-only match chooses the closest account without a credential field");
+    Check(identity && identity->faceId == 2 && identity->faceLabel == L"脸2",
+          "identity match reports which stored face won (progressive learning)");
 
     const auto ambiguous = Midpoint(1, 2);
     float ratioMissDistance = -1.0f;
@@ -165,6 +167,86 @@ void TestPasswordBlobValidation() {
           "empty password blob is rejected");
     Check(!store.AddFace(L"invalid", L"", L"SID-I", {0x00}, embedding),
           "single-byte legacy sentinel is rejected");
+}
+
+// Unit vector tilted `perturb` away from a basis axis (still ~orthogonal to
+// every other axis — distance to Basis(index) ≈ atan(perturb)).
+std::vector<float> NearBasis(size_t index, float perturb) {
+    std::vector<float> value(512, 0.0f);
+    value[index] = 1.0f;
+    value[(index + 7) % 512] = perturb;
+    float norm = 0.0f;
+    for (float v : value) norm += v * v;
+    norm = std::sqrt(norm);
+    for (float& v : value) v /= norm;
+    return value;
+}
+
+float VectorDistance(const std::vector<float>& a, const std::vector<float>& b) {
+    float sum = 0.0f;
+    for (size_t i = 0; i < a.size(); i++) {
+        const float diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return std::sqrt(sum);
+}
+
+void TestUpdateTemplateFace() {
+    const std::wstring root = MakeTempRoot();
+    Check(!root.empty(), "temp root created for template update tests");
+    if (root.empty()) return;
+
+    facelogin::CredentialStore store;
+    store.SetDataDir(root);
+    const auto password = facelogin::DpapiUtil::Protect(L"test-password");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", password,
+                        Basis(0), L"正面"),
+          "front face is added for update tests");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", {},
+                        Basis(1), L"左转"),
+          "left face is added for update tests");
+
+    const auto inCone = NearBasis(0, 0.10f);   // ≈0.10 from Basis(0), ≈1.40 from Basis(1)
+    Check(store.UpdateTemplateFace(L"SID-A", 1, inCone),
+          "same-pose EMA update is accepted");
+
+    // Cross-angle sentinel: replacing face #1 with a vector only ~0.10 from
+    // face #2 would collapse the pair below kCrossAngleSentinelDist.
+    const auto nearFace2 = NearBasis(1, 0.10f);
+    Check(!store.UpdateTemplateFace(L"SID-A", 1, nearFace2),
+          "cross-angle sentinel rejects a converging update");
+    {
+        const auto& users = store.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 2 &&
+                  VectorDistance(users[0].faces[0].embedding, inCone) < 1e-5f,
+              "rejected update leaves the previous template byte-identical");
+    }
+
+    Check(!store.UpdateTemplateFace(L"SID-MISSING", 1, inCone),
+          "unknown SID update is rejected");
+    Check(!store.UpdateTemplateFace(L"SID-A", 9, inCone),
+          "unknown face id update is rejected");
+    Check(!store.UpdateTemplateFace(L"SID-A", 1, std::vector<float>(256, 0.5f)),
+          "dimension-mismatched update is rejected");
+
+    // Persisted: a fresh store reloads the updated template with ids/labels
+    // and the password intact (learning must never corrupt the credential).
+    Check(store.SaveDatabase(), "updated database saves");
+    {
+        facelogin::CredentialStore reloaded;
+        reloaded.SetDataDir(root);
+        Check(reloaded.LoadDatabase(), "updated database reloads");
+        const auto& users = reloaded.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 2 &&
+                  users[0].faces[0].label == L"正面" &&
+                  users[0].faces[1].label == L"左转" &&
+                  VectorDistance(users[0].faces[0].embedding, inCone) < 1e-5f,
+              "updated template round-trips with labels and slot order");
+        auto credential = reloaded.LoadCredentialForSid(L"SID-A", 0.1f);
+        Check(credential && credential->password == L"test-password",
+              "password survives template updates");
+    }
+    CleanupTempRoot(root);
 }
 
 void TestV4RoundTripAndReload() {
@@ -270,6 +352,7 @@ int wmain() {
     TestThresholds();
     TestPasswordBlobValidation();
     TestV4RoundTripAndReload();
+    TestUpdateTemplateFace();
     TestUnsupportedVersionsAreRejected();
     TestMalformedReloadIsTransactional();
     if (g_failures != 0) {

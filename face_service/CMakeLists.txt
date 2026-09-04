@@ -7,6 +7,7 @@ add_executable(FaceLoginService
     auth_worker_protocol.cpp
     onnx_models.cpp
     performance_affinity.cpp
+    template_learner.cpp
     webcam_capture_dshow.cpp
     pipe_server.cpp
     credential_store.cpp

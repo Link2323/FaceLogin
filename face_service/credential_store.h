@@ -154,6 +154,23 @@ public:
     // Call SaveDatabase() to persist.
     bool DeleteFace(const std::wstring& sid, uint32_t faceId);
 
+    // Replace one face's embedding in place (progressive-learning EMA
+    // update; ids/labels/password untouched). Fails closed with a WARN and
+    // leaves the template unchanged when the new embedding would put two of
+    // the account's comparable (same-dimension) faces closer together than
+    // kCrossAngleSentinelDist — the cross-angle red line says a same-pose
+    // update can never converge templates, so a violation means the update
+    // came from the wrong pose cone and must not be committed.
+    // Call SaveDatabase() to persist.
+    bool UpdateTemplateFace(const std::wstring& sid, uint32_t faceId,
+                            const std::vector<float>& newEmbedding);
+
+    // Measured minimum distance between w600k_r50 embeddings of the SAME
+    // person at DIFFERENT angles (docs/threshold-calibration.md appendix:
+    // min 0.681). Any update that brings two of one account's faces closer
+    // than this is by construction cross-angle contamination.
+    static constexpr float kCrossAngleSentinelDist = 0.68f;
+
     // Remove an account entirely (equivalent to deleting all of its faces).
     // Call SaveDatabase() to persist.
     bool ClearAllFaces(const std::wstring& sid);
@@ -195,6 +212,10 @@ public:
         std::wstring upn;
         std::wstring sid;
         float        distance = 0.0f;
+        // Which stored face produced the winning distance — progressive
+        // learning EMA-updates exactly this template.
+        uint32_t     faceId = 0;
+        std::wstring faceLabel;   // display label, logging only
     };
 
     struct MatchResult {

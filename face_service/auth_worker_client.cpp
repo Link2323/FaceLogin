@@ -293,13 +293,16 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
         if (message.type == auth_worker::MessageType::MatchProbe) {
             unsigned int bindingIndex = 0;
             std::vector<float> embedding;
-            if (!auth_worker::DecodeMatchProbe(message.payload, bindingIndex, embedding) ||
+            float preNorm = 0.0f;
+            if (!auth_worker::DecodeMatchProbe(message.payload, bindingIndex, embedding,
+                                               preNorm) ||
                 !exchange.IsExpectedProbe(bindingIndex)) {
                 result.errorMessage = L"认证工作进程身份绑定协议异常";
                 Stop();
                 return result;
             }
-            const BindingDecision decision = callbacks.verifyBinding(embedding, bindingIndex);
+            const BindingDecision decision =
+                callbacks.verifyBinding(embedding, bindingIndex, preNorm);
             auth_worker::MessageType response = auth_worker::MessageType::MatchRetry;
             std::vector<uint8_t> payload;
             if (decision.kind == BindingDecisionKind::Accept) {

@@ -21,6 +21,27 @@ struct AppConfig {
     // Use when the camera is physically mounted in a non-standard
     // orientation (e.g., vertical PC mount / sideways webcam).
     int            camera_rotation        = 0;
+    // Progressive template learning (docs/progressive-learning-v2.md §3).
+    // EMA fine-tune of the matched face template after each successful auth.
+    // master switch off = templates are strictly read-only.
+    bool           progressive_learning   = true;
+    // Per-update blend factor. Clamped to [0.05, 0.15]; effective alpha
+    // additionally decays as alpha/(1+n) with n = updates already accepted
+    // today (drift guard against same-pose bursts).
+    float          learning_alpha         = 0.10f;
+    // Update distance gate: only frames matching THIS close may move a
+    // template. Must stay well below match_threshold (impostor frames that
+    // barely pass auth can never reach it) and below the minimum measured
+    // cross-angle distance (0.681) so a passing frame is same-pose by
+    // construction. Clamped to [0.35, 0.55]. Calibrated 2026-09-04.
+    float          learning_distance_gate = 0.55f;
+    // Pre-normalization embedding norm floor (w600k_r50 scale ≈ 20-25;
+    // MagFace-style quality signal). Lower-norm frames may authenticate but
+    // never update a template. Recalibrate when the recognizer model changes.
+    // Clamped to [15.0, 25.0]. Calibrated 2026-09-04 (enrollment p25 = 20.9).
+    float          learning_norm_floor    = 20.9f;
+    // Minimum wall-clock spacing between accepted updates. Clamped [10, 3600].
+    int            learning_min_interval_sec = 60;
 };
 
 AppConfig LoadConfig(const std::wstring& dataDir);

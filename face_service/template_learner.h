@@ -1,0 +1,133 @@
+#pragma once
+
+#include <windows.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace facelogin {
+
+// One candidate EMA update, produced by a fully successful authentication
+// round (liveness 5/5 + 3-frame consensus + same-SID). Carries the
+// best-distance binding frame of the round.
+struct LearningSample {
+    std::wstring sid;
+    std::wstring username;          // logging only
+    uint32_t faceId = 0;
+    std::wstring faceLabel;         // logging only
+    std::vector<float> embedding;   // unit-length probe embedding (owned copy)
+    float distance = 0.0f;
+    float norm = 0.0f;              // pre-normalization recognizer norm
+};
+
+struct LearningConfig {
+    bool enabled = true;
+    float alpha = 0.10f;            // [0.05, 0.15], see config_util.h
+    float distanceGate = 0.55f;     // [0.35, 0.55]
+    float normFloor = 20.9f;        // [15.0, 25.0]
+    int minIntervalSec = 60;        // [10, 3600]
+};
+
+// Post-auth template EMA fine-tuning (docs/progressive-learning-v2.md §3).
+//
+// The pipe thread enqueues the round's best sample right after AUTH_SUCCESS
+// delivery; this class owns everything after that, OFF the unlock critical
+// path and OUT of the post-unlock busy window:
+//   - the learner thread waits kStartDelayMs so Windows finishes the session
+//     switch / shell startup before any learning work happens; rapid unlock
+//     bursts naturally coalesce (min-distance sample of the burst wins),
+//   - gate checks (distance / norm / interval / enabled) reject the sample
+//     or pass it to BlendEMA,
+//   - commits go through the Hooks so FaceService serializes all
+//     CredentialStore access under its store lock (single-writer rule),
+//   - disk writes are debounced: nothing flushes until kFlushQuietMs of
+//     update silence, and a dirty state at shutdown flushes on Stop().
+//
+// Security invariants (docs §1): the update gate is far below the auth
+// threshold so an impostor that barely passed authentication can never move
+// a template; liveness-failed rounds never reach Enqueue at all; the store's
+// cross-angle sentinel rejects converging updates before commit; every
+// accepted update keeps the previous embedding in a 3-generation ring and
+// the first flush of a day writes users.dat.bak (see FaceService).
+class TemplateLearner {
+public:
+    struct Hooks {
+        // Fetch the current stored embedding of (sid, faceId). False = the
+        // face disappeared (e.g. re-enrolled between round and processing).
+        std::function<bool(const std::wstring& sid, uint32_t faceId,
+                           std::vector<float>& out)> fetchTemplate;
+        // Commit a blended embedding. The hook owns the store lock and the
+        // cross-angle sentinel (CredentialStore::UpdateTemplateFace); false
+        // means rejected/absent and the sample is dropped (no retry).
+        std::function<bool(const LearningSample& sample,
+                           const std::vector<float>& blended,
+                           float alphaUsed)> commit;
+        // Persist users.dat. Never called on the auth critical path.
+        std::function<void()> flush;
+    };
+
+    TemplateLearner(LearningConfig config, Hooks hooks);
+    ~TemplateLearner();
+
+    TemplateLearner(const TemplateLearner&) = delete;
+    TemplateLearner& operator=(const TemplateLearner&) = delete;
+
+    // Pipe-thread call after AUTH_SUCCESS. Non-blocking: merges with a
+    // pending sample (best distance wins) and wakes the learner thread.
+    // Drops silently once stopped.
+    void Enqueue(LearningSample sample);
+
+    // CONFIG_RELOAD: swap gates; applies from the next sample on.
+    void UpdateConfig(LearningConfig config);
+
+    // Flush-if-dirty and join the learner thread. Idempotent; the destructor
+    // calls it as the backstop.
+    void Stop();
+
+    // t' = L2-normalize(alpha * sample + (1 - alpha) * tmpl). Pure function,
+    // public for unit tests and the poisoning-bound test.
+    static std::vector<float> BlendEMA(const std::vector<float>& tmpl,
+                                       const std::vector<float>& sample,
+                                       float alpha);
+
+    static constexpr int kStartDelayMs = 2000;   // post-unlock busy window
+    static constexpr int kFlushQuietMs = 30000;  // update-driven flush debounce
+
+private:
+    void Run();
+    void ApplySample(const LearningSample& sample);
+    LearningConfig Config() const;
+
+    mutable CRITICAL_SECTION m_cs{};
+    LearningConfig m_config;   // guarded by m_cs
+    Hooks m_hooks;
+
+    HANDLE m_wake = nullptr;   // auto-reset event
+    std::thread m_thread;
+    std::atomic<bool> m_stopped{false};
+
+    std::optional<LearningSample> m_pending;             // guarded by m_cs
+    std::chrono::steady_clock::time_point m_pendingSince;
+
+    std::chrono::system_clock::time_point m_lastAccept{};
+    bool m_dirty = false;                                 // guarded by m_cs
+    std::chrono::system_clock::time_point m_lastUpdate{};
+    int m_dayCount = 0;                                   // α decay counter
+    int m_dayStamp = 0;                                   // local yyyymmdd
+    // Ring of previous embeddings for diagnostics/manual rollback support.
+    struct Generation {
+        std::wstring sid;
+        uint32_t faceId;
+        std::vector<float> embedding;
+    };
+    std::deque<Generation> m_generations;
+};
+
+} // namespace facelogin

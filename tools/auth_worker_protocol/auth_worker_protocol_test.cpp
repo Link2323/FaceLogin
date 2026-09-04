@@ -97,46 +97,65 @@ void TestMatchProbeValidation() {
     auto embedding = UnitEmbedding();
     unsigned int index = 99;
     std::vector<float> decoded;
-    Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding), index, decoded),
+    float preNorm = 0.0f;
+    Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding, 21.5f), index, decoded,
+                           preNorm),
           "valid normalized 512-D match probe decodes");
-    Check(index == 2 && decoded == embedding,
-          "match probe round trip preserves index and embedding");
+    Check(index == 2 && decoded == embedding && preNorm == 21.5f,
+          "match probe round trip preserves index, embedding and pre-norm");
 
     auto invalid = embedding;
     invalid[17] = std::numeric_limits<float>::quiet_NaN();
-    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f), index, decoded,
+                            preNorm),
           "NaN embedding value is rejected");
     invalid = embedding;
     invalid[17] = std::numeric_limits<float>::infinity();
-    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f), index, decoded,
+                            preNorm),
           "infinite embedding value is rejected");
     Check(!DecodeMatchProbe(EncodeMatchProbe(0,
-          std::vector<float>(kEmbeddingDimension, 0.0f)), index, decoded),
+          std::vector<float>(kEmbeddingDimension, 0.0f), 21.5f), index, decoded,
+          preNorm),
           "zero-norm embedding is rejected");
     invalid = embedding;
     for (float& value : invalid) value *= 0.5f;
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f), index, decoded,
+                            preNorm),
           "abnormally small embedding norm is rejected");
     invalid = embedding;
     for (float& value : invalid) value *= 2.0f;
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f), index, decoded,
+                            preNorm),
           "abnormally large embedding norm is rejected");
 
     PayloadWriter shortWriter;
     shortWriter.WriteU32(0);
     shortWriter.WriteFloatVector(std::vector<float>(511, 0.0f));
-    Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded),
+    Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded, preNorm),
           "511-D match probe is rejected");
     PayloadWriter longWriter;
     longWriter.WriteU32(0);
     longWriter.WriteFloatVector(std::vector<float>(513, 0.0f));
-    Check(!DecodeMatchProbe(longWriter.Data(), index, decoded),
+    Check(!DecodeMatchProbe(longWriter.Data(), index, decoded, preNorm),
           "513-D match probe is rejected");
-    Check(!DecodeMatchProbe(EncodeMatchProbe(3, embedding), index, decoded),
+    PayloadWriter noNormWriter;
+    noNormWriter.WriteU32(0);
+    noNormWriter.WriteFloatVector(embedding);
+    Check(!DecodeMatchProbe(noNormWriter.Data(), index, decoded, preNorm),
+          "probe without trailing pre-norm (v3 payload) is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding,
+          std::numeric_limits<float>::quiet_NaN()), index, decoded, preNorm),
+          "NaN pre-norm is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 0.0f), index, decoded,
+                            preNorm),
+          "zero pre-norm is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(3, embedding, 21.5f), index, decoded,
+                            preNorm),
           "out-of-range binding index is rejected");
-    auto trailing = EncodeMatchProbe(0, embedding);
+    auto trailing = EncodeMatchProbe(0, embedding, 21.5f);
     trailing.push_back(0);
-    Check(!DecodeMatchProbe(trailing, index, decoded),
+    Check(!DecodeMatchProbe(trailing, index, decoded, preNorm),
           "match probe trailing bytes are rejected");
 }
 

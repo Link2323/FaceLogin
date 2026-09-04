@@ -121,6 +121,10 @@ FaceService::FaceService() {
 }
 
 FaceService::~FaceService() {
+    // Learner first: its Stop() flushes pending template updates through the
+    // hooks, which take m_storeLock — both must still be alive here.
+    if (m_learner) m_learner->Stop();
+    if (m_storeLockReady) DeleteCriticalSection(&m_storeLock);
     s_pInstance = nullptr;
 }
 
@@ -299,6 +303,32 @@ static void LogTemplateNorms(const CredentialStore& store, const wchar_t* when) 
     }
 }
 
+// Persist template-learning updates. Runs only on the learner thread or at
+// service shutdown. The first flush of a local day refreshes users.dat.bak —
+// the rollback copy of last resort; failure only logs (learning is
+// best-effort and must never block the write path).
+void FaceService::FlushLearnedTemplates() {
+    if (!m_store) return;
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    const int today = static_cast<int>(st.wYear) * 10000 + st.wMonth * 100 + st.wDay;
+    EnterCriticalSection(&m_storeLock);
+    if (m_learningBakDay != today) {
+        m_learningBakDay = today;
+        const std::wstring src = m_dataDir + L"\\data\\users.dat";
+        const std::wstring dst = src + L".bak";
+        if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+            FACELOGIN_WARN(L"users.dat.bak refresh failed (%lu) — updates still saved",
+                           GetLastError());
+        }
+    }
+    if (!m_store->SaveDatabase()) {
+        FACELOGIN_ERROR(L"Template learning flush: SaveDatabase failed "
+                        L"(updates retained in memory)");
+    }
+    LeaveCriticalSection(&m_storeLock);
+}
+
 bool FaceService::Initialize() {
     // Resolve the data directory through the security whitelist check
     // (security #3 — DataPath registry redirection defense). The registry
@@ -344,6 +374,47 @@ bool FaceService::Initialize() {
     }
     FACELOGIN_INFO(L"Loaded %zu registered user(s)", m_store->GetUserCount());
     LogTemplateNorms(*m_store, L"load");
+
+    // Progressive template learning (docs/progressive-learning-v2.md §3).
+    // The learner thread owns all post-auth EMA work; the hooks below
+    // serialize CredentialStore access under m_storeLock (single writer).
+    InitializeCriticalSection(&m_storeLock);
+    m_storeLockReady = true;
+    {
+        TemplateLearner::Hooks hooks;
+        hooks.fetchTemplate = [this](const std::wstring& sid, uint32_t faceId,
+                                     std::vector<float>& out) {
+            EnterCriticalSection(&m_storeLock);
+            const auto& users = m_store->GetUsers();
+            for (const auto& u : users) {
+                if (u.sid != sid) continue;
+                for (const auto& f : u.faces) {
+                    if (f.id == faceId) {
+                        out = f.embedding;
+                        LeaveCriticalSection(&m_storeLock);
+                        return true;
+                    }
+                }
+            }
+            LeaveCriticalSection(&m_storeLock);
+            return false;
+        };
+        hooks.commit = [this](const LearningSample& s, const std::vector<float>& blended,
+                              float) {
+            EnterCriticalSection(&m_storeLock);
+            const bool ok = m_store->UpdateTemplateFace(s.sid, s.faceId, blended);
+            LeaveCriticalSection(&m_storeLock);
+            return ok;
+        };
+        hooks.flush = [this]() { FlushLearnedTemplates(); };
+        LearningConfig learning;
+        learning.enabled = m_config.progressive_learning;
+        learning.alpha = m_config.learning_alpha;
+        learning.distanceGate = m_config.learning_distance_gate;
+        learning.normFloor = m_config.learning_norm_floor;
+        learning.minIntervalSec = m_config.learning_min_interval_sec;
+        m_learner = std::make_unique<TemplateLearner>(learning, std::move(hooks));
+    }
 
     m_pipeServer = std::make_unique<PipeServer>();
 
@@ -740,14 +811,20 @@ void FaceService::Run() {
 
         FACELOGIN_INFO(L"Received request: %s", request.c_str());
 
-        if (request == ipc::MSG_RELOAD_DB) {
-            // Honor LoadDatabase()'s return value: a corrupt users.dat (bad
-            // magic, length fields out of range, truncated read) returns false
-            // and clears the in-memory user list. Reporting success here would
-            // leave the service with an empty database while logging "reloaded",
-            // causing every subsequent auth to fail as "no registered users"
-            // until the service is restarted. Surface the failure instead.
-            if (m_store->LoadDatabase()) {
+            if (request == ipc::MSG_RELOAD_DB) {
+                // Honor LoadDatabase()'s return value: a corrupt users.dat (bad
+                // magic, length fields out of range, truncated read) returns false
+                // and clears the in-memory user list. Reporting success here would
+                // leave the service with an empty database while logging "reloaded",
+                // causing every subsequent auth to fail as "no registered users"
+                // until the service is restarted. Surface the failure instead.
+                bool reloaded = false;
+                {
+                    EnterCriticalSection(&m_storeLock);
+                    reloaded = m_store->LoadDatabase();
+                    LeaveCriticalSection(&m_storeLock);
+                }
+                if (reloaded) {
                 SendControlResponse(ipc::MSG_RELOAD_OK);
                 m_pipeServer->Disconnect();
                 FACELOGIN_INFO(L"Database reloaded");
@@ -796,6 +873,15 @@ void FaceService::Run() {
             if (loadedModels) {
                 // PAD remains on its calibrated raw-camera preprocessing path.
                 loadedModels->recognizer->SetLowLightEnhance(m_config.low_light_enhance);
+            }
+            if (m_learner) {
+                LearningConfig learning;
+                learning.enabled = m_config.progressive_learning;
+                learning.alpha = m_config.learning_alpha;
+                learning.distanceGate = m_config.learning_distance_gate;
+                learning.normFloor = m_config.learning_norm_floor;
+                learning.minIntervalSec = m_config.learning_min_interval_sec;
+                m_learner->UpdateConfig(learning);
             }
 
             bool modelStateOk = true;
@@ -893,6 +979,11 @@ void FaceService::Stop() {
     if (m_pipeServer) {
         m_pipeServer->RequestShutdown();
     }
+    // Stop the learner before the store goes away: it flushes any pending
+    // template updates. Enqueue is a no-op once stopped, so an in-flight
+    // pipe round simply drops its sample; store access stays serialized by
+    // m_storeLock either way.
+    if (m_learner) m_learner->Stop();
     StopModelWorker();
     if (!m_isServiceMode && m_webcamDS) {
         m_webcamDS->Shutdown();
@@ -915,11 +1006,20 @@ void FaceService::RequestStop() {
 
 BindingDecision FaceService::VerifyIdentityBinding(
     const std::vector<float>& embedding, unsigned int bindingIndex,
+    float preNorm,
     std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
-    std::wstring& initialSid, float* identityMissDistance) const {
+    std::wstring& initialSid, float* identityMissDistance,
+    LearningSample* roundBest) const {
     float bestDistance = -1.0f;
-    auto identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
-                                              m_matchThreshold, &bestDistance);
+    std::optional<CredentialStore::IdentityMatch> identity;
+    {
+        // The learner thread mutates templates concurrently; every store
+        // access shares this lock (single-writer, shared-read).
+        EnterCriticalSection(&m_storeLock);
+        identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
+                                             m_matchThreshold, &bestDistance);
+        LeaveCriticalSection(&m_storeLock);
+    }
     if (!identity) {
         // Track the closest miss of the round for the failure log: "0.81
         // against 0.80" (marginal capture conditions) is a different problem
@@ -929,6 +1029,17 @@ BindingDecision FaceService::VerifyIdentityBinding(
             *identityMissDistance = bestDistance;
         }
         return BindingDecision{BindingDecisionKind::Retry, {}};
+    }
+
+    if (roundBest &&
+        (!roundBest->faceId || identity->distance < roundBest->distance)) {
+        roundBest->sid = identity->sid;
+        roundBest->username = identity->username;
+        roundBest->faceId = identity->faceId;
+        roundBest->faceLabel = identity->faceLabel;
+        roundBest->embedding = embedding;
+        roundBest->distance = identity->distance;
+        roundBest->norm = preNorm;
     }
 
     if (bindingIndex == 0) {
@@ -1011,6 +1122,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     std::wstring initialSid;
     AuthWorkerResult workerResult;
     float identityMissDistance = -1.0f;
+    LearningSample roundBest;   // best frame of the round, learning candidate
     // Outlives the ModelUseGuard scope below: the success path reaps the
     // worker only after AUTH_SUCCESS has been delivered to the CP.
     std::shared_ptr<AuthWorkerClient> worker;
@@ -1061,11 +1173,12 @@ bool FaceService::ProcessWorkerAuthRequest() {
                 return !m_running || m_pipeServer->IsClientDisconnected();
             };
             callbacks.verifyBinding = [this, &lockedIdentity, &initialSid,
-                                       &identityMissDistance](
-                const std::vector<float>& embedding, unsigned int bindingIndex) {
-                return VerifyIdentityBinding(embedding, bindingIndex,
+                                       &identityMissDistance, &roundBest](
+                const std::vector<float>& embedding, unsigned int bindingIndex,
+                float preNorm) {
+                return VerifyIdentityBinding(embedding, bindingIndex, preNorm,
                                              lockedIdentity, initialSid,
-                                             &identityMissDistance);
+                                             &identityMissDistance, &roundBest);
             };
             workerResult = worker->Authenticate(std::move(callbacks));
         }
@@ -1107,8 +1220,13 @@ bool FaceService::ProcessWorkerAuthRequest() {
         return false;
     }
 
-    auto credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
-                                                     lockedIdentity->distance);
+    std::optional<CredentialStore::MatchResult> credential;
+    {
+        EnterCriticalSection(&m_storeLock);
+        credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
+                                                    lockedIdentity->distance);
+        LeaveCriticalSection(&m_storeLock);
+    }
     if (!credential) {
         MarkAuthWorkerConsumed(true);
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
@@ -1134,6 +1252,12 @@ bool FaceService::ProcessWorkerAuthRequest() {
         FACELOGIN_WARN(L"Failed to send authentication credentials");
         SecureClearMatchPassword(credential);
         return false;
+    }
+
+    // Learning candidate: a memory-only push; the learner thread waits out
+    // the post-unlock busy window before any work (template_learner.h).
+    if (roundBest.faceId && m_learner) {
+        m_learner->Enqueue(roundBest);
     }
 
     // The worker self-terminated when it sent AuthSucceeded; reclaim its Job
@@ -1215,6 +1339,7 @@ bool FaceService::ProcessAuthRequest() {
     std::optional<CredentialStore::IdentityMatch> lockedIdentity;
     std::wstring initialSid;
     float identityMissDistance = -1.0f;
+    LearningSample roundBest;   // best frame of the round, learning candidate
 
     AuthPipelineCallbacks callbacks;
     callbacks.grabFrame = [this](FrameImage& frame, unsigned long long& frameSequence) {
@@ -1232,11 +1357,12 @@ bool FaceService::ProcessAuthRequest() {
         SendStatusMessage(text);
     };
     callbacks.verifyBinding = [this, &lockedIdentity, &initialSid,
-                               &identityMissDistance](
-        const std::vector<float>& embedding, unsigned int bindingIndex) {
-        return VerifyIdentityBinding(embedding, bindingIndex,
+                               &identityMissDistance, &roundBest](
+        const std::vector<float>& embedding, unsigned int bindingIndex,
+        float preNorm) {
+        return VerifyIdentityBinding(embedding, bindingIndex, preNorm,
                                      lockedIdentity, initialSid,
-                                     &identityMissDistance);
+                                     &identityMissDistance, &roundBest);
     };
 
     AuthPipeline pipeline(
@@ -1272,8 +1398,13 @@ bool FaceService::ProcessAuthRequest() {
         return false;
     }
 
-    auto credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
-                                                     lockedIdentity->distance);
+    std::optional<CredentialStore::MatchResult> credential;
+    {
+        EnterCriticalSection(&m_storeLock);
+        credential = m_store->LoadCredentialForSid(lockedIdentity->sid,
+                                                    lockedIdentity->distance);
+        LeaveCriticalSection(&m_storeLock);
+    }
     if (!credential) {
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
         SendAuthErrorMessage(L"账户凭据不可用，请使用密码登录");
@@ -1298,6 +1429,10 @@ bool FaceService::ProcessAuthRequest() {
         FACELOGIN_WARN(L"Failed to send authentication credentials");
         SecureClearMatchPassword(credential);
         return false;
+    }
+
+    if (roundBest.faceId && m_learner) {
+        m_learner->Enqueue(roundBest);
     }
 
     FACELOGIN_INFO(L"Credentials sent for %s\\%s", domain.c_str(),

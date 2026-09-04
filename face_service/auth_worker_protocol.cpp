@@ -267,20 +267,24 @@ bool DecodeWString(const std::vector<uint8_t>& payload, std::wstring& value,
 }
 
 std::vector<uint8_t> EncodeMatchProbe(unsigned int bindingIndex,
-                                      const std::vector<float>& embedding) {
+                                      const std::vector<float>& embedding,
+                                      float preNorm) {
     PayloadWriter writer;
     writer.WriteU32(bindingIndex);
     writer.WriteFloatVector(embedding);
+    writer.WriteFloat(preNorm);
     return writer.Data();
 }
 
 bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
                       unsigned int& bindingIndex,
-                      std::vector<float>& embedding) {
+                      std::vector<float>& embedding,
+                      float& preNorm) {
     PayloadReader reader(payload);
     uint32_t rawIndex = 0;
     if (!reader.ReadU32(rawIndex) || rawIndex > 2 ||
-        !reader.ReadFloatVector(embedding, kEmbeddingDimension) || !reader.Done() ||
+        !reader.ReadFloatVector(embedding, kEmbeddingDimension) ||
+        !reader.ReadFloat(preNorm) || !reader.Done() ||
         embedding.size() != kEmbeddingDimension) {
         return false;
     }
@@ -295,6 +299,10 @@ bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
         static_cast<double>(kMaxEmbeddingNorm) * kMaxEmbeddingNorm;
     if (!std::isfinite(normSquared) || normSquared < minNormSquared ||
         normSquared > maxNormSquared) return false;
+    // The quality signal travels alongside the (unit-length) embedding: a
+    // finite, strictly positive value lets the parent gate template updates
+    // on recognizer norm without recomputing it from the normalized vector.
+    if (!std::isfinite(preNorm) || preNorm <= 0.0f) return false;
     bindingIndex = rawIndex;
     return true;
 }

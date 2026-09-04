@@ -497,11 +497,15 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     // the best/second-best ratio.
     float bestDist = 1e10f, secondBestDist = 1e10f;
     size_t bestIdx = m_users.size();
+    uint32_t bestFaceId = 0;
+    std::wstring bestFaceLabel;
     size_t comparableAccounts = 0;
 
     for (size_t i = 0; i < m_users.size(); i++) {
         const auto& faces = m_users[i].faces;
         float accountBest = 1e10f;
+        uint32_t accountBestFaceId = 0;
+        const std::wstring* accountBestLabel = nullptr;
 
         for (const auto& face : faces) {
             // Skip stored embeddings that don't match the probe's dimensionality.
@@ -518,6 +522,8 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
 
             if (dist < accountBest) {
                 accountBest = dist;
+                accountBestFaceId = face.id;
+                accountBestLabel = &face.label;
             }
         }
 
@@ -528,6 +534,8 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
             secondBestDist = bestDist;
             bestDist = accountBest;
             bestIdx = i;
+            bestFaceId = accountBestFaceId;
+            bestFaceLabel = accountBestLabel ? *accountBestLabel : L"";
         } else if (accountBest < secondBestDist) {
             secondBestDist = accountBest;
         }
@@ -577,10 +585,63 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
         best.upn = m_users[bestIdx].upn;
         best.sid = m_users[bestIdx].sid;
         best.username = m_users[bestIdx].username;
+        best.faceId = bestFaceId;
+        best.faceLabel = bestFaceLabel;
         return best;
     }
 
     return std::nullopt;
+}
+
+bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceId,
+                                         const std::vector<float>& newEmbedding) {
+    size_t idx = FindUserIndex(sid, L"", L"");
+    if (idx >= m_users.size()) {
+        FACELOGIN_WARN(L"UpdateTemplateFace: account not found");
+        return false;
+    }
+    auto& faces = m_users[idx].faces;
+    FaceRecord* target = nullptr;
+    for (auto& f : faces) {
+        if (f.id == faceId) { target = &f; break; }
+    }
+    if (!target) {
+        FACELOGIN_WARN(L"UpdateTemplateFace: face #%u not found", faceId);
+        return false;
+    }
+    if (newEmbedding.size() != target->embedding.size()) {
+        FACELOGIN_WARN(L"UpdateTemplateFace: dimension mismatch (%zu vs %zu)",
+                       newEmbedding.size(), target->embedding.size());
+        return false;
+    }
+
+    // Cross-angle sentinel: swap the candidate in, then require every pair of
+    // the account's comparable faces to stay at least kCrossAngleSentinelDist
+    // apart. A same-pose EMA step can never converge two angle templates, so
+    // a violation means cross-angle contamination — restore and reject.
+    std::vector<float> previous = target->embedding;
+    target->embedding = newEmbedding;
+    for (size_t i = 0; i < faces.size(); i++) {
+        for (size_t j = i + 1; j < faces.size(); j++) {
+            const auto& a = faces[i].embedding;
+            const auto& b = faces[j].embedding;
+            if (a.size() != b.size() || a.empty()) continue;
+            float sum = 0.0f;
+            for (size_t k = 0; k < a.size(); k++) {
+                float diff = a[k] - b[k];
+                sum += diff * diff;
+            }
+            float dist = std::sqrt(sum);
+            if (dist < kCrossAngleSentinelDist) {
+                target->embedding = std::move(previous);
+                FACELOGIN_WARN(L"UpdateTemplateFace rejected: faces #%u/#u would be "
+                               L"%.3f apart (< %.2f) — suspected cross-angle contamination",
+                               faces[i].id, faces[j].id, dist, kCrossAngleSentinelDist);
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 std::optional<CredentialStore::MatchResult> CredentialStore::LoadCredentialForSid(

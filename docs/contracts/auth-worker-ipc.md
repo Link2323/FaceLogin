@@ -18,7 +18,7 @@
 ```cpp
 struct MessageHeader {
     uint32_t magic;       // 0x4B574C46，即 "FLWK"
-    uint16_t version;     // 3
+    uint16_t version;     // 4
     uint16_t type;
     uint64_t requestId;
     uint32_t payloadSize;
@@ -62,15 +62,16 @@ uint32 lowLightEnhance     // 0/1
 wstring cameraDevice
 ```
 
-`MatchProbe` 的 payload 为：
+`MatchProbe` 的 payload 为（v4 起附带范数）：
 
 ```text
 uint32 bindingIndex       // 线上严格为 0 → 1 → 2；日志显示为 1/3 → 2/3 → 3/3
 uint32 embeddingCount     // 必须恰好 512
 float  embedding[512]
+float  preNorm            // 归一化前的识别器输出范数（质量信号，必须有限且 >0）
 ```
 
-每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
+每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 供父端渐进学习的范数门使用（w600k_r50 量级 ≈20–25，嵌入本身以归一化形态传输、范数不可从向量恢复）。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
 
 `AuthSucceeded` 的 `AuthTiming` 顺序固定为：
 

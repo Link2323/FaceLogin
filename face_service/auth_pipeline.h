@@ -40,8 +40,12 @@ struct AuthPipelineCallbacks {
     // Called for binding frames 1/3/5. The callback must preserve the
     // first-identity / same-identity invariant and must not release a
     // password. Retry means the current frame is not counted for PAD.
+    // preNorm is the embedding's L2 norm before normalization (quality
+    // signal; the embedding itself arrives unit-length so the raw norm is
+    // unrecoverable downstream).
     std::function<BindingDecision(const std::vector<float>&,
-                                  unsigned int bindingIndex)> verifyBinding;
+                                  unsigned int bindingIndex,
+                                  float preNorm)> verifyBinding;
 };
 
 struct AuthPipelineConfig {

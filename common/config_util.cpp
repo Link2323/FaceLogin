@@ -123,7 +123,12 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "  "; jsonWriteString(ss, "anti_spoof_threshold"); ss << ": " << cfg.anti_spoof_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_rotation"); ss << ": " << cfg.camera_rotation << ",\n";
-    ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << "\n";
+    ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << ",\n";
+    ss << "  "; jsonWriteString(ss, "progressive_learning"); ss << ": " << (cfg.progressive_learning ? "true" : "false") << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_alpha"); ss << ": " << cfg.learning_alpha << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_distance_gate"); ss << ": " << cfg.learning_distance_gate << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_norm_floor"); ss << ": " << cfg.learning_norm_floor << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_min_interval_sec"); ss << ": " << cfg.learning_min_interval_sec << "\n";
     ss << "}\n";
     return ss.str();
 }
@@ -166,6 +171,42 @@ AppConfig ConfigFromJson(const std::string& json) {
         if (rotation != 0)
             FACELOGIN_WARN(L"Invalid camera_rotation=%d in config, falling back to 0", rotation);
         rotation = 0;
+    }
+    cfg.camera_rotation = rotation;
+
+    // ---- Progressive learning gates (docs/progressive-learning-v2.md §1/§3).
+    // Missing keys adopt the calibrated defaults; hand-edited values outside
+    // the safe band snap back — the distance gate in particular must stay
+    // far below match_threshold or an impostor could poison templates.
+    const std::string learning = jsonGetString(json, "progressive_learning");
+    cfg.progressive_learning = learning.empty() ? cfg.progressive_learning
+                                                : (learning == "true");
+    cfg.learning_alpha = jsonGetFloat(json, "learning_alpha", 0.10f);
+    if (!std::isfinite(cfg.learning_alpha) ||
+        cfg.learning_alpha < 0.05f || cfg.learning_alpha > 0.15f) {
+        FACELOGIN_WARN(L"Unsafe learning_alpha=%.3f; enforcing 0.10",
+                       cfg.learning_alpha);
+        cfg.learning_alpha = 0.10f;
+    }
+    cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.55f);
+    if (!std::isfinite(cfg.learning_distance_gate) ||
+        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.55f) {
+        FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.55",
+                       cfg.learning_distance_gate);
+        cfg.learning_distance_gate = 0.55f;
+    }
+    cfg.learning_norm_floor = jsonGetFloat(json, "learning_norm_floor", 20.9f);
+    if (!std::isfinite(cfg.learning_norm_floor) ||
+        cfg.learning_norm_floor < 15.0f || cfg.learning_norm_floor > 25.0f) {
+        FACELOGIN_WARN(L"Unsafe learning_norm_floor=%.3f; enforcing 20.9",
+                       cfg.learning_norm_floor);
+        cfg.learning_norm_floor = 20.9f;
+    }
+    cfg.learning_min_interval_sec = jsonGetInt(json, "learning_min_interval_sec", 60);
+    if (cfg.learning_min_interval_sec < 10 || cfg.learning_min_interval_sec > 3600) {
+        FACELOGIN_WARN(L"Unsafe learning_min_interval_sec=%d; enforcing 60",
+                       cfg.learning_min_interval_sec);
+        cfg.learning_min_interval_sec = 60;
     }
     cfg.camera_rotation = rotation;
     auto cam = jsonGetString(json, "camera_device");
