@@ -91,7 +91,7 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 - JS 桥接的 dispId 清单以 `WebviewHost.cpp` 为准，不在文档复制。
 - 日志页四个日志来源直接读文件；"学习状态"视图是唯一走公共管道的查询（`LEARNING_STATUS`，响应为单条 JSON 内存快照，服务重启清零），客户端按 10s 节流——公共管道单实例，不得演变成高频轮询。
 - 禁用右键菜单和开发者工具。
-- `WM_WTSSESSION_CHANGE` 在锁屏时释放摄像头，解锁后恢复。
+- `WM_WTSSESSION_CHANGE` 在锁屏时释放摄像头，解锁后仅当锁屏瞬间预览在跑（录入页可见）才恢复——JS 层切到人脸/设置/日志页即关相机，无条件恢复会让相机亮在无预览的页面背后。
 - 帧缓存由 `EnrollmentWizard::m_frameCacheMutex` 保护。
 - 用户数据目录固定为 `%LOCALAPPDATA%\FaceLogin\WebView2`（`WebviewHost.cpp` WM_CREATE 显式传入并递归创建；实际值与创建失败 HRESULT 均写 console.log(原名 enrollment.log)）。创建环境前会删除本进程的 `WEBVIEW2_USER_DATA_FOLDER` 环境变量：官方 loader 对该变量只检查存在性、不检查空值，宿主（如 Wails 安装器经 go-webview2 `preventEnvAndRegistryOverrides` 置空）遗留的空值会静默覆盖代码传参、回退到 exe 旁默认路径——在 Program Files 的 ACL 下 browser 子进程写不进去，controller 创建 19 秒后 E_ABORT。
 

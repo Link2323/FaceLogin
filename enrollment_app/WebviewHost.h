@@ -76,6 +76,13 @@ public:
     ICoreWebView2*            m_webview    = nullptr;
     ICoreWebView2Environment* m_env        = nullptr;
     bool m_sessionNotifRegistered = false;
+    // Preview state snapshot taken at WTS_SESSION_LOCK, before the camera is
+    // released. The unlock restore must only bring the camera back if the UI
+    // actually had it on (cam tab active) — the JS layer owns that state and
+    // stops the preview when switching to faces/settings/logs, so an
+    // unconditional restart would leave the camera live behind those screens
+    // with the JS "viewing" flag desynchronized (nobody stops it again).
+    bool m_previewActiveAtLock = false;
 
     std::string m_html;
 

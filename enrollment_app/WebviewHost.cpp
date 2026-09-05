@@ -276,14 +276,26 @@ LRESULT WebviewHost::HandleMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (m_wizard) {
             switch (wp) {
             case WTS_SESSION_LOCK:
-                // Win+L pressed — release camera so login credential provider can use it
-                FACELOGIN_INFO(L"WebviewHost: session locked — releasing camera");
+                // Win+L pressed — release camera so login credential provider can use it.
+                // Snapshot first: restore on unlock only if the UI had the
+                // preview running (it powers the camera off on non-cam tabs).
+                m_previewActiveAtLock = m_wizard->IsPreviewRunning();
+                FACELOGIN_INFO(L"WebviewHost: session locked — releasing camera "
+                               L"(preview was %s)",
+                               m_previewActiveAtLock ? L"active" : L"inactive");
                 m_wizard->StopPreview();
                 break;
             case WTS_SESSION_UNLOCK:
-                // User returned — restart preview
-                FACELOGIN_INFO(L"WebviewHost: session unlocked — restarting camera");
-                m_wizard->StartPreview();
+                // User returned — restart preview only if it was running when
+                // the session locked (cam tab active at that moment).
+                if (m_previewActiveAtLock) {
+                    FACELOGIN_INFO(L"WebviewHost: session unlocked — restarting camera");
+                    m_wizard->StartPreview();
+                } else {
+                    FACELOGIN_INFO(L"WebviewHost: session unlocked — camera stays off "
+                                   L"(preview was not active at lock)");
+                }
+                m_previewActiveAtLock = false;
                 break;
             }
         }
