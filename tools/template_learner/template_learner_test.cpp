@@ -1,7 +1,7 @@
 // Development-only test for TemplateLearner's pose-based update-target
-// selection and gate chain (docs/progressive-learning-v2.md §3, 2026-09-05
-// revision). Runs the real learner thread (kStartDelayMs applies), so each
-// case takes ~2s; total ~20s.
+// selection, gate chain and per-slot learning state (docs/
+// progressive-learning-v2.md §3, 2026-09-05 revision). Runs the real learner
+// thread (kStartDelayMs applies), so each case takes ~2s; total ~55s.
 
 #include "template_learner.h"
 
@@ -65,9 +65,10 @@ struct Harness {
     std::vector<std::pair<uint32_t, std::vector<float>>> commits;
     std::unique_ptr<TemplateLearner> learner;
 
-    Harness() {
+    explicit Harness(float alpha = 0.10f, int minIntervalSec = 0) {
         LearningConfig cfg;  // defaults: gate 0.65, cone 25, clarity 0.10
-        cfg.minIntervalSec = 0;
+        cfg.alpha = alpha;
+        cfg.minIntervalSec = minIntervalSec;
         TemplateLearner::Hooks hooks;
         hooks.fetchTemplate = [this](const std::wstring&, uint32_t faceId,
                                      TemplateLearner::TemplateSnapshot& out) {
@@ -126,7 +127,6 @@ LearningSample MakeSample(const std::vector<float>& probe, float yaw,
     s.probeYawDeg = yaw;
     s.probePitchDeg = 0.0f;
     s.faceMargin = 1e9f;
-    s.userEraP20 = -1.0f;
     return s;
 }
 
@@ -295,6 +295,98 @@ int main() {
         LearningEvent ev = h.Run(s);
         Check(ev.accepted && ev.faceId == 1,
               "case9: invalid pose estimate fell back to distance path");
+    }
+
+    // 10. Per-slot α decay (2026-09-05): alternating slots each decay from
+    //     their OWN daily counter — the second slot's first update is α/1,
+    //     not α/2. The old shared counter made frontal activity tax the
+    //     turned slot's step size.
+    {
+        Harness h;
+        h.AddSlot(1, L"正面", 0.0f, Basis(0));
+        h.AddSlot(2, L"左转", 30.0f, Basis(1));
+        const auto leftProbe = Mix(0.5f, 0, 0.866f, 1);   // yaw 20 → 左转
+        const auto frontalProbe = Basis(0);
+        LearningSample a = MakeSample(leftProbe, 20.0f, 2,
+                                      Dist(leftProbe, h.slots[2].embedding));
+        FillAccountFaces(a, h, leftProbe);
+        LearningEvent evA = h.Run(a);
+        Check(evA.accepted && std::fabs(evA.alphaUsed - 0.10f) < 0.005f,
+              "case10: 左转's first update uses full alpha");
+        LearningSample b = MakeSample(frontalProbe, 0.0f, 1, 0.0f);
+        FillAccountFaces(b, h, frontalProbe);
+        LearningEvent evB = h.Run(b);
+        Check(evB.accepted && std::fabs(evB.alphaUsed - 0.10f) < 0.005f,
+              "case10: 正面's first update keeps full alpha (not α/2)");
+        LearningSample c = MakeSample(leftProbe, 20.0f, 2,
+                                      Dist(leftProbe, h.slots[2].embedding));
+        FillAccountFaces(c, h, leftProbe);
+        LearningEvent evC = h.Run(c);
+        Check(evC.accepted && std::fabs(evC.alphaUsed - 0.05f) < 0.005f,
+              "case10: 左转's second update decays to α/2 (its own counter)");
+    }
+
+    // 11. Per-slot min-interval (2026-09-05): an update to one slot does not
+    //     consume another slot's pacing budget, but the same slot stays
+    //     interval-gated.
+    {
+        Harness h(0.10f, 3600);
+        h.AddSlot(1, L"正面", 0.0f, Basis(0));
+        h.AddSlot(2, L"左转", 30.0f, Basis(1));
+        const auto leftProbe = Mix(0.5f, 0, 0.866f, 1);
+        const auto frontalProbe = Basis(0);
+        LearningSample a = MakeSample(leftProbe, 20.0f, 2,
+                                      Dist(leftProbe, h.slots[2].embedding));
+        FillAccountFaces(a, h, leftProbe);
+        Check(h.Run(a).accepted, "case11: 左转 update accepted");
+        LearningSample b = MakeSample(frontalProbe, 0.0f, 1, 0.0f);
+        FillAccountFaces(b, h, frontalProbe);
+        LearningEvent evB = h.Run(b);
+        Check(evB.accepted,
+              "case11: 正面 accepted seconds after a 左转 update");
+        LearningSample c = MakeSample(leftProbe, 20.0f, 2,
+                                      Dist(leftProbe, h.slots[2].embedding));
+        FillAccountFaces(c, h, leftProbe);
+        LearningEvent evC = h.Run(c);
+        Check(!evC.accepted && evC.reason &&
+                  wcscmp(evC.reason, L"interval") == 0,
+              "case11: same-slot repeat is interval-gated");
+    }
+
+    // 12. The distance gate is fed by the TARGET slot's own era window
+    //     (2026-09-05). Frontal unlocks pin the pooled window's p20 at 0; a
+    //     warming-up 左转 slot first falls back to it (rejected), then — once
+    //     its own window reaches 5 entries — gates at its own p20 and accepts
+    //     the very distance the pooled fallback would still reject. Frozen
+    //     templates (α=0) keep every distance bit-identical across runs.
+    {
+        Harness h(0.0f, 0);
+        h.AddSlot(1, L"正面", 0.0f, Basis(0));
+        h.AddSlot(2, L"左转", 30.0f, Basis(1));
+        const auto frontalProbe = Basis(0);
+        for (int i = 0; i < 5; i++) {
+            LearningSample f = MakeSample(frontalProbe, 0.0f, 1, 0.0f);
+            FillAccountFaces(f, h, frontalProbe);
+            Check(h.Run(f).accepted, "case12: frontal unlock accepted");
+        }
+        const auto leftProbe = Mix(0.5f, 0, 0.866f, 1);   // yaw 20 → 左转
+        const float leftDist = Dist(leftProbe, h.slots[2].embedding);
+        for (int i = 0; i < 4; i++) {
+            LearningSample l = MakeSample(leftProbe, 20.0f, 2, leftDist);
+            FillAccountFaces(l, h, leftProbe);
+            LearningEvent ev = h.Run(l);
+            Check(!ev.accepted && ev.reason &&
+                      wcscmp(ev.reason, L"distance") == 0,
+                  "case12: warming-up 左转 falls back to the tight pooled gate");
+        }
+        LearningSample l5 = MakeSample(leftProbe, 20.0f, 2, leftDist);
+        FillAccountFaces(l5, h, leftProbe);
+        Check(h.Run(l5).accepted,
+              "case12: 左转's own window reached 5 — its own p20 gates now");
+        LearningSample l6 = MakeSample(leftProbe, 20.0f, 2, leftDist);
+        FillAccountFaces(l6, h, leftProbe);
+        Check(h.Run(l6).accepted,
+              "case12: slot p20 keeps gating (pooled p20=0 would reject)");
     }
 
     if (g_failures == 0) {

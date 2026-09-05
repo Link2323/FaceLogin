@@ -39,11 +39,6 @@ struct LearningSample {
     // account (no wrong-slot risk). Frames closer than kClarityMargin to both
     // slots must not update either (equidistant → wrong-slot risk).
     float faceMargin = 1e9f;
-    // p20 of this user's current-era successful auth distances (rolling
-    // window, reset on RELOAD_DB = re-enrollment). Negative = window too
-    // small; the effective gate then falls back to the configured cap.
-    // Red line 1 (2026-09-03 revision): gate = min(userEraP20, cap).
-    float userEraP20 = -1.0f;
     // Every comparable face of the authenticated account as seen by this
     // frame (id/label/nominal pose/distance), computed by the pipe thread
     // under the store lock. Drives the update-target selection: the V5
@@ -98,6 +93,12 @@ struct LearningFaceStatus {
     int dayStamp = 0;               // internal acceptedToday rollover
     bool hadAccept = false;
     std::chrono::system_clock::time_point lastAccept{};
+    // This slot's own era window (nearest-rank p20 of the slot's processed
+    // distances; the gate uses min(eraP20, cap)). Negative while the window
+    // holds fewer than kEraMinSamples entries — the gate then falls back to
+    // the account's pooled window, and eraRounds still reports fill progress.
+    float eraP20 = -1.0f;
+    int eraRounds = 0;
 };
 
 // Post-auth template EMA fine-tuning (docs/progressive-learning-v2.md §3).
@@ -125,6 +126,15 @@ struct LearningFaceStatus {
 // the account's minimum template-pair distance on every commit; every
 // accepted update keeps the previous embedding in a 3-generation ring and the
 // first flush of a day writes users.dat.bak (see FaceService).
+//
+// Per-slot state (2026-09-05 revision): the min-interval pacing, the α daily
+// decay counter and the era distance windows are owned by the (sid, faceId)
+// slot, not shared across poses — frontal activity must not spend a turned
+// slot's learning budget (step size, pacing or gate tightness). The era
+// window of a slot only gates that slot; while a slot's own window is still
+// warming up, the account's pooled window backs it up (finite: rejected
+// samples still fill the slot window). ResetEraWindows (RELOAD_DB) clears
+// the windows only — pacing and decay survive a reload.
 class TemplateLearner {
 public:
     // What fetchTemplate returns for the target slot: the current embedding
@@ -177,6 +187,12 @@ public:
 
     static constexpr int kStartDelayMs = 2000;   // post-unlock busy window
     static constexpr int kFlushQuietMs = 30000;  // update-driven flush debounce
+    static constexpr size_t kEraWindowRounds = 30;  // era window capacity
+    static constexpr size_t kEraMinSamples = 5;     // samples before p20 gates
+
+    // RELOAD_DB: enrollment changed the templates, every era window describes
+    // a gone era. Clears slot + pooled windows; keeps pacing and α decay.
+    void ResetEraWindows();
 
     // LEARNING_STATUS snapshot. recent: newest first, at most maxCount
     // entries. Faces with counters: every (sid, faceId) that ever reached
@@ -202,18 +218,21 @@ private:
     std::optional<LearningSample> m_pending;             // guarded by m_cs
     std::chrono::steady_clock::time_point m_pendingSince;
 
-    std::chrono::system_clock::time_point m_lastAccept{};
+    // Per-slot learning state, keyed (sid, faceId); all guarded by m_cs.
+    // The pooled per-account window backs a slot's gate up until the slot's
+    // own window reaches kEraMinSamples entries (see ApplySample).
+    struct SlotState {
+        int dayStamp = 0;                                    // α decay rollover
+        int dayCount = 0;                                    // α decay counter
+        std::chrono::system_clock::time_point lastAccept{};  // min-interval pacing
+        std::deque<float> eraDistances;                      // this slot's gate window
+        std::deque<std::vector<float>> generations;          // ≤3 pre-update embeddings
+    };
+    std::map<std::pair<std::wstring, uint32_t>, SlotState> m_slots;
+    std::map<std::wstring, std::deque<float>> m_accountEra;
+
     bool m_dirty = false;                                 // guarded by m_cs
     std::chrono::system_clock::time_point m_lastUpdate{};
-    int m_dayCount = 0;                                   // α decay counter
-    int m_dayStamp = 0;                                   // local yyyymmdd
-    // Ring of previous embeddings for diagnostics/manual rollback support.
-    struct Generation {
-        std::wstring sid;
-        uint32_t faceId = 0;
-        std::vector<float> embedding;
-    };
-    std::deque<Generation> m_generations;
 
     // LEARNING_STATUS snapshot state (guarded by m_cs).
     static constexpr size_t kEventHistory = 32;

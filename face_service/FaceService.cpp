@@ -340,25 +340,13 @@ void FaceService::FlushLearnedTemplates() {
     LeaveCriticalSection(&m_storeLock);
 }
 
-// Era-aware gate data + learner handoff. Public-pipe thread only.
+// Learner handoff. Public-pipe thread only. The era distance windows live
+// inside the learner (per-slot, keyed by the pose-selected target —
+// 2026-09-05 revision); this side carries no learning statistics anymore.
 void FaceService::SubmitLearningCandidate(const LearningSample& best) {
     if (!best.faceId) return;
-    constexpr size_t kWindowRounds = 30;
-    constexpr size_t kMinWindowForP20 = 5;
-    auto& window = m_eraDistanceWindows[best.sid];
-    window.push_back(best.distance);
-    while (window.size() > kWindowRounds) window.pop_front();
-
-    LearningSample sample = best;
-    if (window.size() >= kMinWindowForP20) {
-        std::vector<float> sorted(window.begin(), window.end());
-        std::sort(sorted.begin(), sorted.end());
-        // ceil(p/100*n)-1 keeps the conventional nearest-rank percentile.
-        sample.userEraP20 =
-            sorted[std::min(sorted.size() - 1, (sorted.size() * 20 + 99) / 100 - 1)];
-    }
     if (m_learner) {
-        m_learner->Enqueue(std::move(sample));
+        m_learner->Enqueue(best);
     }
 }
 
@@ -410,26 +398,17 @@ std::wstring FaceService::BuildLearningStatusJson() {
             first = false;
             wchar_t last[24] = L"";
             if (st.hadAccept) localTime(st.lastAccept, last, 24);
-            // Era window is per-account (sid); same nearest-rank p20 as
-            // SubmitLearningCandidate, or -1 when the window is too small
-            // (the gate then falls back to the configured cap).
-            float eraP20 = -1.0f;
-            auto win = m_eraDistanceWindows.find(st.sid);
-            if (win != m_eraDistanceWindows.end() && win->second.size() >= 5) {
-                std::vector<float> sorted(win->second.begin(), win->second.end());
-                std::sort(sorted.begin(), sorted.end());
-                eraP20 = sorted[std::min(sorted.size() - 1,
-                                         (sorted.size() * 20 + 99) / 100 - 1)];
-            }
+            // Slot-level era window (2026-09-05): the p20 of THIS slot's
+            // processed distances, or -1 while it holds fewer than 5 entries
+            // (the gate then falls back to the account's pooled window).
             ss << L"{\"user\":\"" << jsonEscape(st.username) << L"\""
                << L",\"face\":" << st.faceId
                << L",\"label\":\"" << jsonEscape(st.faceLabel) << L"\""
                << L",\"total\":" << st.acceptedTotal
                << L",\"today\":" << st.acceptedToday
                << L",\"last\":\"" << last << L"\""
-               << L",\"era_p20\":" << eraP20
-               << L",\"era_rounds\":" << (win != m_eraDistanceWindows.end()
-                                              ? win->second.size() : 0)
+               << L",\"era_p20\":" << st.eraP20
+               << L",\"era_rounds\":" << st.eraRounds
                << L"}";
         }
     }
@@ -956,10 +935,11 @@ void FaceService::Run() {
                     reloaded = m_store->LoadDatabase();
                     LeaveCriticalSection(&m_storeLock);
                 }
-                // Enrollment changed the templates: the per-user distance
-                // windows describe a gone era — reset (adaptive-gate era
-                // boundary, docs/progressive-learning-v2.md red line 1).
-                m_eraDistanceWindows.clear();
+                // Enrollment changed the templates: every era window describes
+                // a gone era — reset (adaptive-gate era boundary,
+                // docs/progressive-learning-v2.md red line 1). Pacing and α
+                // decay survive; only the windows clear.
+                if (m_learner) m_learner->ResetEraWindows();
                 if (reloaded) {
                 SendControlResponse(ipc::MSG_RELOAD_OK);
                 m_pipeServer->Disconnect();

@@ -7,8 +7,6 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <deque>
-#include <map>
 
 #include "liveness_types.h"
 #include "model_failure.h"
@@ -170,10 +168,6 @@ private:
     bool m_storeLockReady = false;
     std::unique_ptr<TemplateLearner> m_learner;
     int m_learningBakDay = 0;   // local yyyymmdd of the last users.dat.bak
-    // Per-account rolling window of recent successful auth distances feeding
-    // the adaptive update gate (era p20). Public-pipe thread only; cleared
-    // on RELOAD_DB, which marks a re-enrollment era boundary.
-    std::map<std::wstring, std::deque<float>> m_eraDistanceWindows;
 
     // Configuration
     AppConfig m_config;

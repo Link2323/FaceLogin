@@ -1653,8 +1653,8 @@ function renderLearningStatus(force) {
         for (var i = 0; i < st.faces.length; i++) {
           var f = st.faces[i];
           var p20 = (f.era_p20 >= 0)
-            ? '纪元p20 ' + Number(f.era_p20).toFixed(3) + '（' + f.era_rounds + '轮）'
-            : '纪元样本不足（' + f.era_rounds + '/5轮，门用上限）';
+            ? '纪元p20 ' + Number(f.era_p20).toFixed(3) + '（' + f.era_rounds + '轮，按槽独立）'
+            : '纪元样本不足（' + f.era_rounds + '/5轮，门暂用账号池化/上限）';
           html += '<div class="log-info">' + escapeHtml(f.user || '?') + ' 脸' + f.face +
                   '(' + escapeHtml(f.label || '?') + ') · 累计 ' + f.total + ' 次 · 今日 ' + f.today +
                   ' · 最近接受 ' + (f.last || '从未') + ' · ' + p20 + '</div>';

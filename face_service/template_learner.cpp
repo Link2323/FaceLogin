@@ -25,6 +25,15 @@ int LocalDayStamp() {
     return static_cast<int>(st.wYear) * 10000 + st.wMonth * 100 + st.wDay;
 }
 
+// Nearest-rank p20 of a non-empty distance window (the conventional
+// percentile the adaptive gate has always used).
+float NearestRankP20(const std::deque<float>& window) {
+    std::vector<float> sorted(window.begin(), window.end());
+    std::sort(sorted.begin(), sorted.end());
+    return sorted[std::min(sorted.size() - 1,
+                           (sorted.size() * 20 + 99) / 100 - 1)];
+}
+
 } // namespace
 
 TemplateLearner::TemplateLearner(LearningConfig config, Hooks hooks)
@@ -83,6 +92,17 @@ LearningConfig TemplateLearner::Config() const {
     return copy;
 }
 
+void TemplateLearner::ResetEraWindows() {
+    EnterCriticalSection(&m_cs);
+    m_accountEra.clear();
+    for (auto& [key, st] : m_slots) {
+        (void)key;
+        st.eraDistances.clear();
+    }
+    LeaveCriticalSection(&m_cs);
+    FACELOGIN_INFO(L"Template learner: era windows reset (database reload)");
+}
+
 void TemplateLearner::Stop() {
     if (m_stopped.exchange(true, std::memory_order_acq_rel)) return;
     if (m_wake) SetEvent(m_wake);
@@ -117,11 +137,6 @@ std::vector<float> TemplateLearner::BlendEMA(const std::vector<float>& tmpl,
 
 void TemplateLearner::ApplySample(const LearningSample& sample) {
     const LearningConfig cfg = Config();
-    if (!cfg.enabled) {
-        FACELOGIN_INFO(L"Template update skipped: learning disabled");
-        RecordEvent(sample, cfg.distanceGate, false, L"disabled", 0.0f);
-        return;
-    }
 
     // Update-target selection (2026-09-05 revision): pose owns the slot,
     // distance owns the gate. Among the account's V5 faces the update targets
@@ -160,27 +175,70 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         }
     }
 
-    // Norm floor and min-interval are slot-independent gates.
+    // Era windows (2026-09-05 per-slot revision). Recorded for EVERY
+    // processed sample regardless of the gates: a pose rejected by its own
+    // (still warming-up) gate keeps filling its window, so the warm-up phase
+    // is finite. The slot window keys the SELECTED target at its match-time
+    // distance (the gate below re-computes against the live template); the
+    // pooled per-account window keeps the matched distance and only backs the
+    // slot's gate up while the slot window holds fewer than kEraMinSamples
+    // entries. Burst coalescing means one entry per processed sample, not
+    // per auth round.
+    float targetDistance = sample.distance;
+    if (poseSelected) {
+        for (const auto& f : sample.accountFaces) {
+            if (f.faceId == eff.faceId) {
+                targetDistance = f.distance;
+                break;
+            }
+        }
+    }
+    const auto targetKey = std::make_pair(sample.sid, eff.faceId);
+    {
+        EnterCriticalSection(&m_cs);
+        std::deque<float>& pooled = m_accountEra[sample.sid];
+        pooled.push_back(sample.distance);
+        while (pooled.size() > kEraWindowRounds) pooled.pop_front();
+        SlotState& st = m_slots[targetKey];
+        st.eraDistances.push_back(targetDistance);
+        while (st.eraDistances.size() > kEraWindowRounds) st.eraDistances.pop_front();
+        LeaveCriticalSection(&m_cs);
+    }
+
+    if (!cfg.enabled) {
+        FACELOGIN_INFO(L"Template update skipped: learning disabled");
+        RecordEvent(eff, cfg.distanceGate, false, L"disabled", 0.0f);
+        return;
+    }
+
+    // Norm floor — slot-independent.
     if (eff.norm < cfg.normFloor) {
         FACELOGIN_INFO(L"Template update skipped: norm %.2f < floor %.2f",
                        eff.norm, cfg.normFloor);
         RecordEvent(eff, cfg.distanceGate, false, L"norm", 0.0f);
         return;
     }
+    // Min-interval — per slot (2026-09-05): a frontal update must not spend a
+    // turned slot's pacing budget.
     const auto now = std::chrono::system_clock::now();
     {
         EnterCriticalSection(&m_cs);
-        const auto sinceAccept = std::chrono::duration_cast<std::chrono::seconds>(
-            now - m_lastAccept).count();
-        if (m_lastAccept.time_since_epoch().count() != 0 &&
-            sinceAccept < cfg.minIntervalSec) {
-            LeaveCriticalSection(&m_cs);
+        auto it = m_slots.find(targetKey);
+        bool tooSoon = false;
+        long long sinceAccept = 0;
+        if (it != m_slots.end() &&
+            it->second.lastAccept.time_since_epoch().count() != 0) {
+            sinceAccept = std::chrono::duration_cast<std::chrono::seconds>(
+                now - it->second.lastAccept).count();
+            tooSoon = sinceAccept < cfg.minIntervalSec;
+        }
+        LeaveCriticalSection(&m_cs);
+        if (tooSoon) {
             FACELOGIN_INFO(L"Template update skipped: interval %llds < %ds",
-                           static_cast<long long>(sinceAccept), cfg.minIntervalSec);
+                           sinceAccept, cfg.minIntervalSec);
             RecordEvent(eff, cfg.distanceGate, false, L"interval", 0.0f);
             return;
         }
-        LeaveCriticalSection(&m_cs);
     }
 
     // Fetch, gate on pose, blend, commit — the hooks serialize
@@ -207,15 +265,41 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         }
         eff.distance = static_cast<float>(std::sqrt(sum));
     }
-    // Red line 1 (2026-09-03 revision): the effective gate follows the
-    // user's own era distribution, capped by the configured ceiling.
-    const float gate = (eff.userEraP20 > 0.0f)
-        ? std::min(eff.userEraP20, cfg.distanceGate)
+    // Red line 1 (2026-09-05 per-slot revision): the effective gate follows
+    // the TARGET slot's own era distribution; while that window is still
+    // warming up it falls back to the account's pooled window, and only to
+    // the configured ceiling when neither window is ready. Always capped.
+    const wchar_t* gateSrc = L"cap";
+    float eraP20 = -1.0f;
+    bool haveEra = false;
+    {
+        EnterCriticalSection(&m_cs);
+        auto slotIt = m_slots.find(targetKey);
+        if (slotIt != m_slots.end() &&
+            slotIt->second.eraDistances.size() >= kEraMinSamples) {
+            eraP20 = NearestRankP20(slotIt->second.eraDistances);
+            gateSrc = L"slot";
+            haveEra = true;
+        } else {
+            auto accIt = m_accountEra.find(sample.sid);
+            if (accIt != m_accountEra.end() &&
+                accIt->second.size() >= kEraMinSamples) {
+                eraP20 = NearestRankP20(accIt->second);
+                gateSrc = L"pooled";
+                haveEra = true;
+            }
+        }
+        LeaveCriticalSection(&m_cs);
+    }
+    // haveEra, not eraP20 > 0: a window's p20 is valid even at 0.0 (unit-test
+    // geometry can produce it; real embeddings never land there).
+    const float gate = haveEra
+        ? std::min(eraP20, cfg.distanceGate)
         : cfg.distanceGate;
     if (eff.distance > gate) {
         FACELOGIN_INFO(L"Template update skipped: distance %.3f > gate %.3f "
-                       L"(user era p20 %.3f, cap %.2f, sel=%s)",
-                       eff.distance, gate, eff.userEraP20, cfg.distanceGate,
+                       L"(gate=%s era_p20=%.3f cap=%.2f, sel=%s)",
+                       eff.distance, gate, gateSrc, eraP20, cfg.distanceGate,
                        poseSelected ? L"yaw" : L"dist");
         RecordEvent(eff, gate, false, L"distance", 0.0f);
         return;
@@ -264,14 +348,17 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
     int decayed = 1;
     {
         EnterCriticalSection(&m_cs);
-        if (day != m_dayStamp) {
-            m_dayStamp = day;
-            m_dayCount = 0;
+        SlotState& st = m_slots[targetKey];
+        if (day != st.dayStamp) {
+            st.dayStamp = day;
+            st.dayCount = 0;
         }
-        decayed = m_dayCount + 1;
+        decayed = st.dayCount + 1;
         LeaveCriticalSection(&m_cs);
     }
-    // Drift guard: the more updates accepted today, the smaller each step.
+    // Drift guard: the more updates THIS SLOT accepted today, the smaller
+    // its step (per-slot since 2026-09-05 — the per-template bound
+    // α·H(n_slot) is tighter than the old shared-counter α·H(n_total)).
     const float alphaUsed = cfg.alpha / static_cast<float>(decayed);
     std::vector<float> blended = BlendEMA(tmpl, eff.embedding, alphaUsed);
     if (blended.empty()) {
@@ -289,13 +376,14 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
     }
     {
         EnterCriticalSection(&m_cs);
-        m_dayCount = decayed;
-        m_lastAccept = now;
+        SlotState& st = m_slots[targetKey];
+        st.dayCount = decayed;
+        st.lastAccept = now;
+        st.generations.push_back(std::move(snapshot.embedding));
+        while (st.generations.size() > 3) st.generations.pop_front();
+        const size_t gen = st.generations.size();
         m_dirty = true;
         m_lastUpdate = now;
-        m_generations.push_back({eff.sid, eff.faceId, std::move(snapshot.embedding)});
-        while (m_generations.size() > 3) m_generations.pop_front();
-        const size_t gen = m_generations.size();
         LeaveCriticalSection(&m_cs);
         FACELOGIN_INFO(L"Template updated: user=%s face#%u(%s) probe_dist=%.3f "
                        L"sel=%s alpha=%.3f probe_norm=%.2f probe_yaw=%.1f "
@@ -362,8 +450,15 @@ std::vector<LearningFaceStatus> TemplateLearner::FaceStatuses() const {
     EnterCriticalSection(&m_cs);
     out.reserve(m_faceStatus.size());
     for (const auto& [key, st] : m_faceStatus) {
-        (void)key;
-        out.push_back(st);
+        LearningFaceStatus row = st;
+        auto it = m_slots.find(key);
+        if (it != m_slots.end()) {
+            row.eraRounds = static_cast<int>(it->second.eraDistances.size());
+            if (row.eraRounds >= static_cast<int>(kEraMinSamples)) {
+                row.eraP20 = NearestRankP20(it->second.eraDistances);
+            }
+        }
+        out.push_back(row);
     }
     LeaveCriticalSection(&m_cs);
     return out;
