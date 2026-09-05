@@ -188,8 +188,9 @@ public:
     // region shrinks, fail-safe direction), NOT a security hole, and a
     // rejecting sentinel false-positives legacy 0.60-pair accounts into a
     // permanently wedged learning channel. The real brakes on poisoning are
-    // the update distance gate, the pose cone, the landing-clarity gate and
-    // PAD — none of which depend on intra-account spacing.
+    // the update distance gate (evaluated against the pose-selected target
+    // slot), the pose cone, the legacy-path landing-clarity gate and PAD —
+    // none of which depend on intra-account spacing.
     // Call SaveDatabase() to persist.
     bool UpdateTemplateFace(const std::wstring& sid, uint32_t faceId,
                             const std::vector<float>& newEmbedding);
@@ -240,15 +241,19 @@ public:
         std::wstring upn;
         std::wstring sid;
         float        distance = 0.0f;
-        // Which stored face produced the winning distance — progressive
-        // learning EMA-updates exactly this template.
+        // Which stored face produced the winning distance. The learner's
+        // legacy V4 path EMA-updates this face; the V5 pose path re-targets
+        // by nominal yaw (see GetAccountFaceDistances).
         uint32_t     faceId = 0;
         std::wstring faceLabel;   // display label, logging only
-        // Distance of the WINNING account's second-nearest comparable face
-        // (progressive-learning landing-clarity gate: the hit template must
-        // beat the runner-up by >= 0.10, else the probe is equidistant
-        // between two slots and must not update either). Negative = the
-        // account has only one comparable face (gate passes trivially).
+        // Distance of the WINNING account's second-nearest comparable face.
+        // Legacy V4 learning path only (faces without nominal angles, where
+        // the update target is still the distance-nearest face): an
+        // equidistant frame cannot say which slot it belongs to, so it must
+        // not update either. The V5 pose-selected path does not use this —
+        // slot ownership is decided by nominal yaw, not embedding distance.
+        // Negative = the account has only one comparable face (gate passes
+        // trivially).
         float        secondFaceDistance = -1.0f;
     };
 
@@ -270,6 +275,27 @@ public:
                                                    size_t probeDim,
                                                    float threshold = 0.30f,
                                                    float* outBestDistance = nullptr);
+
+    // One face of an account as seen by a probe: its id/label/V5 nominal pose
+    // angles plus the probe's Euclidean distance to that face's embedding.
+    // nominalYaw/Pitch carry kNominalAngleInvalid for V4-era faces.
+    struct AccountFaceDistance {
+        uint32_t    faceId = 0;
+        std::wstring label;
+        float       nominalYaw = kNominalAngleInvalid;
+        float       nominalPitch = kNominalAngleInvalid;
+        float       distance = 0.0f;
+    };
+
+    // Distance from a probe to EVERY comparable face of one account (≤3),
+    // with each face's nominal pose angles. Feeds the learner's pose-based
+    // update-target selection: with overlapping enrolled slots the
+    // distance-nearest face is not necessarily the pose slot the probe
+    // actually landed in. Faces with a non-comparable embedding dimensionality
+    // are skipped. Same lock requirement as FindBestIdentity (store lock).
+    std::vector<AccountFaceDistance> GetAccountFaceDistances(
+        const std::wstring& sid, const float probeEmbedding[],
+        size_t probeDim) const;
 
     // Locate an already-authorized identity and decrypt its password.  This
     // must be called only after the caller has completed all authentication

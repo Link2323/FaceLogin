@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include "credential_store.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -42,6 +44,13 @@ struct LearningSample {
     // small; the effective gate then falls back to the configured cap.
     // Red line 1 (2026-09-03 revision): gate = min(userEraP20, cap).
     float userEraP20 = -1.0f;
+    // Every comparable face of the authenticated account as seen by this
+    // frame (id/label/nominal pose/distance), computed by the pipe thread
+    // under the store lock. Drives the update-target selection: the V5
+    // update goes to the slot whose nominal yaw is nearest the probe, which
+    // with overlapping enrolled slots can differ from the distance-nearest
+    // face (faceId above). Empty/invalid-nominal entries → legacy V4 path.
+    std::vector<CredentialStore::AccountFaceDistance> accountFaces;
 };
 
 struct LearningConfig {
@@ -54,8 +63,11 @@ struct LearningConfig {
     // axes for a V5 template (legacy V4 templates without a nominal angle
     // pass — no cone information, protected by distance+clarity instead).
     float coneHalfAngleDeg = 25.0f;
-    // Landing-clarity threshold: the hit template must beat the account's
-    // second-nearest face by at least this much.
+    // Landing-clarity threshold (LEGACY V4 PATH ONLY): with no nominal
+    // angles the update target is still the distance-nearest face, and the
+    // hit template must beat the account's second-nearest face by at least
+    // this much. The V5 pose-selected path does not apply it — yaw owns slot
+    // ownership and the distance gate is re-evaluated against the target.
     float clarityMargin = 0.10f;
 };
 
@@ -105,12 +117,14 @@ struct LearningFaceStatus {
 //
 // Security invariants (docs §1): the update gate is far below the auth
 // threshold so an impostor that barely passed authentication can never move
-// a template; liveness-failed rounds never reach Enqueue at all; the pose
-// cone and landing-clarity gates keep an update in its own angle slot; the
-// store records (observation-only) the account's minimum template-pair
-// distance on every commit; every accepted update keeps the previous
-// embedding in a 3-generation ring and the first flush of a day writes
-// users.dat.bak (see FaceService).
+// a template — and the gate is evaluated against the pose-selected TARGET
+// slot's distance, never the (smaller) matched-slot distance; liveness-failed
+// rounds never reach Enqueue at all; the pose cone re-checks the target after
+// selection; legacy V4 slots (no nominal angles) keep the distance-nearest
+// target plus the landing-clarity gate; the store records (observation-only)
+// the account's minimum template-pair distance on every commit; every
+// accepted update keeps the previous embedding in a 3-generation ring and the
+// first flush of a day writes users.dat.bak (see FaceService).
 class TemplateLearner {
 public:
     // What fetchTemplate returns for the target slot: the current embedding

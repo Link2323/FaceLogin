@@ -628,6 +628,33 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     return std::nullopt;
 }
 
+std::vector<CredentialStore::AccountFaceDistance>
+CredentialStore::GetAccountFaceDistances(const std::wstring& sid,
+                                         const float probeEmbedding[],
+                                         size_t probeDim) const {
+    std::vector<AccountFaceDistance> out;
+    if (!probeEmbedding || probeDim == 0) return out;
+    size_t idx = FindUserIndex(sid, L"", L"");
+    if (idx >= m_users.size()) return out;
+    for (const auto& face : m_users[idx].faces) {
+        // Same dimensionality rule as FindBestIdentity: a non-comparable
+        // embedding belongs to a different metric space and has no distance.
+        if (face.embedding.size() != probeDim) continue;
+        float sum = 0.0f;
+        for (size_t j = 0; j < probeDim; j++) {
+            float diff = probeEmbedding[j] - face.embedding[j];
+            sum += diff * diff;
+        }
+        AccountFaceDistance& d = out.emplace_back();
+        d.faceId = face.id;
+        d.label = face.label;
+        d.nominalYaw = face.nominalYaw;
+        d.nominalPitch = face.nominalPitch;
+        d.distance = std::sqrt(sum);
+    }
+    return out;
+}
+
 bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceId,
                                          const std::vector<float>& newEmbedding) {
     size_t idx = FindUserIndex(sid, L"", L"");

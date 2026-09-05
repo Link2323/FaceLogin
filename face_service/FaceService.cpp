@@ -1192,6 +1192,15 @@ BindingDecision FaceService::VerifyIdentityBinding(
         roundBest->faceMargin = (identity->secondFaceDistance >= 0.0f)
             ? (identity->secondFaceDistance - identity->distance)
             : 1e9f;
+        // Per-face pose/distance table for the learner's yaw-based target
+        // selection. Store read — shares the store lock like every other
+        // access (the learner thread may be committing concurrently).
+        {
+            EnterCriticalSection(&m_storeLock);
+            roundBest->accountFaces = m_store->GetAccountFaceDistances(
+                identity->sid, embedding.data(), embedding.size());
+            LeaveCriticalSection(&m_storeLock);
+        }
     }
 
     if (bindingIndex == 0) {

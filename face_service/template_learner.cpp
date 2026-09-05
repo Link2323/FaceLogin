@@ -122,33 +122,49 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         RecordEvent(sample, cfg.distanceGate, false, L"disabled", 0.0f);
         return;
     }
-    // Red line 1 (2026-09-03 revision): the effective gate follows the
-    // user's own era distribution, capped by the configured ceiling.
-    const float gate = (sample.userEraP20 > 0.0f)
-        ? std::min(sample.userEraP20, cfg.distanceGate)
-        : cfg.distanceGate;
-    if (sample.distance > gate) {
-        FACELOGIN_INFO(L"Template update skipped: distance %.3f > gate %.3f "
-                       L"(user era p20 %.3f, cap %.2f)",
-                       sample.distance, gate, sample.userEraP20,
-                       cfg.distanceGate);
-        RecordEvent(sample, gate, false, L"distance", 0.0f);
-        return;
+
+    // Update-target selection (2026-09-05 revision): pose owns the slot,
+    // distance owns the gate. Among the account's V5 faces the update targets
+    // the one whose nominal yaw is nearest the probe's. The distance-nearest
+    // face (sample.faceId) can be a DIFFERENT slot when enrolled slots
+    // overlap (pair spacing < 0.68): EMA-ing a turned probe into the frontal
+    // slot converges the slots (coverage shrink), while a probe cone-rejected
+    // against the matched slot may have been perfectly valid for its own pose
+    // slot. Selection effectively moves the pose boundary from the matched
+    // slot's ±25° cone to the midpoints between nominal angles (±15° for the
+    // 0/±30 slots). Authentication itself stays pure distance matching —
+    // only the learning target is pose-selected. Faces without nominal
+    // angles (V4-era, or an invalid probe pose estimate) keep the
+    // distance-nearest target plus the landing-clarity gate below.
+    LearningSample eff = sample;
+    bool poseSelected = false;
+    if (IsValidNominalAngle(sample.probeYawDeg) &&
+        IsValidNominalAngle(sample.probePitchDeg)) {
+        const CredentialStore::AccountFaceDistance* byYaw = nullptr;
+        for (const auto& f : sample.accountFaces) {
+            if (!IsValidNominalAngle(f.nominalYaw) ||
+                !IsValidNominalAngle(f.nominalPitch)) {
+                continue;  // V4-era face: no pose slot to select
+            }
+            if (!byYaw) { byYaw = &f; continue; }
+            const float dNew = std::fabs(sample.probeYawDeg - f.nominalYaw);
+            const float dCur = std::fabs(sample.probeYawDeg - byYaw->nominalYaw);
+            if (dNew < dCur || (dNew == dCur && f.distance < byYaw->distance)) {
+                byYaw = &f;  // yaw-nearest; exact tie → smaller embedding distance
+            }
+        }
+        if (byYaw) {
+            poseSelected = true;
+            eff.faceId = byYaw->faceId;
+            eff.faceLabel = byYaw->label;
+        }
     }
-    // Landing clarity (2026-09-04 final form): a frame nearly equidistant to
-    // two of the account's slots does not say WHICH slot it belongs to —
-    // updating either risks cross-angle contamination (docs §3).
-    if (sample.faceMargin < cfg.clarityMargin) {
-        FACELOGIN_INFO(L"Template update skipped: landing clarity margin %.3f < "
-                       L"%.2f (equidistant frame, wrong-slot risk)",
-                       sample.faceMargin, cfg.clarityMargin);
-        RecordEvent(sample, gate, false, L"clarity", 0.0f);
-        return;
-    }
-    if (sample.norm < cfg.normFloor) {
+
+    // Norm floor and min-interval are slot-independent gates.
+    if (eff.norm < cfg.normFloor) {
         FACELOGIN_INFO(L"Template update skipped: norm %.2f < floor %.2f",
-                       sample.norm, cfg.normFloor);
-        RecordEvent(sample, gate, false, L"norm", 0.0f);
+                       eff.norm, cfg.normFloor);
+        RecordEvent(eff, cfg.distanceGate, false, L"norm", 0.0f);
         return;
     }
     const auto now = std::chrono::system_clock::now();
@@ -161,7 +177,7 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
             LeaveCriticalSection(&m_cs);
             FACELOGIN_INFO(L"Template update skipped: interval %llds < %ds",
                            static_cast<long long>(sinceAccept), cfg.minIntervalSec);
-            RecordEvent(sample, gate, false, L"interval", 0.0f);
+            RecordEvent(eff, cfg.distanceGate, false, L"interval", 0.0f);
             return;
         }
         LeaveCriticalSection(&m_cs);
@@ -170,18 +186,62 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
     // Fetch, gate on pose, blend, commit — the hooks serialize
     // CredentialStore access.
     TemplateSnapshot snapshot;
-    if (!m_hooks.fetchTemplate(sample.sid, sample.faceId, snapshot) ||
+    if (!m_hooks.fetchTemplate(eff.sid, eff.faceId, snapshot) ||
         snapshot.embedding.empty()) {
         FACELOGIN_INFO(L"Template update skipped: face #%u disappeared",
-                       sample.faceId);
-        RecordEvent(sample, gate, false, L"vanished", 0.0f);
+                       eff.faceId);
+        RecordEvent(eff, cfg.distanceGate, false, L"vanished", 0.0f);
+        return;
+    }
+    // Pose path: re-evaluate the distance against the TARGET template as it
+    // is NOW (it may have changed since the match). dTarget is >= the
+    // matched-slot distance by construction, so this gate is monotonically
+    // stricter than a gate on the matched distance — the poisoning bound
+    // still refers to the template actually being blended.
+    if (poseSelected) {
+        double sum = 0.0;
+        const size_t n = std::min(snapshot.embedding.size(), eff.embedding.size());
+        for (size_t i = 0; i < n; i++) {
+            const double diff = eff.embedding[i] - snapshot.embedding[i];
+            sum += diff * diff;
+        }
+        eff.distance = static_cast<float>(std::sqrt(sum));
+    }
+    // Red line 1 (2026-09-03 revision): the effective gate follows the
+    // user's own era distribution, capped by the configured ceiling.
+    const float gate = (eff.userEraP20 > 0.0f)
+        ? std::min(eff.userEraP20, cfg.distanceGate)
+        : cfg.distanceGate;
+    if (eff.distance > gate) {
+        FACELOGIN_INFO(L"Template update skipped: distance %.3f > gate %.3f "
+                       L"(user era p20 %.3f, cap %.2f, sel=%s)",
+                       eff.distance, gate, eff.userEraP20, cfg.distanceGate,
+                       poseSelected ? L"yaw" : L"dist");
+        RecordEvent(eff, gate, false, L"distance", 0.0f);
+        return;
+    }
+    // Landing clarity — LEGACY V4 PATH ONLY (2026-09-05 revision): without
+    // nominal angles the target is still the distance-nearest face, and a
+    // frame nearly equidistant to two of the account's slots does not say
+    // WHICH slot it belongs to — updating either risks cross-angle
+    // contamination (docs §3). The pose-selected path deliberately drops
+    // this gate: yaw owns slot ownership and the distance gate above is
+    // evaluated against the selected slot itself.
+    if (!poseSelected && eff.faceMargin < cfg.clarityMargin) {
+        FACELOGIN_INFO(L"Template update skipped: landing clarity margin %.3f < "
+                       L"%.2f (equidistant frame, wrong-slot risk)",
+                       eff.faceMargin, cfg.clarityMargin);
+        RecordEvent(eff, gate, false, L"clarity", 0.0f);
         return;
     }
     // Pose cone (2026-09-04 final form): a V5 template only learns from
-    // probes inside |probe − nominal| < cone on BOTH axes. Legacy V4
-    // templates (invalid nominal) have no cone information and pass — their
-    // protection is the distance gate + clarity gate + PAD; intra-account
-    // convergence is fail-safe (coverage shrinks, docs red line 3).
+    // probes inside |probe − nominal| < cone on BOTH axes. On the pose path
+    // this is near-tautological by construction but still rejects probes
+    // beyond 25° of EVERY nominal (e.g. |yaw| > 55° against 0/±30 slots).
+    // Legacy V4 templates (invalid nominal) have no cone information and
+    // pass — their protection is the distance gate + clarity gate + PAD;
+    // intra-account convergence is fail-safe (coverage shrinks, docs red
+    // line 3).
     if (IsValidNominalAngle(snapshot.nominalYaw) &&
         IsValidNominalAngle(snapshot.nominalPitch) &&
         std::fabs(sample.probeYawDeg) <= 90.0f &&
@@ -195,7 +255,7 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
                            sample.probeYawDeg, sample.probePitchDeg,
                            snapshot.nominalYaw, snapshot.nominalPitch,
                            dYaw, dPitch, cfg.coneHalfAngleDeg);
-            RecordEvent(sample, gate, false, L"cone", 0.0f);
+            RecordEvent(eff, gate, false, L"cone", 0.0f);
             return;
         }
     }
@@ -213,18 +273,18 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
     }
     // Drift guard: the more updates accepted today, the smaller each step.
     const float alphaUsed = cfg.alpha / static_cast<float>(decayed);
-    std::vector<float> blended = BlendEMA(tmpl, sample.embedding, alphaUsed);
+    std::vector<float> blended = BlendEMA(tmpl, eff.embedding, alphaUsed);
     if (blended.empty()) {
-        RecordEvent(sample, gate, false, L"error", 0.0f);
+        RecordEvent(eff, gate, false, L"error", 0.0f);
         return;
     }
 
     const float oldNorm = L2Norm(tmpl);
     const float newNorm = L2Norm(blended);
-    if (!m_hooks.commit(sample, blended, alphaUsed)) {
+    if (!m_hooks.commit(eff, blended, alphaUsed)) {
         // The target vanished between fetch and commit — logged upstream.
         // Deliberately no retry: the next auth round re-derives.
-        RecordEvent(sample, gate, false, L"vanished", 0.0f);
+        RecordEvent(eff, gate, false, L"vanished", 0.0f);
         return;
     }
     {
@@ -233,19 +293,20 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         m_lastAccept = now;
         m_dirty = true;
         m_lastUpdate = now;
-        m_generations.push_back({sample.sid, sample.faceId, std::move(snapshot.embedding)});
+        m_generations.push_back({eff.sid, eff.faceId, std::move(snapshot.embedding)});
         while (m_generations.size() > 3) m_generations.pop_front();
         const size_t gen = m_generations.size();
         LeaveCriticalSection(&m_cs);
         FACELOGIN_INFO(L"Template updated: user=%s face#%u(%s) probe_dist=%.3f "
-                       L"alpha=%.3f probe_norm=%.2f probe_yaw=%.1f pitch=%.1f "
-                       L"clarity=%.2f tpl_norm %.4f->%.4f gen=%zu",
-                       sample.username.c_str(), sample.faceId,
-                       sample.faceLabel.c_str(), sample.distance, alphaUsed,
-                       sample.norm, sample.probeYawDeg, sample.probePitchDeg,
-                       sample.faceMargin, oldNorm, newNorm, gen);
+                       L"sel=%s alpha=%.3f probe_norm=%.2f probe_yaw=%.1f "
+                       L"pitch=%.1f clarity=%.2f tpl_norm %.4f->%.4f gen=%zu",
+                       eff.username.c_str(), eff.faceId,
+                       eff.faceLabel.c_str(), eff.distance,
+                       poseSelected ? L"yaw" : L"dist", alphaUsed,
+                       eff.norm, eff.probeYawDeg, eff.probePitchDeg,
+                       eff.faceMargin, oldNorm, newNorm, gen);
     }
-    RecordEvent(sample, gate, true, nullptr, alphaUsed);
+    RecordEvent(eff, gate, true, nullptr, alphaUsed);
 }
 
 void TemplateLearner::RecordEvent(const LearningSample& sample, float gate,
