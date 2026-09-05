@@ -200,7 +200,7 @@ AppConfig ConfigFromJson(const std::string& json) {
     }
     cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.65f);
     if (!std::isfinite(cfg.learning_distance_gate) ||
-        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.65f) {
+        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.68f) {
         FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.65",
                        cfg.learning_distance_gate);
         cfg.learning_distance_gate = 0.65f;

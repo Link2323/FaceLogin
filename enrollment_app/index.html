@@ -377,6 +377,15 @@ body{
       <p class="dim" style="font-size:11px">开启后，每次人脸认证成功会以极小步长微调命中角度的模板，跟随发型、光线等日常外貌变化。关闭后人脸模板完全只读（只可用重新录入更新）。实验性功能：默认开启；若出现识别异常，可先关闭此开关排查。</p>
     </div>
 
+    <div class="field">
+      <label>更新门上限 (Learning Distance Gate): <span id="cfg-learn-gate-val">0.65</span>
+        <span style="font-size:10px;padding:1px 6px;border:1px solid #d97706;color:#b45309;border-radius:3px;margin-left:4px;white-space:nowrap">实验性</span>
+      </label>
+      <input type="range" id="cfg-learn-gate" min="0.60" max="0.68" value="0.65" step="0.01"
+             oninput="document.getElementById('cfg-learn-gate-val').textContent=parseFloat(this.value).toFixed(2)">
+      <p class="dim" style="margin-top:4px;font-size:11px">渐进式学习的距离上限：实际更新门 = min(该用户近期距离 p20, 此上限)，只会更严不会更松。调高让漂移大的用户更容易学（默认 0.65）；上限 0.68 是安全红线（实测跨角度模板最小距离 0.681，更高将失去错槽保护）。</p>
+    </div>
+
     <button class="btn btn-primary" onclick="onSaveSettings()">
       保存设置
     </button>
@@ -839,6 +848,16 @@ function loadSettings() {
     if (asThr > 0.50) asThr = 0.50;
     document.getElementById('cfg-antispoof-threshold').value = asThr;
     document.getElementById('cfg-asthr-val').textContent = asThr.toFixed(2);
+    // Learning gate cap: slider grid [0.60, 0.68]; hand-edited configs can be
+    // stricter (down to 0.35) — the loader honors that, the slider snaps to
+    // its own range on display (a settings save then writes the snapped
+    // value; the effective gate is min(user p20, cap) so this stays strict).
+    var lgThr = Number(cfg.learning_distance_gate || 0.65);
+    lgThr = Math.round((lgThr - 0.60) / 0.01) * 0.01 + 0.60;
+    if (lgThr < 0.60) lgThr = 0.60;
+    if (lgThr > 0.68) lgThr = 0.68;
+    document.getElementById('cfg-learn-gate').value = lgThr;
+    document.getElementById('cfg-learn-gate-val').textContent = lgThr.toFixed(2);
   } catch(e) { showBanner('settings', '读取设置失败: ' + e.message, 'error'); }
 }
 
@@ -855,7 +874,8 @@ function onSaveSettings() {
     camera_rotation: parseInt(document.getElementById('cfg-rotation').value) || 0,
     camera_device: document.getElementById('cfg-camera').value,
     ema_learning: learning,
-    failure_learning: learning
+    failure_learning: learning,
+    learning_distance_gate: parseFloat(document.getElementById('cfg-learn-gate').value)
   });
   try {
     var ok = H.SetConfig(JSON.stringify(cfg));

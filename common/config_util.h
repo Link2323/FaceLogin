@@ -38,11 +38,15 @@ struct AppConfig {
     // template. The stored value is the CAP — the effective gate is
     // min(user's current-era same-person distance p20, cap), tracked by the
     // service per account (docs/progressive-learning-v2.md red line 1).
-    // Cap rationale (2026-09-04 final form): 0.65 keeps a margin below the
-    // 0.681 minimum measured cross-angle distance while covering the YY
-    // environment-drift band; the pose cone + landing-clarity gates (not a
-    // wider distance margin) are what block wrong-slot updates. Clamped to
-    // [0.35, 0.65].
+    // Cap rationale (2026-09-04 final form, widened 2026-09-05 for the
+    // console slider): 0.65 default keeps a margin below the 0.681 minimum
+    // measured cross-angle distance while covering the YY environment-drift
+    // band; the pose cone + landing-clarity gates (not a wider distance
+    // margin) are what block wrong-slot updates. The console slider offers
+    // [0.60, 0.68] (experimenting above 0.65 for drifty users); the hard
+    // ceiling 0.68 is the last 0.01-grid value below the 0.681 floor and
+    // 0.70+ stays permanently forbidden. Hand-edited values may go stricter
+    // down to 0.35. Clamped to [0.35, 0.68].
     float          learning_distance_gate = 0.65f;
     // Absolute garbage line for the pre-normalization embedding norm
     // (w600k_r50 scale ≈ 20-25): blocks only blur/half-face frames. The
