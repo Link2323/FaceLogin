@@ -38,7 +38,7 @@
 | 锁屏后短暂显示“正在加载模型” | 锁屏预加载尚未完成或锁屏事件延迟 | 认证请求会兜底等待；检查 `Model load requested: session lock` 与 `Authentication worker ready` 日志间隔 |
 | 服务启动失败 | 缺少运行时 DLL | 安装时确保 DLL 与 EXE 同目录 |
 | 锁屏不显示磁贴 | 未注册或已禁用 / 无注册用户 | 检查注册表 Disabled 键值，确认已录入人脸 |
-| 识别率低 | 光照不足 / 嵌入质量差 | 重新注册人脸，确保光线均匀（注册与解锁的光照/距离条件要一致——夜间注册白天解锁会把真脸距离推到阈值边缘）。失败日志可定位：`service.log` 失败 WARN 的 `closest identity distance` 接近 `threshold` 为采集条件问题、远高于阈值为非本人；`auth_worker.log` 的 `face luma` 低于 ~40 即欠曝光（2026-08-31 起 `low_light_enhance` 默认开启，旧安装的 config.json 显式 false 需手动改 true） |
+| 识别率低 | 光照不足 / 嵌入质量差 | 重新注册人脸，确保光线均匀（注册与解锁的光照/距离条件要一致——夜间注册白天解锁会把真脸距离推到阈值边缘）。失败日志可定位：`service.log` 失败 WARN 的 `closest identity distance` 接近 `threshold` 为采集条件问题、远高于阈值为非本人；`auth_worker.log` 的 `face luma` 低于 ~40 即欠曝光（`low_light_enhance` 默认关闭，2026-08-31 至 2026-09-05 期间曾默认开启；欠曝光场景可在设置中或改 config.json 手动开启） |
 | 摄像头不工作 | Session 0 权限、相机占用或驱动错误 | 检查 `auth_worker.log` 的 DirectShow 相机初始化错误，并关闭占用相机的程序 |
 | 人脸失败后密码输入被打断 | 部署了会在失败后重新枚举的旧 Credential Provider | 核对已部署 DLL；新版本（2026-08-29 起）失败 tile 无重试按钮、按任意键/点击即重试，会记录 `Terminal failure shown in-place; passive retry re-armed`——监听严格限定本磁贴选中期间，切到密码磁贴即停止；若部署的是更旧版本则应见 `passive retry disabled` 且仅点击“重新尝试人脸识别”才产生新 `AUTH_REQUEST` |
 | 锁屏后摄像头指示灯立即点亮 | 旧版服务、其他应用占用摄像头，或 worker 收到异常早到的认证请求 | 当前版本没有摄像头预热开关；核对已部署 EXE 哈希和 `auth_worker.log`，正常顺序必须先 ready，收到认证后才初始化相机 |

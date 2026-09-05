@@ -7,15 +7,15 @@ namespace facelogin {
 struct AppConfig {
     float          match_threshold        = 0.80f;       // 512-D calibrated; EmbeddingThresholdForDim clamps to [0.70, 1.00]
     float          anti_spoof_threshold   = 0.28f;       // 50/50 MiniFAS fusion threshold; UI default on a 0.01 grid (calibration point 0.281)
-    // Low-light enhancement. true (default since 2026-08-31) = normalize
-    // brightness of dark face chips before recognition. Measured on the
-    // production chain: underexposed chips (luma 14-22) cost +0.25-0.30
-    // match distance with enhancement off, ~+0.05 with it on — a
-    // night-enrolled / day-unlocked (or backlit) setup otherwise lands at
-    // the 0.80 threshold's edge. Bright chips are untouched (no-op above
-    // luma 40). PAD intentionally keeps the raw preprocessing used during
-    // calibration.
-    bool           low_light_enhance      = true;
+    // Low-light enhancement. Default false since 2026-09-05 (was true
+    // 2026-08-31 – 2026-09-05): normalize brightness of dark face chips
+    // before recognition. Measured on the production chain: underexposed
+    // chips (luma 14-22) cost +0.25-0.30 match distance with enhancement
+    // off, ~+0.05 with it on — a night-enrolled / day-unlocked (or
+    // backlit) setup otherwise lands at the 0.80 threshold's edge. Bright
+    // chips are untouched (no-op above luma 40). PAD intentionally keeps
+    // the raw preprocessing used during calibration.
+    bool           low_light_enhance      = false;
     std::string    camera_device          = "";          // device symbolic link; empty = first camera
     // Camera rotation in degrees clockwise. Valid: 0, 90, 180, 270.
     // Use when the camera is physically mounted in a non-standard

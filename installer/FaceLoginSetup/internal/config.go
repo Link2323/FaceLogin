@@ -24,7 +24,7 @@ func EnsureConfigDefaults(configPath string) error {
 	cfg := map[string]any{
 		"match_threshold":           defaultMatchThreshold,
 		"anti_spoof_threshold":      defaultAntiSpoofThreshold,
-		"low_light_enhance":         true,
+		"low_light_enhance":         false,
 		"camera_rotation":           0,
 		"camera_device":             "",
 		"ema_learning":              true,
