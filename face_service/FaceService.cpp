@@ -1,5 +1,6 @@
 #include "FaceService.h"
 #include "auth_pipeline.h"
+#include "face_align.h"
 #include "performance_affinity.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
@@ -11,7 +12,10 @@
 #include "../common/data_path.h"
 #include "../common/secure_clear.h"
 #include <shlobj.h>
+#include <algorithm>
 #include <chrono>
+#include <ctime>
+#include <sstream>
 #include <thread>
 #include <vector>
 #include <psapi.h>
@@ -287,18 +291,25 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
     }
 }
 
-// Progressive-learning phase 0 instrumentation: static norm of every stored
-// template at load/reload. Enrollment averages 5 unit-length samples without
-// renormalizing, so the stored norm (<1) tracks how spread the enrollment
-// frames were; changes over time would reveal template drift.
+// Progressive-learning instrumentation: static norm of every stored template
+// at load/reload, plus the slot's nominal pose (V5; legacy records carry the
+// invalid sentinel = "no cone"). Enrollment averages 5 unit-length samples
+// without renormalizing, so the stored norm (<1) tracks how spread the
+// enrollment frames were; changes over time reveal template drift. The
+// nominal angle tells the field logs whether the pose-cone gate is armed for
+// this slot.
 static void LogTemplateNorms(const CredentialStore& store, const wchar_t* when) {
     for (const auto& u : store.GetUsers()) {
         for (const auto& f : u.faces) {
             double sq = 0.0;
             for (float v : f.embedding) sq += static_cast<double>(v) * v;
-            FACELOGIN_INFO(L"Template stats [%s]: user=%s face#%u(%s) dim=%zu norm=%.4f",
+            const wchar_t* cone = IsValidNominalAngle(f.nominalYaw)
+                ? L"cone on" : L"no cone";
+            FACELOGIN_INFO(L"Template stats [%s]: user=%s face#%u(%s) dim=%zu "
+                           L"norm=%.4f nominalYaw=%.0f nominalPitch=%.0f (%s)",
                            when, u.username.c_str(), f.id, f.label.c_str(),
-                           f.embedding.size(), std::sqrt(sq));
+                           f.embedding.size(), std::sqrt(sq),
+                           f.nominalYaw, f.nominalPitch, cone);
         }
     }
 }
@@ -349,6 +360,103 @@ void FaceService::SubmitLearningCandidate(const LearningSample& best) {
     if (m_learner) {
         m_learner->Enqueue(std::move(sample));
     }
+}
+
+// LEARNING_STATUS body. Compact single-message JSON (short keys, no pretty
+// printing): the public pipe has no fragmentation, so the payload has to
+// stay well inside the client's fixed read buffer.
+std::wstring FaceService::BuildLearningStatusJson() {
+    auto jsonEscape = [](const std::wstring& s) {
+        std::wstring out;
+        out.reserve(s.size() + 2);
+        for (wchar_t c : s) {
+            if (c == L'"' || c == L'\\') {
+                out.push_back(L'\\');
+                out.push_back(c);
+            } else if (c < 0x20) {
+                wchar_t buf[8];
+                swprintf_s(buf, L"\\u%04x", static_cast<unsigned>(c));
+                out += buf;
+            } else {
+                out.push_back(c);
+            }
+        }
+        return out;
+    };
+    auto localTime = [](std::chrono::system_clock::time_point tp,
+                        wchar_t* buf, size_t len) {
+        const std::time_t tt = std::chrono::system_clock::to_time_t(tp);
+        std::tm localTm{};
+        if (localtime_s(&localTm, &tt) != 0) {
+            wcsncpy_s(buf, len, L"?", _TRUNCATE);
+            return;
+        }
+        swprintf_s(buf, len, L"%04d-%02d-%02d %02d:%02d:%02d",
+                   localTm.tm_year + 1900, localTm.tm_mon + 1, localTm.tm_mday,
+                   localTm.tm_hour, localTm.tm_min, localTm.tm_sec);
+    };
+
+    std::wostringstream ss;
+    ss << L"{\"enabled\":" << (m_config.ema_learning ? L"true" : L"false")
+       << L",\"gate_cap\":" << m_config.learning_distance_gate
+       << L",\"alpha\":" << m_config.learning_alpha
+       << L",\"interval\":" << m_config.learning_min_interval_sec;
+
+    ss << L",\"faces\":[";
+    bool first = true;
+    if (m_learner) {
+        for (const LearningFaceStatus& st : m_learner->FaceStatuses()) {
+            if (!first) ss << L",";
+            first = false;
+            wchar_t last[24] = L"";
+            if (st.hadAccept) localTime(st.lastAccept, last, 24);
+            // Era window is per-account (sid); same nearest-rank p20 as
+            // SubmitLearningCandidate, or -1 when the window is too small
+            // (the gate then falls back to the configured cap).
+            float eraP20 = -1.0f;
+            auto win = m_eraDistanceWindows.find(st.sid);
+            if (win != m_eraDistanceWindows.end() && win->second.size() >= 5) {
+                std::vector<float> sorted(win->second.begin(), win->second.end());
+                std::sort(sorted.begin(), sorted.end());
+                eraP20 = sorted[std::min(sorted.size() - 1,
+                                         (sorted.size() * 20 + 99) / 100 - 1)];
+            }
+            ss << L"{\"user\":\"" << jsonEscape(st.username) << L"\""
+               << L",\"face\":" << st.faceId
+               << L",\"label\":\"" << jsonEscape(st.faceLabel) << L"\""
+               << L",\"total\":" << st.acceptedTotal
+               << L",\"today\":" << st.acceptedToday
+               << L",\"last\":\"" << last << L"\""
+               << L",\"era_p20\":" << eraP20
+               << L",\"era_rounds\":" << (win != m_eraDistanceWindows.end()
+                                              ? win->second.size() : 0)
+               << L"}";
+        }
+    }
+    ss << L"]";
+
+    ss << L",\"recent\":[";
+    first = true;
+    if (m_learner) {
+        for (const LearningEvent& ev : m_learner->RecentEvents(24)) {
+            if (!first) ss << L",";
+            first = false;
+            wchar_t t[24] = L"";
+            localTime(ev.time, t, 24);
+            ss << L"{\"t\":\"" << t << L"\""
+               << L",\"user\":\"" << jsonEscape(ev.username) << L"\""
+               << L",\"face\":" << ev.faceId
+               << L",\"label\":\"" << jsonEscape(ev.faceLabel) << L"\""
+               << L",\"ok\":" << (ev.accepted ? L"true" : L"false")
+               << L",\"reason\":\"" << (ev.reason ? ev.reason : L"") << L"\""
+               << L",\"d\":" << ev.distance
+               << L",\"gate\":" << ev.gate;
+            if (ev.accepted) ss << L",\"alpha\":" << ev.alphaUsed;
+            ss << L"}";
+        }
+    }
+    ss << L"]}";
+    return ss.str();
 }
 
 bool FaceService::Initialize() {
@@ -405,14 +513,16 @@ bool FaceService::Initialize() {
     {
         TemplateLearner::Hooks hooks;
         hooks.fetchTemplate = [this](const std::wstring& sid, uint32_t faceId,
-                                     std::vector<float>& out) {
+                                     TemplateLearner::TemplateSnapshot& out) {
             EnterCriticalSection(&m_storeLock);
             const auto& users = m_store->GetUsers();
             for (const auto& u : users) {
                 if (u.sid != sid) continue;
                 for (const auto& f : u.faces) {
                     if (f.id == faceId) {
-                        out = f.embedding;
+                        out.embedding = f.embedding;
+                        out.nominalYaw = f.nominalYaw;
+                        out.nominalPitch = f.nominalPitch;
                         LeaveCriticalSection(&m_storeLock);
                         return true;
                     }
@@ -430,7 +540,7 @@ bool FaceService::Initialize() {
         };
         hooks.flush = [this]() { FlushLearnedTemplates(); };
         LearningConfig learning;
-        learning.enabled = m_config.progressive_learning;
+        learning.enabled = m_config.ema_learning;
         learning.alpha = m_config.learning_alpha;
         learning.distanceGate = m_config.learning_distance_gate;
         learning.normFloor = m_config.learning_norm_floor;
@@ -902,7 +1012,7 @@ void FaceService::Run() {
             }
             if (m_learner) {
                 LearningConfig learning;
-                learning.enabled = m_config.progressive_learning;
+                learning.enabled = m_config.ema_learning;
                 learning.alpha = m_config.learning_alpha;
                 learning.distanceGate = m_config.learning_distance_gate;
                 learning.normFloor = m_config.learning_norm_floor;
@@ -944,6 +1054,14 @@ void FaceService::Run() {
             FACELOGIN_INFO(L"Configuration reloaded: thr=%.2f antiSpoof=%.3f rotation=%d",
                           m_matchThreshold, m_antiSpoofThreshold,
                           m_config.camera_rotation);
+        }
+        else if (request == ipc::MSG_LEARNING_STATUS) {
+            // Read-only observability query from the console's learning
+            // view. In-memory snapshot + era windows; both are owned by this
+            // (public-pipe) thread, so no extra locking is needed beyond the
+            // learner's own status critical section.
+            SendControlResponse(BuildLearningStatusJson());
+            m_pipeServer->Disconnect();
         }
         else if (request == ipc::MSG_AUTH_REQUEST) {
             if (m_isServiceMode) {
@@ -1032,7 +1150,7 @@ void FaceService::RequestStop() {
 
 BindingDecision FaceService::VerifyIdentityBinding(
     const std::vector<float>& embedding, unsigned int bindingIndex,
-    float preNorm,
+    float preNorm, float yawDeg, float pitchDeg,
     std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
     std::wstring& initialSid, float* identityMissDistance,
     LearningSample* roundBest) const {
@@ -1066,6 +1184,14 @@ BindingDecision FaceService::VerifyIdentityBinding(
         roundBest->embedding = embedding;
         roundBest->distance = identity->distance;
         roundBest->norm = preNorm;
+        roundBest->probeYawDeg = yawDeg;
+        roundBest->probePitchDeg = pitchDeg;
+        // Landing clarity of THIS frame: how much the hit slot beat the
+        // account's second-nearest face (negative secondFaceDistance = the
+        // account has a single comparable face — no wrong-slot risk).
+        roundBest->faceMargin = (identity->secondFaceDistance >= 0.0f)
+            ? (identity->secondFaceDistance - identity->distance)
+            : 1e9f;
     }
 
     if (bindingIndex == 0) {
@@ -1201,8 +1327,9 @@ bool FaceService::ProcessWorkerAuthRequest() {
             callbacks.verifyBinding = [this, &lockedIdentity, &initialSid,
                                        &identityMissDistance, &roundBest](
                 const std::vector<float>& embedding, unsigned int bindingIndex,
-                float preNorm) {
+                float preNorm, float yawDeg, float pitchDeg) {
                 return VerifyIdentityBinding(embedding, bindingIndex, preNorm,
+                                             yawDeg, pitchDeg,
                                              lockedIdentity, initialSid,
                                              &identityMissDistance, &roundBest);
             };
@@ -1383,8 +1510,9 @@ bool FaceService::ProcessAuthRequest() {
     callbacks.verifyBinding = [this, &lockedIdentity, &initialSid,
                                &identityMissDistance, &roundBest](
         const std::vector<float>& embedding, unsigned int bindingIndex,
-        float preNorm) {
+        float preNorm, float yawDeg, float pitchDeg) {
         return VerifyIdentityBinding(embedding, bindingIndex, preNorm,
+                                     yawDeg, pitchDeg,
                                      lockedIdentity, initialSid,
                                      &identityMissDistance, &roundBest);
     };

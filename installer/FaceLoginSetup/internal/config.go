@@ -27,9 +27,10 @@ func EnsureConfigDefaults(configPath string) error {
 		"low_light_enhance":         true,
 		"camera_rotation":           0,
 		"camera_device":             "",
-		"progressive_learning":      true,
+		"ema_learning":              true,
+		"failure_learning":          true,
 		"learning_alpha":            0.10,
-		"learning_distance_gate":    0.60,
+		"learning_distance_gate":    0.65,
 		"learning_norm_floor":       19.1,
 		"learning_min_interval_sec": 60,
 	}

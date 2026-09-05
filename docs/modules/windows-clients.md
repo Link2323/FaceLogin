@@ -88,7 +88,8 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 ### WebView2 边界
 
 - `index.html` 编译进 `FaceLoginConsole.exe`，修改后必须重建 C++ 目标。
-- JS 桥接当前有 31 个 dispId；完整清单以 `WebviewHost.cpp` 为准，不在文档复制。
+- JS 桥接的 dispId 清单以 `WebviewHost.cpp` 为准，不在文档复制。
+- 日志页四个日志来源直接读文件；"学习状态"视图是唯一走公共管道的查询（`LEARNING_STATUS`，响应为单条 JSON 内存快照，服务重启清零），客户端按 10s 节流——公共管道单实例，不得演变成高频轮询。
 - 禁用右键菜单和开发者工具。
 - `WM_WTSSESSION_CHANGE` 在锁屏时释放摄像头，解锁后恢复。
 - 帧缓存由 `EnrollmentWizard::m_frameCacheMutex` 保护。

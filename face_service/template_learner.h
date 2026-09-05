@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace facelogin {
@@ -25,6 +27,16 @@ struct LearningSample {
     std::vector<float> embedding;   // unit-length probe embedding (owned copy)
     float distance = 0.0f;
     float norm = 0.0f;              // pre-normalization recognizer norm
+    // Pose of the probe frame (weak-perspective kps estimate, ±90° physical
+    // range; docs/progressive-learning-v2.md §3 pose-cone gate). The sentinel
+    // matches credential_store.h kNominalAngleInvalid.
+    float probeYawDeg = 1000.0f;
+    float probePitchDeg = 1000.0f;
+    // Landing clarity: how much closer the hit template is than the account's
+    // second-nearest face (secondFaceDistance − distance). Huge = single-face
+    // account (no wrong-slot risk). Frames closer than kClarityMargin to both
+    // slots must not update either (equidistant → wrong-slot risk).
+    float faceMargin = 1e9f;
     // p20 of this user's current-era successful auth distances (rolling
     // window, reset on RELOAD_DB = re-enrollment). Negative = window too
     // small; the effective gate then falls back to the configured cap.
@@ -35,9 +47,45 @@ struct LearningSample {
 struct LearningConfig {
     bool enabled = true;
     float alpha = 0.10f;            // [0.05, 0.15], see config_util.h
-    float distanceGate = 0.55f;     // [0.35, 0.55]
-    float normFloor = 20.9f;        // [15.0, 25.0]
+    float distanceGate = 0.65f;     // [0.35, 0.65]
+    float normFloor = 19.1f;        // [15.0, 25.0]
     int minIntervalSec = 60;        // [10, 3600]
+    // Pose cone half-width: |probe − nominal| must stay below this on BOTH
+    // axes for a V5 template (legacy V4 templates without a nominal angle
+    // pass — no cone information, protected by distance+clarity instead).
+    float coneHalfAngleDeg = 25.0f;
+    // Landing-clarity threshold: the hit template must beat the account's
+    // second-nearest face by at least this much.
+    float clarityMargin = 0.10f;
+};
+
+// Observability snapshot backing the LEARNING_STATUS console query
+// (FaceService assembles the JSON). In-memory only and cleared on service
+// restart — the durable record stays the log. One event per PROCESSED
+// sample: Enqueue's burst coalescing means rapid unlock bursts collapse
+// into a single entry.
+struct LearningEvent {
+    std::chrono::system_clock::time_point time;
+    std::wstring username;          // logging-grade, may be empty
+    uint32_t faceId = 0;
+    std::wstring faceLabel;
+    bool accepted = false;
+    const wchar_t* reason = nullptr;  // skip reason key; null when accepted
+    float distance = 0.0f;
+    float gate = 0.0f;                // effective gate evaluated for this sample
+    float alphaUsed = 0.0f;           // accepted events only
+};
+
+struct LearningFaceStatus {
+    std::wstring sid;
+    std::wstring username;
+    uint32_t faceId = 0;
+    std::wstring faceLabel;
+    unsigned long long acceptedTotal = 0;
+    int acceptedToday = 0;
+    int dayStamp = 0;               // internal acceptedToday rollover
+    bool hadAccept = false;
+    std::chrono::system_clock::time_point lastAccept{};
 };
 
 // Post-auth template EMA fine-tuning (docs/progressive-learning-v2.md §3).
@@ -57,20 +105,31 @@ struct LearningConfig {
 //
 // Security invariants (docs §1): the update gate is far below the auth
 // threshold so an impostor that barely passed authentication can never move
-// a template; liveness-failed rounds never reach Enqueue at all; the store's
-// cross-angle sentinel rejects converging updates before commit; every
-// accepted update keeps the previous embedding in a 3-generation ring and
-// the first flush of a day writes users.dat.bak (see FaceService).
+// a template; liveness-failed rounds never reach Enqueue at all; the pose
+// cone and landing-clarity gates keep an update in its own angle slot; the
+// store records (observation-only) the account's minimum template-pair
+// distance on every commit; every accepted update keeps the previous
+// embedding in a 3-generation ring and the first flush of a day writes
+// users.dat.bak (see FaceService).
 class TemplateLearner {
 public:
+    // What fetchTemplate returns for the target slot: the current embedding
+    // plus its V5 nominal pose angles (invalid sentinel = legacy V4 record).
+    struct TemplateSnapshot {
+        std::vector<float> embedding;
+        float nominalYaw = 1000.0f;
+        float nominalPitch = 1000.0f;
+    };
+
     struct Hooks {
-        // Fetch the current stored embedding of (sid, faceId). False = the
-        // face disappeared (e.g. re-enrolled between round and processing).
+        // Fetch the current stored embedding + nominal angles of (sid,
+        // faceId). False = the face disappeared (e.g. re-enrolled between
+        // round and processing).
         std::function<bool(const std::wstring& sid, uint32_t faceId,
-                           std::vector<float>& out)> fetchTemplate;
-        // Commit a blended embedding. The hook owns the store lock and the
-        // cross-angle sentinel (CredentialStore::UpdateTemplateFace); false
-        // means rejected/absent and the sample is dropped (no retry).
+                           TemplateSnapshot& out)> fetchTemplate;
+        // Commit a blended embedding. The hook owns the store lock; false
+        // means the target vanished and the sample is dropped (no retry).
+        // Pair-spacing observation happens inside the store.
         std::function<bool(const LearningSample& sample,
                            const std::vector<float>& blended,
                            float alphaUsed)> commit;
@@ -105,9 +164,17 @@ public:
     static constexpr int kStartDelayMs = 2000;   // post-unlock busy window
     static constexpr int kFlushQuietMs = 30000;  // update-driven flush debounce
 
+    // LEARNING_STATUS snapshot. recent: newest first, at most maxCount
+    // entries. Faces with counters: every (sid, faceId) that ever reached
+    // ApplySample, regardless of accept/skip.
+    std::vector<LearningEvent> RecentEvents(size_t maxCount) const;
+    std::vector<LearningFaceStatus> FaceStatuses() const;
+
 private:
     void Run();
     void ApplySample(const LearningSample& sample);
+    void RecordEvent(const LearningSample& sample, float gate, bool accepted,
+                     const wchar_t* reason, float alphaUsed);
     LearningConfig Config() const;
 
     mutable CRITICAL_SECTION m_cs{};
@@ -129,10 +196,15 @@ private:
     // Ring of previous embeddings for diagnostics/manual rollback support.
     struct Generation {
         std::wstring sid;
-        uint32_t faceId;
+        uint32_t faceId = 0;
         std::vector<float> embedding;
     };
     std::deque<Generation> m_generations;
+
+    // LEARNING_STATUS snapshot state (guarded by m_cs).
+    static constexpr size_t kEventHistory = 32;
+    std::deque<LearningEvent> m_events;   // newest back
+    std::map<std::pair<std::wstring, uint32_t>, LearningFaceStatus> m_faceStatus;
 };
 
 } // namespace facelogin

@@ -1131,8 +1131,10 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
     if (m_embeddings.empty()) { FACELOGIN_ERROR(L"No face samples"); return false; }
 
     // Group samples by capture angle. Capture is sequential, so the flat
-    // m_embeddings vector is already grouped in angle order.
-    struct AngleGroup { size_t begin; size_t count; const wchar_t* label; };
+    // m_embeddings vector is already grouped in angle order. The group keeps
+    // its angle INDEX (not just the label) so the slot's V5 nominal pose
+    // (kAngleTargets) can be written with the embedding.
+    struct AngleGroup { size_t begin; size_t count; int angle; const wchar_t* label; };
     static constexpr const wchar_t* kAngleLabels[3] = {L"正面", L"左转", L"右转"};
     std::vector<AngleGroup> groups;
     size_t begin = 0;
@@ -1144,7 +1146,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
             return false;
         }
         if (count > 0)
-            groups.push_back({begin, static_cast<size_t>(count), kAngleLabels[a]});
+            groups.push_back({begin, static_cast<size_t>(count), a, kAngleLabels[a]});
         begin += static_cast<size_t>(count);
     }
     if (groups.empty()) { FACELOGIN_ERROR(L"No face samples"); return false; }
@@ -1277,7 +1279,9 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
                 reinterpret_cast<const uint8_t*>(password.c_str()),
                 static_cast<UINT>(password.size() * sizeof(wchar_t)));
             if (protectedPassword.empty()) { FACELOGIN_ERROR(L"DPAPI encryption failed"); return false; }
-            if (!m_store.AddFace(m_username, m_upn, m_sid, protectedPassword, ef, groupLabel, &newFaceId)) {
+            if (!m_store.AddFace(m_username, m_upn, m_sid, protectedPassword, ef,
+                                 groupLabel, &newFaceId,
+                                 static_cast<float>(kAngleTargets[g.angle]), 0.0f)) {
                 FACELOGIN_ERROR(L"Failed to create enrollment for %s", m_username.c_str());
                 return false;
             }
@@ -1290,16 +1294,62 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
                                 facelogin::kMaxFacesPerUser);
                 return false;
             }
-            if (!m_store.AddFace(m_username, m_upn, m_sid, {}, ef, groupLabel, &newFaceId)) {
+            if (!m_store.AddFace(m_username, m_upn, m_sid, {}, ef, groupLabel,
+                                 &newFaceId,
+                                 static_cast<float>(kAngleTargets[g.angle]), 0.0f)) {
                 FACELOGIN_ERROR(L"Failed to append face for %s", m_username.c_str());
                 return false;
             }
         }
-        FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D, angle=%ls)",
-                       m_username.c_str(), newFaceId, ef.size(), g.label);
+        FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D, angle=%ls, "
+                       L"nominalYaw=%d)",
+                       m_username.c_str(), newFaceId, ef.size(), g.label,
+                       kAngleTargets[g.angle]);
     }
 
     if (!m_store.SaveDatabase()) { FACELOGIN_ERROR(L"Failed to save database"); return false; }
+
+    // Cross-angle pair-spacing observation (soft hint, docs/
+    // progressive-learning-v2.md red line 3): the learned minimum cross-angle
+    // same-person pair distance is 0.681. Angles recorded closer than 0.68
+    // mean the user under-turned — the slots overlap, coverage shrinks, and
+    // the landing-clarity gate will reject many learning frames. Hint, never
+    // block: the enrollment itself is valid.
+    m_lastEnrollHint.clear();
+    if (groups.size() > 1) {
+        size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+        if (idx < m_store.GetUsers().size()) {
+            const auto& faces = m_store.GetUsers()[idx].faces;
+            float minPair = -1.0f;
+            for (size_t i = 0; i < faces.size(); i++) {
+                for (size_t j = i + 1; j < faces.size(); j++) {
+                    if (faces[i].embedding.size() != faces[j].embedding.size() ||
+                        faces[i].embedding.empty()) continue;
+                    double sum = 0.0;
+                    for (size_t k = 0; k < faces[i].embedding.size(); k++) {
+                        double diff = faces[i].embedding[k] - faces[j].embedding[k];
+                        sum += diff * diff;
+                    }
+                    const float d = static_cast<float>(std::sqrt(sum));
+                    if (minPair < 0.0f || d < minPair) minPair = d;
+                }
+            }
+            if (minPair >= 0.0f &&
+                minPair < facelogin::CredentialStore::kCrossAngleSentinelDist) {
+                char buf[192];
+                std::snprintf(buf, ARRAYSIZE(buf),
+                              "角度提示：各角度模板间距 %.2f（<0.68）。"
+                              "下次重录时转角再大一点可提升多角度解锁覆盖"
+                              "（本次录入仍然有效）。",
+                              minPair);
+                m_lastEnrollHint = buf;
+                FACELOGIN_WARN(L"Enrollment pair spacing %.3f < %.2f — soft hint shown "
+                               L"(learning continues; clarity gate will filter overlap)",
+                               minPair,
+                               facelogin::CredentialStore::kCrossAngleSentinelDist);
+            }
+        }
+    }
 
     const bool reloadConfirmed = NotifyServiceReload();
 
@@ -1633,6 +1683,69 @@ std::string EnrollmentWizard::GetCameraList() {
 
 std::string EnrollmentWizard::GetConfig() const {
     return ConfigToJson(m_config);
+}
+
+// Learning-observability query. Unlike the log views (which read files to
+// stay off the single-instance pipe), this needs live learner state, so it
+// takes the public pipe for one short request/response round trip. The view
+// throttles to one query per 10s for the same reason.
+std::string EnrollmentWizard::GetLearningStatus() {
+    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hPipe == INVALID_HANDLE_VALUE) {
+        return "{\"error\":\"Service not running\"}";
+    }
+    std::string result = "{\"error\":\"Service did not respond\"}";
+    DWORD written = 0;
+    std::wstring msg(ipc::MSG_LEARNING_STATUS);
+    msg.push_back(L'\0');
+    const DWORD expectedBytes = static_cast<DWORD>(msg.size() * sizeof(wchar_t));
+    if (WriteFile(hPipe, msg.c_str(), expectedBytes, &written, nullptr) &&
+        written == expectedBytes) {
+        // The service assembles the response synchronously — no model or
+        // worker work happens on this path — so a short bounded wait is
+        // enough (mirrors SetConfig's handshake shape).
+        DWORD bytesAvailable = 0;
+        for (DWORD waited = 0; waited < 3000; waited += 50) {
+            if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
+                break;
+            }
+            if (bytesAvailable > 0) break;
+            Sleep(50);
+        }
+        if (bytesAvailable > 0) {
+            std::wstring response;
+            wchar_t buffer[8192];
+            DWORD bytesRead = 0;
+            // Message-mode pipe: a message larger than the read buffer
+            // returns ERROR_MORE_DATA with a partial chunk; keep reading
+            // until ReadFile reports the message complete.
+            for (;;) {
+                const BOOL ok = ReadFile(hPipe, buffer,
+                                         static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t)),
+                                         &bytesRead, nullptr);
+                if (ok || GetLastError() == ERROR_MORE_DATA) {
+                    response.append(buffer, bytesRead / sizeof(wchar_t));
+                    if (ok) break;
+                    continue;
+                }
+                response.clear();
+                break;
+            }
+            while (!response.empty() && response.back() == L'\0') {
+                response.pop_back();
+            }
+            if (!response.empty()) {
+                if (!SendControlAck(hPipe)) {
+                    FACELOGIN_WARN(L"Failed to acknowledge learning status response: %lu",
+                                   GetLastError());
+                }
+                result = WstrToUtf8(response);
+            }
+        }
+    }
+    CloseHandle(hPipe);
+    return result;
 }
 
 bool EnrollmentWizard::SetConfig(const std::string& json) {

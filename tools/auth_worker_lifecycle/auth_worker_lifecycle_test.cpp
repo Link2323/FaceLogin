@@ -124,7 +124,8 @@ int RunMockWorker(HANDLE input, HANDLE output) {
     if (mode == L"mock:bad-embedding") {
         channel.Write(MessageType::MatchProbe, start.requestId,
             facelogin::auth_worker::EncodeMatchProbe(0,
-                std::vector<float>(facelogin::auth_worker::kEmbeddingDimension, 0.0f)));
+                std::vector<float>(facelogin::auth_worker::kEmbeddingDimension, 0.0f),
+                21.0f, 0.0f, 0.0f));
         for (;;) Sleep(1000);
     }
 
@@ -137,7 +138,8 @@ int RunMockWorker(HANDLE input, HANDLE output) {
         if (mode == L"mock:binding-skip" && binding == 0) wireBinding = 1;
         if (mode == L"mock:binding-repeat" && binding == 1) wireBinding = 0;
         if (!channel.Write(MessageType::MatchProbe, start.requestId,
-                           facelogin::auth_worker::EncodeMatchProbe(wireBinding, embedding))) {
+                           facelogin::auth_worker::EncodeMatchProbe(
+                               wireBinding, embedding, 21.0f, 0.0f, 0.0f))) {
             return ERROR_BROKEN_PIPE;
         }
         Message decision;
@@ -170,7 +172,7 @@ facelogin::AuthWorkerCallbacks AcceptCallbacks(unsigned int& bindings,
     callbacks.reportStatus = [](const std::wstring&) {};
     callbacks.isCancelled = [cancel]() { return cancel; };
     callbacks.verifyBinding = [&bindings](const std::vector<float>& embedding,
-                                          unsigned int index) {
+                                          unsigned int index, float, float, float) {
         if (embedding.size() != facelogin::auth_worker::kEmbeddingDimension ||
             index != bindings) {
             return facelogin::BindingDecision{

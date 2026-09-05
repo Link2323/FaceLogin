@@ -8,9 +8,9 @@
 namespace facelogin {
 
 static constexpr uint32_t FILE_MAGIC = 0x474F4C46; // "FLOG" in little-endian
-static constexpr uint32_t FILE_VERSION = 4;
+static constexpr uint32_t FILE_VERSION = 5;        // written; reads accept 4/5
 
-// Helpers for V4 serialization
+// Helpers for V4/V5 serialization
 namespace {
 
 // Default label for a face: L"脸N" where N = face id.
@@ -60,7 +60,7 @@ bool CredentialStore::LoadDatabase() {
         FACELOGIN_ERROR(L"Invalid database file (bad magic: 0x%08X)", magic);
         return false;
     }
-    if (version != FILE_VERSION) {
+    if (version != 4 && version != 5) {
         FACELOGIN_ERROR(L"Unsupported database version: %u", version);
         return false;
     }
@@ -163,6 +163,21 @@ bool CredentialStore::LoadDatabase() {
             face.embedding.resize(embLen);
             file.read(reinterpret_cast<char*>(face.embedding.data()),
                       embLen * sizeof(float));
+            // V5 appends the slot's nominal pose angles; V4 records keep the
+            // invalid sentinel until re-enrollment. The sentinel itself is a
+            // legal stored value (legacy records round-trip it), so only
+            // non-finite data is corruption.
+            if (version >= 5) {
+                file.read(reinterpret_cast<char*>(&face.nominalYaw),
+                          sizeof(face.nominalYaw));
+                file.read(reinterpret_cast<char*>(&face.nominalPitch),
+                          sizeof(face.nominalPitch));
+                if (!std::isfinite(face.nominalYaw) ||
+                    !std::isfinite(face.nominalPitch)) {
+                    FACELOGIN_ERROR(L"Invalid nominal angle for face %u", face.id);
+                    return false;
+                }
+            }
             rec.faces.push_back(std::move(face));
         }
 
@@ -257,6 +272,12 @@ bool CredentialStore::SaveDatabase() {
                 file.write(reinterpret_cast<const char*>(face.embedding.data()),
                            embLen * sizeof(float));
             }
+
+            // V5: nominal pose angles of the slot (sentinel round-trips).
+            file.write(reinterpret_cast<const char*>(&face.nominalYaw),
+                       sizeof(face.nominalYaw));
+            file.write(reinterpret_cast<const char*>(&face.nominalPitch),
+                       sizeof(face.nominalPitch));
         }
     }
 
@@ -292,7 +313,9 @@ bool CredentialStore::AddFace(const std::wstring& username,
                               const std::vector<uint8_t>& encryptedPassword,
                               const std::vector<float>& embedding,
                               const std::wstring& label,
-                              uint32_t* outFaceId) {
+                              uint32_t* outFaceId,
+                              float nominalYaw,
+                              float nominalPitch) {
     size_t idx = FindUserIndex(sid, upn, username);
 
     if (idx < m_users.size()) {
@@ -319,6 +342,8 @@ bool CredentialStore::AddFace(const std::wstring& username,
         face.id = newId;
         face.label = NormalizeFaceLabel(label, newId);
         face.embedding = embedding;
+        face.nominalYaw = nominalYaw;
+        face.nominalPitch = nominalPitch;
         rec.faces.push_back(std::move(face));
         // Refresh display identity in case username/upn/sid changed.
         rec.username = username;
@@ -351,6 +376,8 @@ bool CredentialStore::AddFace(const std::wstring& username,
     face.id = 1;
     face.label = NormalizeFaceLabel(label, 1);
     face.embedding = embedding;
+    face.nominalYaw = nominalYaw;
+    face.nominalPitch = nominalPitch;
     rec.faces.push_back(std::move(face));
     m_users.push_back(std::move(rec));
     if (outFaceId) *outFaceId = 1;
@@ -499,11 +526,13 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     size_t bestIdx = m_users.size();
     uint32_t bestFaceId = 0;
     std::wstring bestFaceLabel;
+    // Winning account's second-nearest face (landing-clarity gate input).
+    float bestSecondFaceDist = -1.0f;
     size_t comparableAccounts = 0;
 
     for (size_t i = 0; i < m_users.size(); i++) {
         const auto& faces = m_users[i].faces;
-        float accountBest = 1e10f;
+        float accountBest = 1e10f, accountSecond = 1e10f;
         uint32_t accountBestFaceId = 0;
         const std::wstring* accountBestLabel = nullptr;
 
@@ -521,9 +550,12 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
             float dist = std::sqrt(sum);
 
             if (dist < accountBest) {
+                accountSecond = accountBest;
                 accountBest = dist;
                 accountBestFaceId = face.id;
                 accountBestLabel = &face.label;
+            } else if (dist < accountSecond) {
+                accountSecond = dist;
             }
         }
 
@@ -536,6 +568,8 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
             bestIdx = i;
             bestFaceId = accountBestFaceId;
             bestFaceLabel = accountBestLabel ? *accountBestLabel : L"";
+            bestSecondFaceDist =
+                (accountSecond < 1e9f) ? accountSecond : -1.0f;
         } else if (accountBest < secondBestDist) {
             secondBestDist = accountBest;
         }
@@ -587,6 +621,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
         best.username = m_users[bestIdx].username;
         best.faceId = bestFaceId;
         best.faceLabel = bestFaceLabel;
+        best.secondFaceDistance = bestSecondFaceDist;
         return best;
     }
 
@@ -615,12 +650,15 @@ bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceI
         return false;
     }
 
-    // Cross-angle sentinel: swap the candidate in, then require every pair of
-    // the account's comparable faces to stay at least kCrossAngleSentinelDist
-    // apart. A same-pose EMA step can never converge two angle templates, so
-    // a violation means cross-angle contamination — restore and reject.
-    std::vector<float> previous = target->embedding;
+    // Swap the candidate in unconditionally, then observe the account's
+    // minimum template-pair distance (docs/progressive-learning-v2.md red
+    // line 3, 2026-09-04: observation only — a rejecting sentinel's false
+    // positives wedge the whole learning channel on legacy near-pair
+    // accounts, and intra-account convergence only shrinks the acceptance
+    // region, which is the fail-safe direction).
     target->embedding = newEmbedding;
+    float minPairDist = -1.0f;
+    uint32_t pairA = 0, pairB = 0;
     for (size_t i = 0; i < faces.size(); i++) {
         for (size_t j = i + 1; j < faces.size(); j++) {
             const auto& a = faces[i].embedding;
@@ -632,13 +670,22 @@ bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceI
                 sum += diff * diff;
             }
             float dist = std::sqrt(sum);
-            if (dist < kCrossAngleSentinelDist) {
-                target->embedding = std::move(previous);
-                FACELOGIN_WARN(L"UpdateTemplateFace rejected: faces #%u/#u would be "
-                               L"%.3f apart (< %.2f) — suspected cross-angle contamination",
-                               faces[i].id, faces[j].id, dist, kCrossAngleSentinelDist);
-                return false;
+            if (minPairDist < 0.0f || dist < minPairDist) {
+                minPairDist = dist;
+                pairA = faces[i].id;
+                pairB = faces[j].id;
             }
+        }
+    }
+    if (minPairDist >= 0.0f) {
+        if (minPairDist < kCrossAngleSentinelDist) {
+            FACELOGIN_WARN(L"UpdateTemplateFace observation: faces #%u/#%u now "
+                           L"%.3f apart (< %.2f) — slot coverage shrinking, learning "
+                           L"continues (observation-only since 2026-09-04)",
+                           pairA, pairB, minPairDist, kCrossAngleSentinelDist);
+        } else {
+            FACELOGIN_INFO(L"UpdateTemplateFace: min template-pair distance "
+                           "#%u/#%u = %.3f", pairA, pairB, minPairDist);
         }
     }
     return true;

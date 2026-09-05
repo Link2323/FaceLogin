@@ -90,7 +90,9 @@ static DWORD ReadUserCountFromDatabase() {
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
 
-    if (magic != 0x474F4C46 || version != 4) {  // "FLOG"
+    // V5 added per-face nominal pose angles; the header layout is unchanged,
+    // and the tile count logic is version-agnostic (users-dat.md).
+    if (magic != 0x474F4C46 || (version != 4 && version != 5)) {  // "FLOG"
         return 0;  // Invalid database → treat as no users
     }
 

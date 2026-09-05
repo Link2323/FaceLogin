@@ -98,64 +98,88 @@ void TestMatchProbeValidation() {
     unsigned int index = 99;
     std::vector<float> decoded;
     float preNorm = 0.0f;
-    Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding, 21.5f), index, decoded,
-                           preNorm),
+    float yaw = 0.0f, pitch = 0.0f;
+    Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding, 21.5f, -30.0f, 5.0f),
+                           index, decoded, preNorm, yaw, pitch),
           "valid normalized 512-D match probe decodes");
-    Check(index == 2 && decoded == embedding && preNorm == 21.5f,
-          "match probe round trip preserves index, embedding and pre-norm");
+    Check(index == 2 && decoded == embedding && preNorm == 21.5f &&
+              std::fabs(yaw - (-30.0f)) < 1e-4f &&
+              std::fabs(pitch - 5.0f) < 1e-4f,
+          "match probe round trip preserves index, embedding, pre-norm and pose");
 
     auto invalid = embedding;
     invalid[17] = std::numeric_limits<float>::quiet_NaN();
-    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f), index, decoded,
-                            preNorm),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "NaN embedding value is rejected");
     invalid = embedding;
     invalid[17] = std::numeric_limits<float>::infinity();
-    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f), index, decoded,
-                            preNorm),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "infinite embedding value is rejected");
     Check(!DecodeMatchProbe(EncodeMatchProbe(0,
-          std::vector<float>(kEmbeddingDimension, 0.0f), 21.5f), index, decoded,
-          preNorm),
+          std::vector<float>(kEmbeddingDimension, 0.0f), 21.5f, 0.0f, 0.0f),
+          index, decoded, preNorm, yaw, pitch),
           "zero-norm embedding is rejected");
     invalid = embedding;
     for (float& value : invalid) value *= 0.5f;
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f), index, decoded,
-                            preNorm),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "abnormally small embedding norm is rejected");
     invalid = embedding;
     for (float& value : invalid) value *= 2.0f;
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f), index, decoded,
-                            preNorm),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "abnormally large embedding norm is rejected");
 
     PayloadWriter shortWriter;
     shortWriter.WriteU32(0);
     shortWriter.WriteFloatVector(std::vector<float>(511, 0.0f));
-    Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded, preNorm),
+    Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded, preNorm, yaw, pitch),
           "511-D match probe is rejected");
     PayloadWriter longWriter;
     longWriter.WriteU32(0);
     longWriter.WriteFloatVector(std::vector<float>(513, 0.0f));
-    Check(!DecodeMatchProbe(longWriter.Data(), index, decoded, preNorm),
+    Check(!DecodeMatchProbe(longWriter.Data(), index, decoded, preNorm, yaw, pitch),
           "513-D match probe is rejected");
     PayloadWriter noNormWriter;
     noNormWriter.WriteU32(0);
     noNormWriter.WriteFloatVector(embedding);
-    Check(!DecodeMatchProbe(noNormWriter.Data(), index, decoded, preNorm),
+    Check(!DecodeMatchProbe(noNormWriter.Data(), index, decoded, preNorm, yaw, pitch),
           "probe without trailing pre-norm (v3 payload) is rejected");
+    PayloadWriter v4Writer;
+    v4Writer.WriteU32(0);
+    v4Writer.WriteFloatVector(embedding);
+    v4Writer.WriteFloat(21.5f);
+    Check(!DecodeMatchProbe(v4Writer.Data(), index, decoded, preNorm, yaw, pitch),
+          "probe without pose angles (v4 payload) is rejected");
     Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding,
-          std::numeric_limits<float>::quiet_NaN()), index, decoded, preNorm),
+          std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f),
+          index, decoded, preNorm, yaw, pitch),
           "NaN pre-norm is rejected");
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 0.0f), index, decoded,
-                            preNorm),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 0.0f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "zero pre-norm is rejected");
-    Check(!DecodeMatchProbe(EncodeMatchProbe(3, embedding, 21.5f), index, decoded,
-                            preNorm),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(3, embedding, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "out-of-range binding index is rejected");
-    auto trailing = EncodeMatchProbe(0, embedding, 21.5f);
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f,
+          std::numeric_limits<float>::quiet_NaN(), 0.0f),
+          index, decoded, preNorm, yaw, pitch),
+          "NaN yaw estimate is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f, 0.0f,
+          std::numeric_limits<float>::infinity()),
+          index, decoded, preNorm, yaw, pitch),
+          "infinite pitch estimate is rejected");
+    Check(DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f, -90.0f, 90.0f),
+                           index, decoded, preNorm, yaw, pitch),
+          "physical range boundary yaw/pitch +/-90 is accepted");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f, 90.5f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
+          "out-of-physical-range yaw is rejected");
+    auto trailing = EncodeMatchProbe(0, embedding, 21.5f, 0.0f, 0.0f);
     trailing.push_back(0);
-    Check(!DecodeMatchProbe(trailing, index, decoded, preNorm),
+    Check(!DecodeMatchProbe(trailing, index, decoded, preNorm, yaw, pitch),
           "match probe trailing bytes are rejected");
 }
 

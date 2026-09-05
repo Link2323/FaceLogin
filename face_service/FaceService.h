@@ -96,10 +96,11 @@ private:
     // seen on Retry verdicts within one auth round, for the failure log —
     // distinguishing "just above threshold" from "way off" post-mortem.
     // roundBest (optional) accumulates the best-distance accepted binding
-    // frame of the round as a progressive-learning candidate (best wins).
+    // frame of the round as a progressive-learning candidate (best wins);
+    // yawDeg/pitchDeg ride along as the candidate's pose for the cone gate.
     BindingDecision VerifyIdentityBinding(
         const std::vector<float>& embedding, unsigned int bindingIndex,
-        float preNorm,
+        float preNorm, float yawDeg, float pitchDeg,
         std::optional<CredentialStore::IdentityMatch>& lockedIdentity,
         std::wstring& initialSid,
         float* identityMissDistance = nullptr,
@@ -115,6 +116,12 @@ private:
     // learner. Public-pipe thread only (both auth paths call it after
     // AUTH_SUCCESS delivery); RELOAD_DB clears the windows (era reset).
     void SubmitLearningCandidate(const LearningSample& best);
+
+    // LEARNING_STATUS response body: learner snapshot (events + per-face
+    // counters) merged with the era windows and the active learning config.
+    // Single UTF-16 JSON message, no fragmentation — keep the payload within
+    // the client's read buffer. Public-pipe thread only.
+    std::wstring BuildLearningStatusJson();
 
     // Public-pipe message helpers. STATUS is advisory and needs no ACK;
     // terminal/control responses use explicit bounded acknowledgements before

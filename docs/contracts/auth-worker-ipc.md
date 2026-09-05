@@ -18,7 +18,7 @@
 ```cpp
 struct MessageHeader {
     uint32_t magic;       // 0x4B574C46，即 "FLWK"
-    uint16_t version;     // 4
+    uint16_t version;     // 5
     uint16_t type;
     uint64_t requestId;
     uint32_t payloadSize;
@@ -62,16 +62,18 @@ uint32 lowLightEnhance     // 0/1
 wstring cameraDevice
 ```
 
-`MatchProbe` 的 payload 为（v4 起附带范数）：
+`MatchProbe` 的 payload 为（v4 起附带范数，v5 起附带姿态角）：
 
 ```text
 uint32 bindingIndex       // 线上严格为 0 → 1 → 2；日志显示为 1/3 → 2/3 → 3/3
 uint32 embeddingCount     // 必须恰好 512
 float  embedding[512]
 float  preNorm            // 归一化前的识别器输出范数（质量信号，必须有限且 >0）
+float  yawDeg             // 帧姿态 yaw 估计（度，有限且 |v| ≤ 90）    ← v5
+float  pitchDeg           // 帧姿态 pitch 估计（同上）                 ← v5
 ```
 
-每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 供父端渐进学习的范数门使用（w600k_r50 量级 ≈20–25，嵌入本身以归一化形态传输、范数不可从向量恢复）。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
+每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 供父端渐进学习的范数门使用（w600k_r50 量级 ≈20–25，嵌入本身以归一化形态传输、范数不可从向量恢复）；`yawDeg`/`pitchDeg` 由 worker 侧 `EstimateYawDeg`/`EstimatePitchDeg`（`face_align.h` 弱透视模型，与录入同源）从绑定帧关键点估计，供父端学习姿态锥门使用（`docs/progressive-learning-v2.md` §3）。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
 
 `AuthSucceeded` 的 `AuthTiming` 顺序固定为：
 

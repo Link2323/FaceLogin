@@ -370,6 +370,8 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"GetCredentialProviderLogLines") *ids = 33;
     else if (n == L"ClearFileLog") *ids = 34;
     else if (n == L"CancelCapture") *ids = 35;
+    else if (n == L"GetEnrollmentHint") *ids = 36;
+    else if (n == L"GetLearningStatus") *ids = 37;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -485,6 +487,8 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             break;
         }
         case 35: m_wizard->CancelCapture(); break;
+        case 36: if (res) *res = MakeStr(m_wizard->GetEnrollmentHint()); break;
+        case 37: if (res) *res = MakeStr(m_wizard->GetLearningStatus()); break;
         case 18: if (res) *res = MakeStr(m_wizard->GetUserSid()); break;
         case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
         case 20: if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces()); break;

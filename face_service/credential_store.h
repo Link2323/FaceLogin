@@ -41,10 +41,10 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 
 // Stores and retrieves encrypted user credentials and face embeddings.
 //
-// File format (PROGRAMDATA/FaceLogin/data/users.dat), version 4 only:
+// File format (DataPath\data\users.dat), version 5 (reads 4 and 5, writes 5):
 //   Header:
 //     Magic:  4 bytes ("FLOG")
-//     Version: 4 bytes (uint32, currently 4)
+//     Version: 4 bytes (uint32, 4 or 5 on load, 5 on save)
 //     Count:   4 bytes (uint32, number of records)
 //   Records (Count times):
 //     Username length: 4 bytes (uint32, in wchar_t units)
@@ -62,6 +62,10 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 //       Label:         N*2 bytes (UTF-16LE, e.g. L"脸1" or a custom name)
 //       Embedding length: 4 bytes (uint32, in floats)
 //       Embedding:     D*4 bytes (D floats * 4 bytes)
+//       Nominal yaw:   4 bytes (float, degrees)            ← V5
+//       Nominal pitch: 4 bytes (float, degrees)            ← V5
+// V4 files load with nominal angles = kNominalAngleInvalid and upgrade to V5
+// on the next save. Full layout: docs/contracts/users-dat.md.
 // The file is protected by ACLs (SYSTEM + Administrators only).
 // Passwords are encrypted with DPAPI CRYPTPROTECT_LOCAL_MACHINE.
 
@@ -75,14 +79,30 @@ inline constexpr size_t kMaxUsers = 5;
 // rejects when the account already has this many faces.
 inline constexpr size_t kMaxFacesPerUser = 3;
 
-// One enrolled face for a user account (V4). Each face carries a per-account
+// Sentinel for "this face predates V5 and has no nominal angle". Any value
+// outside the physical ±90° range means invalid; 1000 is what V4-upgraded
+// records carry and what serialization round-trips. Validity predicate:
+// IsValidNominalAngle in face_align.h (physical angle domain).
+inline constexpr float kNominalAngleInvalid = 1000.0f;
+
+// One enrolled face for a user account (V5). Each face carries a per-account
 // id and a user-given label (defaults to L"脸N" where N = id). New ids reuse
 // the smallest free slot (deleting #2 then re-adding gives #2 again), keeping
 // the user-visible list compact.
+//
+// nominalYaw/nominalPitch (V5): the enrollment POSE TARGET of this slot
+// (kAngleTargets: 正面 0/0, 左转 +30/0, 右转 -30/0), not a measured average —
+// a fixed target keeps the ±25° learning cones of the three slots disjoint
+// even when the user under-turned (docs/progressive-learning-v2.md §3).
+// Records loaded from a V4 file (and in-memory faces added without angles)
+// carry kNominalAngleInvalid; the learner's cone gate treats that as "no cone
+// information" (pass) until re-enrollment.
 struct FaceRecord {
     uint32_t           id = 0;
     std::wstring       label;              // display name; "脸N" if user left blank
     std::vector<float> embedding;          // current production embedding is 512-D ONNX
+    float              nominalYaw = kNominalAngleInvalid;
+    float              nominalPitch = kNominalAngleInvalid;
 };
 
 struct UserRecord {
@@ -126,6 +146,8 @@ public:
     //     encryptedPassword is ignored in this case.
     // Rejects (returns false) when the account already holds
     // kMaxFacesPerUser faces.
+    // nominalYaw/nominalPitch (V5): the slot's pose target for the learning
+    // cone gate; defaults to kNominalAngleInvalid (legacy/no-angle callers).
     // Call SaveDatabase() to persist.
     bool AddFace(const std::wstring& username,
                  const std::wstring& upn,
@@ -133,7 +155,9 @@ public:
                  const std::vector<uint8_t>& encryptedPassword,
                  const std::vector<float>& embedding,
                  const std::wstring& label = L"",
-                 uint32_t* outFaceId = nullptr);
+                 uint32_t* outFaceId = nullptr,
+                 float nominalYaw = kNominalAngleInvalid,
+                 float nominalPitch = kNominalAngleInvalid);
 
     // Update the identity + stored password of an existing account IN PLACE,
     // preserving all enrolled faces (their ids/labels/embeddings are untouched).
@@ -155,20 +179,24 @@ public:
     bool DeleteFace(const std::wstring& sid, uint32_t faceId);
 
     // Replace one face's embedding in place (progressive-learning EMA
-    // update; ids/labels/password untouched). Fails closed with a WARN and
-    // leaves the template unchanged when the new embedding would put two of
-    // the account's comparable (same-dimension) faces closer together than
-    // kCrossAngleSentinelDist — the cross-angle red line says a same-pose
-    // update can never converge templates, so a violation means the update
-    // came from the wrong pose cone and must not be committed.
+    // update; ids/labels/password/nominal angles untouched). Returns true and
+    // ALWAYS commits the swap (except unknown sid/face or dimension mismatch).
+    // The cross-angle pair distance is observation-only (red line 3,
+    // 2026-09-04): every update logs the account's minimum template-pair
+    // distance, and a pair closer than kCrossAngleSentinelDist additionally
+    // logs a WARN — intra-account convergence is coverage loss (acceptance
+    // region shrinks, fail-safe direction), NOT a security hole, and a
+    // rejecting sentinel false-positives legacy 0.60-pair accounts into a
+    // permanently wedged learning channel. The real brakes on poisoning are
+    // the update distance gate, the pose cone, the landing-clarity gate and
+    // PAD — none of which depend on intra-account spacing.
     // Call SaveDatabase() to persist.
     bool UpdateTemplateFace(const std::wstring& sid, uint32_t faceId,
                             const std::vector<float>& newEmbedding);
 
-    // Measured minimum distance between w600k_r50 embeddings of the SAME
-    // person at DIFFERENT angles (docs/threshold-calibration.md appendix:
-    // min 0.681). Any update that brings two of one account's faces closer
-    // than this is by construction cross-angle contamination.
+    // Observation threshold for template-pair spacing (min measured
+    // cross-angle same-person distance 0.681, docs/threshold-calibration.md
+    // appendix). Only used for logging since the 2026-09-04 revision.
     static constexpr float kCrossAngleSentinelDist = 0.68f;
 
     // Remove an account entirely (equivalent to deleting all of its faces).
@@ -216,6 +244,12 @@ public:
         // learning EMA-updates exactly this template.
         uint32_t     faceId = 0;
         std::wstring faceLabel;   // display label, logging only
+        // Distance of the WINNING account's second-nearest comparable face
+        // (progressive-learning landing-clarity gate: the hit template must
+        // beat the runner-up by >= 0.10, else the probe is equidistant
+        // between two slots and must not update either). Negative = the
+        // account has only one comparable face (gate passes trivially).
+        float        secondFaceDistance = -1.0f;
     };
 
     struct MatchResult {

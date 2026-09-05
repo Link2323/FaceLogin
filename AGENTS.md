@@ -85,9 +85,10 @@ LogonUI.exe                            FaceLoginConsole.exe
     v                                      v
 FaceLoginCredentialProvider.dll         EnrollmentWizard
     | (管道: AUTH_REQUEST,                 | (管道: RELOAD_DB,
-    |  STATUS, AUTH_SUCCESS, AUTH_ACK)      |  CONFIG_RELOAD, CONTROL_ACK;日志直接读文件)
+    |  STATUS, AUTH_SUCCESS, AUTH_ACK)      |  CONFIG_RELOAD, LEARNING_STATUS,
+    |                                       |  CONTROL_ACK;日志直接读文件)
     v                                      v
-FaceLoginService.exe（常驻父进程） <----> 凭据存储 (users.dat V4)
+FaceLoginService.exe（常驻父进程） <----> 凭据存储 (users.dat V5)
     | (私有继承管道；仅 embedding/状态)       | (DPAPI 加密)
     v
 FaceLoginService.exe -auth-worker（一次认证即退出） config.json (热重载)
@@ -98,7 +99,7 @@ ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
 
 - **FaceLoginService.exe** —— Windows 服务(自动启动)。常驻父进程仅持有公开管道、`users.dat` 与密码解密；锁屏预加载的 `-auth-worker` 子进程持有 ONNX，认证请求后才打开 DirectShow 相机，完成一次认证即退出。禁止锁屏阶段预开摄像头。standalone 同样使用 DirectShow。
 - **FaceLoginCredentialProvider.dll** —— LogonUI 加载的 COM DLL,实现 `ICredentialProvider`/`ICredentialProviderCredential`。
-- **FaceLoginConsole.exe** —— WebView2 注册 GUI。`EnrollmentWizard` 经 COM `IDispatch` 暴露 **35 个方法**(dispId 1–35)。支持多角度采集。必须管理员运行。
+- **FaceLoginConsole.exe** —— WebView2 注册 GUI。`EnrollmentWizard` 经 COM `IDispatch` 暴露 **37 个方法**(dispId 1–37)。支持多角度采集;设置页含渐进式学习实验性开关,日志页含学习状态视图(经 `LEARNING_STATUS` 管道查询)。必须管理员运行。
 - **FaceLoginSetup.exe** —— 非常驻部署工具,不参与运行期管道通信。Go Wails v2 安装器通过 `embed.FS` 内嵌全部部署资源;安装/卸载流程见 [`docs/modules/installer.md`](docs/modules/installer.md),不要在本文件维护步骤数。
 
 ### 通用库(`common/`)
@@ -124,9 +125,9 @@ ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
 
 **性能** —— 慢机活体循环双峰的根因已定位并修复(worker 在 AUTH_START 解除 EcoQoS 电源限流,commit `40d018e`;历史"CPU 频率是主要决定变量"的结论即源于此,频率探针证据见 baseline §14)。相机枚举+图骨架已移入锁屏预载期(`0709653`),设备激活仍只在 AUTH_START 后。现行基线:开发机 E2E ~800ms、慢机 ~950–1090ms。除非有新的可复现实验数据,不要做逐机参数调优。迁移前的性能实验、嵌入次数与被否决方案见 [`docs/performance-baseline.md`](docs/performance-baseline.md)；worker 架构、正式 A/B 和资源验收见 [`docs/auth-worker-migration-completion.md`](docs/auth-worker-migration-completion.md)。服务强制校验 recognizer SHA-256(值见代码)。
 
-### 凭据存储 V4
+### 凭据存储 V5
 
-`users.dat` 只接受和写入 V4 多人脸格式；安装此版本前必须完整卸载旧版本并重新录入。当前 embedding 统一 512 维；dlib 已彻底移除,**不要去找 dlib 残留代码**。多角度每角度独立存储,绝不平均。完整字节布局见 [`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)。
+读入 V4/V5、写入 V5 多人脸格式(V5 每脸追加 nominalYaw/nominalPitch 标称角,供学习姿态锥门;V4 存量角为无效哨兵=锥门开启)。当前 embedding 统一 512 维；dlib 已彻底移除,**不要去找 dlib 残留代码**。多角度每角度独立存储,绝不平均。完整字节布局见 [`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)。
 
 ### 关键标识符
 

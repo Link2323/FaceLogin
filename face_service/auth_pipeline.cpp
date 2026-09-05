@@ -2,6 +2,7 @@
 
 #include "../common/logger.h"
 #include "exposure_warmup.h"
+#include "face_align.h"
 
 #include <algorithm>
 #include <chrono>
@@ -362,7 +363,9 @@ AuthPipelineResult AuthPipeline::Run() {
                 normLog.add(preNorm);
 
                 const BindingDecision decision =
-                    m_callbacks.verifyBinding(embedding, bindingCount, preNorm);
+                    m_callbacks.verifyBinding(embedding, bindingCount, preNorm,
+                                              EstimateYawDeg(cur.det->kps),
+                                              EstimatePitchDeg(cur.det->kps));
                 if (decision.kind == BindingDecisionKind::Retry) {
                     scoreFuture.get();
                     if (!haveRetryConditions) {

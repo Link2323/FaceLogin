@@ -21,10 +21,15 @@ struct AppConfig {
     // Use when the camera is physically mounted in a non-standard
     // orientation (e.g., vertical PC mount / sideways webcam).
     int            camera_rotation        = 0;
-    // Progressive template learning (docs/progressive-learning-v2.md §3).
-    // EMA fine-tune of the matched face template after each successful auth.
-    // master switch off = templates are strictly read-only.
-    bool           progressive_learning   = true;
+    // Template learning (docs/progressive-learning-v2.md). Two independent
+    // channels: ema_learning = success-path EMA fine-tune of the matched
+    // template after each successful auth; failure_learning = the deferred
+    // password-labeled channel (§5 — switch exists, mechanism lands later).
+    // Both off = templates are strictly read-only. Renamed from
+    // progressive_learning on 2026-09-04 (red line 7: independent switches;
+    // the legacy key is still honored on read when the new one is absent).
+    bool           ema_learning           = true;
+    bool           failure_learning       = true;
     // Per-update blend factor. Clamped to [0.05, 0.15]; effective alpha
     // additionally decays as alpha/(1+n) with n = updates already accepted
     // today (drift guard against same-pose bursts).
@@ -32,12 +37,13 @@ struct AppConfig {
     // Update distance gate: only frames matching THIS close may move a
     // template. The stored value is the CAP — the effective gate is
     // min(user's current-era same-person distance p20, cap), tracked by the
-    // service per account (docs/progressive-learning-v2.md red line 1,
-    // 2026-09-03 revision). Cap rationale: 0.681 minimum measured cross-angle
-    // distance minus a 0.08 margin — an impostor that barely passes the 0.80
-    // auth threshold stays far outside, and a passing frame is same-pose by
-    // construction. Clamped to [0.35, 0.60].
-    float          learning_distance_gate = 0.60f;
+    // service per account (docs/progressive-learning-v2.md red line 1).
+    // Cap rationale (2026-09-04 final form): 0.65 keeps a margin below the
+    // 0.681 minimum measured cross-angle distance while covering the YY
+    // environment-drift band; the pose cone + landing-clarity gates (not a
+    // wider distance margin) are what block wrong-slot updates. Clamped to
+    // [0.35, 0.65].
+    float          learning_distance_gate = 0.65f;
     // Absolute garbage line for the pre-normalization embedding norm
     // (w600k_r50 scale ≈ 20-25): blocks only blur/half-face frames. The
     // 2026-09-03 revision rejected the pooled enrollment p25 (20.9) as a

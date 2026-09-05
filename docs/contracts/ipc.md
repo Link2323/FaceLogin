@@ -6,7 +6,7 @@
 
 - 服务端：`FaceLoginService.exe`
 - 认证客户端：LogonUI 中加载的 `FaceLoginCredentialProvider.dll`
-- 管理客户端：`FaceLoginConsole.exe`，当前通过管道发送 `RELOAD_DB` / `CONFIG_RELOAD`
+- 管理客户端：`FaceLoginConsole.exe`，当前通过管道发送 `RELOAD_DB` / `CONFIG_RELOAD` / `LEARNING_STATUS`
 
 安装器不参与运行期 IPC。注册控制台的服务日志页面直接读取 `<DataPath>\log\service.log`，以避开固定消息缓冲区限制。
 
@@ -51,6 +51,7 @@
 | `AUTH_ACK` | CP → 服务 | CP 已复制并擦除终态传输缓冲区；服务最多等待 2 秒 |
 | `RELOAD_DB` / `RELOAD_OK` | 控制台 ↔ 服务 | 凭据数据库保存后热重载；客户端必须保持双向连接并等到 `RELOAD_OK`，不能写完即关闭 |
 | `CONFIG_RELOAD` / `CONFIG_RELOAD_OK` / `CONFIG_RELOAD_ERROR` | 控制台 ↔ 服务 | 配置热重载；无效活体配置保持 fail-closed |
+| `LEARNING_STATUS` | 控制台 ↔ 服务 | 只读查询渐进式学习状态；响应为单条 JSON（`enabled`/`gate_cap`/`faces[]`/`recent[]`，无 OK/ERROR 后缀），服务端同步组装。数据为内存快照，服务重启清零（持久事实源是日志）。客户端读取后回 `CONTROL_ACK`。管道单实例，控制台侧按 10s 节流，不得变成高频轮询 |
 | `CONTROL_ACK` | 控制台 → 服务 | 控制台已读取 reload 响应；服务最多等待 2 秒 |
 
 ## `AUTH_SUCCESS` 当前格式

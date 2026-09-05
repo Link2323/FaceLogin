@@ -124,7 +124,8 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_rotation"); ss << ": " << cfg.camera_rotation << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << ",\n";
-    ss << "  "; jsonWriteString(ss, "progressive_learning"); ss << ": " << (cfg.progressive_learning ? "true" : "false") << ",\n";
+    ss << "  "; jsonWriteString(ss, "ema_learning"); ss << ": " << (cfg.ema_learning ? "true" : "false") << ",\n";
+    ss << "  "; jsonWriteString(ss, "failure_learning"); ss << ": " << (cfg.failure_learning ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "learning_alpha"); ss << ": " << cfg.learning_alpha << ",\n";
     ss << "  "; jsonWriteString(ss, "learning_distance_gate"); ss << ": " << cfg.learning_distance_gate << ",\n";
     ss << "  "; jsonWriteString(ss, "learning_norm_floor"); ss << ": " << cfg.learning_norm_floor << ",\n";
@@ -174,13 +175,22 @@ AppConfig ConfigFromJson(const std::string& json) {
     }
     cfg.camera_rotation = rotation;
 
-    // ---- Progressive learning gates (docs/progressive-learning-v2.md §1/§3).
+    // ---- Template learning gates (docs/progressive-learning-v2.md §1/§3).
     // Missing keys adopt the calibrated defaults; hand-edited values outside
     // the safe band snap back — the distance gate in particular must stay
     // far below match_threshold or an impostor could poison templates.
-    const std::string learning = jsonGetString(json, "progressive_learning");
-    cfg.progressive_learning = learning.empty() ? cfg.progressive_learning
-                                                : (learning == "true");
+    // Red line 7 (2026-09-04): independent ema_learning/failure_learning
+    // switches. The legacy progressive_learning key is honored when
+    // ema_learning is absent so a disabled setup survives the rename.
+    const std::string emaLearning = jsonGetString(json, "ema_learning");
+    if (!emaLearning.empty()) {
+        cfg.ema_learning = (emaLearning == "true");
+    } else {
+        const std::string legacyLearning = jsonGetString(json, "progressive_learning");
+        if (!legacyLearning.empty()) cfg.ema_learning = (legacyLearning == "true");
+    }
+    const std::string failureLearning = jsonGetString(json, "failure_learning");
+    if (!failureLearning.empty()) cfg.failure_learning = (failureLearning == "true");
     cfg.learning_alpha = jsonGetFloat(json, "learning_alpha", 0.10f);
     if (!std::isfinite(cfg.learning_alpha) ||
         cfg.learning_alpha < 0.05f || cfg.learning_alpha > 0.15f) {
@@ -188,12 +198,12 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.learning_alpha);
         cfg.learning_alpha = 0.10f;
     }
-    cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.60f);
+    cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.65f);
     if (!std::isfinite(cfg.learning_distance_gate) ||
-        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.60f) {
-        FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.60",
+        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.65f) {
+        FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.65",
                        cfg.learning_distance_gate);
-        cfg.learning_distance_gate = 0.60f;
+        cfg.learning_distance_gate = 0.65f;
     }
     cfg.learning_norm_floor = jsonGetFloat(json, "learning_norm_floor", 19.1f);
     if (!std::isfinite(cfg.learning_norm_floor) ||

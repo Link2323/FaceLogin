@@ -31,6 +31,10 @@ constexpr wchar_t MSG_CONFIG_RELOAD[] = L"CONFIG_RELOAD";
 constexpr wchar_t MSG_CONFIG_RELOAD_OK[] = L"CONFIG_RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD_ERROR[] = L"CONFIG_RELOAD_ERROR";
 constexpr wchar_t MSG_CONTROL_ACK[] = L"CONTROL_ACK";
+// Read-only learning-observability query (console → service). The response
+// is a single JSON document (no OK/ERROR suffix); no fragmentation layer —
+// the payload must stay within the client's read buffer.
+constexpr wchar_t MSG_LEARNING_STATUS[] = L"LEARNING_STATUS";
 constexpr DWORD PIPE_ACK_TIMEOUT_MS = 2000;
 
 // Parsed authentication result

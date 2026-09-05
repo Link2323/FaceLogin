@@ -268,23 +268,30 @@ bool DecodeWString(const std::vector<uint8_t>& payload, std::wstring& value,
 
 std::vector<uint8_t> EncodeMatchProbe(unsigned int bindingIndex,
                                       const std::vector<float>& embedding,
-                                      float preNorm) {
+                                      float preNorm,
+                                      float yawDeg,
+                                      float pitchDeg) {
     PayloadWriter writer;
     writer.WriteU32(bindingIndex);
     writer.WriteFloatVector(embedding);
     writer.WriteFloat(preNorm);
+    writer.WriteFloat(yawDeg);
+    writer.WriteFloat(pitchDeg);
     return writer.Data();
 }
 
 bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
                       unsigned int& bindingIndex,
                       std::vector<float>& embedding,
-                      float& preNorm) {
+                      float& preNorm,
+                      float& yawDeg,
+                      float& pitchDeg) {
     PayloadReader reader(payload);
     uint32_t rawIndex = 0;
     if (!reader.ReadU32(rawIndex) || rawIndex > 2 ||
         !reader.ReadFloatVector(embedding, kEmbeddingDimension) ||
-        !reader.ReadFloat(preNorm) || !reader.Done() ||
+        !reader.ReadFloat(preNorm) || !reader.ReadFloat(yawDeg) ||
+        !reader.ReadFloat(pitchDeg) || !reader.Done() ||
         embedding.size() != kEmbeddingDimension) {
         return false;
     }
@@ -303,6 +310,12 @@ bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
     // finite, strictly positive value lets the parent gate template updates
     // on recognizer norm without recomputing it from the normalized vector.
     if (!std::isfinite(preNorm) || preNorm <= 0.0f) return false;
+    // Pose estimates come from atan-based weak-perspective models, so the
+    // physical range is ±90°; anything outside is wire corruption.
+    if (!std::isfinite(yawDeg) || std::fabs(yawDeg) > 90.0f ||
+        !std::isfinite(pitchDeg) || std::fabs(pitchDeg) > 90.0f) {
+        return false;
+    }
     bindingIndex = rawIndex;
     return true;
 }

@@ -9,9 +9,10 @@
 namespace facelogin::auth_worker {
 
 inline constexpr uint32_t kProtocolMagic = 0x4B574C46; // "FLWK"
-// v4: MatchProbe gained a trailing float — the pre-normalization recognizer
-// norm (quality signal for progressive-learning update gating).
-inline constexpr uint16_t kProtocolVersion = 4;
+// v5: MatchProbe gained two trailing floats — the frame's yaw/pitch pose
+// estimates (progressive-learning pose-cone gate, docs/progressive-
+// learning-v2.md §3). v4 appended the pre-normalization recognizer norm.
+inline constexpr uint16_t kProtocolVersion = 5;
 inline constexpr uint32_t kMaxPayloadBytes = 16 * 1024;
 inline constexpr uint32_t kEmbeddingDimension = 512;
 // The recognizer L2-normalizes every production embedding before it crosses
@@ -176,11 +177,15 @@ bool DecodeWString(const std::vector<uint8_t>& payload, std::wstring& value,
 
 std::vector<uint8_t> EncodeMatchProbe(unsigned int bindingIndex,
                                       const std::vector<float>& embedding,
-                                      float preNorm);
+                                      float preNorm,
+                                      float yawDeg,
+                                      float pitchDeg);
 bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
                       unsigned int& bindingIndex,
                       std::vector<float>& embedding,
-                      float& preNorm);
+                      float& preNorm,
+                      float& yawDeg,
+                      float& pitchDeg);
 
 std::vector<uint8_t> EncodeAuthTiming(const AuthTiming& timing);
 bool DecodeAuthTiming(const std::vector<uint8_t>& payload, AuthTiming& timing);

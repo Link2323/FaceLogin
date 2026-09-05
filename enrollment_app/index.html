@@ -367,6 +367,16 @@ body{
       <p class="dim" style="margin-top:4px;font-size:11px">与录入人脸比对的欧氏距离，低于阈值才通过。标定默认值 0.80，越低越严格。</p>
     </div>
 
+    <div class="field">
+      <label style="text-transform:none;display:flex;gap:8px;align-items:center;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="cfg-learning" style="width:auto;cursor:pointer">
+        <span>渐进式学习（认证成功后自动微调人脸模板）
+          <span style="font-size:10px;padding:1px 6px;border:1px solid #d97706;color:#b45309;border-radius:3px;margin-left:2px;white-space:nowrap">实验性</span>
+        </span>
+      </label>
+      <p class="dim" style="font-size:11px">开启后，每次人脸认证成功会以极小步长微调命中角度的模板，跟随发型、光线等日常外貌变化。关闭后人脸模板完全只读（只可用重新录入更新）。实验性功能：默认开启；若出现识别异常，可先关闭此开关排查。</p>
+    </div>
+
     <button class="btn btn-primary" onclick="onSaveSettings()">
       保存设置
     </button>
@@ -397,6 +407,7 @@ body{
           <option value="service">Service</option>
           <option value="worker">AuthWorker</option>
           <option value="cp">CredentialProvider</option>
+          <option value="learning">学习状态</option>
         </select>
         <button class="btn btn-secondary" id="btn-copy-log" onclick="copyLogs()">复制</button>
         <button class="btn btn-secondary" id="btn-clear-log" onclick="clearLogs()"
@@ -777,8 +788,13 @@ function loadSettings() {
   try {
     var json = H.GetConfig();
     var cfg = JSON.parse(json);
+    // Keep the full parsed config for onSaveSettings: the backend's SetConfig
+    // parser starts from defaults, so saving only the UI-managed keys would
+    // silently reset non-UI fields (learning gates, alpha, interval, ...).
+    window.__loadedConfig = cfg;
     document.getElementById('cfg-rotation').value = String(cfg.camera_rotation || 0);
     document.getElementById('cfg-low-light').checked = !!cfg.low_light_enhance;
+    document.getElementById('cfg-learning').checked = (cfg.ema_learning !== false);
 
     // Populate the camera dropdown from the enumerated devices.
     var camSel = document.getElementById('cfg-camera');
@@ -827,13 +843,20 @@ function loadSettings() {
 }
 
 function onSaveSettings() {
-  var cfg = {
+  // Single UI switch drives both learning channels so "off" means templates
+  // are strictly read-only (docs/progressive-learning-v2.md red line 5).
+  var learning = document.getElementById('cfg-learning').checked;
+  // Round-trip the FULL config: UI-managed keys overridden, every other key
+  // preserved from the last load (see loadSettings note on partial saves).
+  var cfg = Object.assign({}, window.__loadedConfig || {}, {
     match_threshold: parseFloat(document.getElementById('cfg-threshold').value),
     anti_spoof_threshold: parseFloat(document.getElementById('cfg-antispoof-threshold').value),
     low_light_enhance: document.getElementById('cfg-low-light').checked,
     camera_rotation: parseInt(document.getElementById('cfg-rotation').value) || 0,
-    camera_device: document.getElementById('cfg-camera').value
-  };
+    camera_device: document.getElementById('cfg-camera').value,
+    ema_learning: learning,
+    failure_learning: learning
+  });
   try {
     var ok = H.SetConfig(JSON.stringify(cfg));
     if (ok) {
@@ -1450,7 +1473,10 @@ function onAppendConfirm() {
       document.getElementById('screen-cam').classList.add('active');
       currentTab = 'cam';
       setCaption('准备就绪');
-      showBanner('cam', '新脸已添加成功！可按 Win+L 锁定屏幕测试人脸登录。', 'ok');
+      var okMsg = '新脸已添加成功！可按 Win+L 锁定屏幕测试人脸登录。';
+      var hint = enrollmentHint();
+      if (hint) okMsg += ' ' + hint;
+      showBanner('cam', okMsg, 'ok', hint ? 12000 : undefined);
       try {
         if (H.StartPreview()) { viewing = true; renderFrame(); }
         else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
@@ -1508,6 +1534,13 @@ function onPwdCancel() {
   } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
 }
 
+// Soft enrollment-quality hint from the backend (empty when nothing to say).
+// Currently set when the saved angle templates sit closer than the measured
+// cross-angle minimum — suggests a bigger turn on re-enrollment.
+function enrollmentHint() {
+  try { return H.GetEnrollmentHint() || ''; } catch(e) { return ''; }
+}
+
 function onSave() {
   var pass = document.getElementById('fld-pass').value;
   if (!pass) { showBanner('pwd', '请输入密码。', 'error'); return; }
@@ -1537,7 +1570,10 @@ function onSave() {
       currentTab = 'cam';
       document.getElementById('fld-pass').value = '';
       setCaption('准备就绪');
-      showBanner('cam', '录入成功！可按 Win+L 锁定屏幕测试人脸登录。', 'ok');
+      var okMsg = '录入成功！可按 Win+L 锁定屏幕测试人脸登录。';
+      var hint = enrollmentHint();
+      if (hint) okMsg += ' ' + hint;
+      showBanner('cam', okMsg, 'ok', hint ? 12000 : undefined);
       try {
         if (H.StartPreview()) { viewing = true; renderFrame(); }
         else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
@@ -1561,6 +1597,77 @@ function onSave() {
   }, 50);
 }
 
+// Learning view throttles to one pipe query per 10s: the public pipe is
+// single-instance, so the 2s log tick must not become a 2s poll on it.
+var learningLastFetch = 0;
+var lastLogSource = '';
+
+// Console-friendly labels for the learner's skip-reason keys (server-side
+// keys are stable ASCII; unknown keys fall through verbatim).
+var LEARN_REASONS = {
+  distance: '距离门', clarity: '落点明确性', cone: '姿态锥',
+  norm: '范数地板', interval: '节奏间隔', disabled: '学习已关闭',
+  vanished: '模板已移除', error: '其他错误'
+};
+
+function renderLearningStatus(force) {
+  var now = Date.now();
+  if (!force && now - learningLastFetch < 10000) return;
+  learningLastFetch = now;
+  var viewer = document.getElementById('log-viewer');
+  var html;
+  try {
+    var st = JSON.parse(H.GetLearningStatus());
+    if (st.error) {
+      html = '<div class="log-warn">学习状态不可用: ' + escapeHtml(st.error) +
+             '（需后台服务运行；standalone 模式下同样可用）</div>';
+    } else {
+      html = '<div class="log-info">[渐进式学习] ' + (st.enabled ? '已开启' : '已关闭') +
+             ' · 距离门上限 ' + Number(st.gate_cap).toFixed(2) +
+             ' · α=' + Number(st.alpha).toFixed(2) +
+             ' · 间隔 ' + st.interval + 's · 每10秒自动刷新</div>';
+      html += '<div class="log-debug">[每脸统计]</div>';
+      if (!st.faces || !st.faces.length) {
+        html += '<div class="log-debug">暂无学习记录（认证成功后此处出现统计）</div>';
+      } else {
+        for (var i = 0; i < st.faces.length; i++) {
+          var f = st.faces[i];
+          var p20 = (f.era_p20 >= 0)
+            ? '纪元p20 ' + Number(f.era_p20).toFixed(3) + '（' + f.era_rounds + '轮）'
+            : '纪元样本不足（' + f.era_rounds + '/5轮，门用上限）';
+          html += '<div class="log-info">' + escapeHtml(f.user || '?') + ' 脸' + f.face +
+                  '(' + escapeHtml(f.label || '?') + ') · 累计 ' + f.total + ' 次 · 今日 ' + f.today +
+                  ' · 最近接受 ' + (f.last || '从未') + ' · ' + p20 + '</div>';
+        }
+      }
+      html += '<div class="log-debug">[最近事件]（新→旧，最多24条）</div>';
+      if (!st.recent || !st.recent.length) {
+        html += '<div class="log-debug">暂无事件</div>';
+      } else {
+        for (var j = 0; j < st.recent.length; j++) {
+          var ev = st.recent[j];
+          var who = escapeHtml(ev.user || '?') + '/' + escapeHtml(ev.label || '?');
+          if (ev.ok) {
+            html += '<div class="log-info">' + ev.t + '  [OK]   已更新  d=' +
+                    Number(ev.d).toFixed(3) + ' α=' + Number(ev.alpha).toFixed(3) +
+                    '  ' + who + '</div>';
+          } else {
+            var reason = LEARN_REASONS[ev.reason] || ev.reason;
+            var detail = (ev.reason === 'distance')
+              ? 'd=' + Number(ev.d).toFixed(3) + ' > 门' + Number(ev.gate).toFixed(3)
+              : 'd=' + Number(ev.d).toFixed(3);
+            html += '<div class="log-warn">' + ev.t + '  [跳过] ' + escapeHtml(reason) +
+                    '  ' + detail + '  ' + who + '</div>';
+          }
+        }
+      }
+    }
+  } catch(e) {
+    html = '<div class="log-error">读取学习状态失败: ' + escapeHtml(e.message) + '</div>';
+  }
+  viewer.innerHTML = html;
+}
+
 function refreshLogs() {
   try {
     var viewer = document.getElementById('log-viewer');
@@ -1571,6 +1678,15 @@ function refreshLogs() {
     var selection = window.getSelection();
     if (selection && !selection.isCollapsed && viewer.contains(selection.anchorNode)) return;
     var src = document.getElementById('log-source').value;
+    var force = (src !== lastLogSource);
+    lastLogSource = src;
+    if (src === 'learning') {
+      // No file to clear behind this view — hide the button for it.
+      document.getElementById('btn-clear-log').style.display = 'none';
+      renderLearningStatus(force);
+      return;
+    }
+    document.getElementById('btn-clear-log').style.display = '';
     var json;
     if (src === 'service') {
       json = H.GetServiceLogLines();
@@ -1611,6 +1727,7 @@ function escapeHtml(s) {
 // 按天轮转的历史文件不受影响。
 function clearLogs() {
   var src = document.getElementById('log-source').value;
+  if (src === 'learning') return;  // live view, nothing to clear
   try {
     if (src === 'console') H.ClearLog();
     else H.ClearFileLog(src);

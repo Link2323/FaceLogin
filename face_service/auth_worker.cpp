@@ -296,10 +296,12 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         }
     };
     callbacks.verifyBinding = [&channel, &channelHealthy, requestId = command.requestId](
-        const std::vector<float>& embedding, unsigned int bindingIndex, float preNorm) {
+        const std::vector<float>& embedding, unsigned int bindingIndex, float preNorm,
+        float yawDeg, float pitchDeg) {
         if (!channelHealthy.load() ||
             !channel.Write(MessageType::MatchProbe, requestId,
-                           auth_worker::EncodeMatchProbe(bindingIndex, embedding, preNorm))) {
+                           auth_worker::EncodeMatchProbe(bindingIndex, embedding,
+                                                         preNorm, yawDeg, pitchDeg))) {
             channelHealthy.store(false);
             return BindingDecision{BindingDecisionKind::Reject,
                                    L"认证通信失败，请使用密码登录"};

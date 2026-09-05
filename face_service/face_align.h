@@ -170,4 +170,44 @@ inline float EstimateYawDeg(const float kps[10]) {
     return std::atan(kYawCalibration * (nx - midX) / eyeDist) * 180.0f / 3.14159265358979f;
 }
 
+// Estimate head pitch (degrees) from the 5 keypoints, same weak-perspective
+// family as EstimateYawDeg. The nose tip sits BELOW the eye line even in a
+// neutral pose, so the offset must be measured against the canonical
+// neutral-pose ratio instead of zero:
+//
+//   r  = (noseY - eyeMidY) / eyeDist      (nose-below-eye ratio, image y down)
+//   r0 = 0.5714                           (kInsightFaceRef112 neutral pose)
+//   pitch ≈ atan(k · (r - r0))
+//
+// Pitching the head forward (chin down) drops the nose tip further below the
+// eye line → r > r0 → pitch > 0. k = 1.86 matches yaw: the same
+// protrusion/interocular geometry drives both small-angle sensitivities.
+// kAngleTargets write nominalPitch = 0, so only the CONSISTENCY of this
+// estimator with itself matters for the ±25° learning cone (docs/
+// progressive-learning-v2.md §3), not absolute accuracy.
+inline float EstimatePitchDeg(const float kps[10]) {
+    const float ley = kps[1];              // left eye y
+    const float rey = kps[3];              // right eye y
+    const float ny  = kps[5];              // nose y
+
+    float midY = (ley + rey) * 0.5f;
+    float eyeDist = std::sqrt((kps[2] - kps[0]) * (kps[2] - kps[0]) +
+                              (rey - ley) * (rey - ley));
+    if (eyeDist < 1e-4f) return 0.0f;
+
+    constexpr float kNeutralNoseRatio = 0.5714f;  // kInsightFaceRef112
+    constexpr float kPitchCalibration = 1.86f;
+    const float r = (ny - midY) / eyeDist;
+    return std::atan(kPitchCalibration * (r - kNeutralNoseRatio)) *
+           180.0f / 3.14159265358979f;
+}
+
+// A stored/derived pose angle is usable only when finite and inside the
+// physical ±90° range. Anything else (notably credential_store's
+// kNominalAngleInvalid sentinel carried by V4-era records) means "no pose
+// information" — consumers treat that as pass, never as 0°.
+inline bool IsValidNominalAngle(float v) {
+    return std::isfinite(v) && std::fabs(v) <= 90.0f;
+}
+
 } // namespace facelogin

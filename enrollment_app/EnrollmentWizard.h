@@ -55,6 +55,10 @@ public:
     bool IsLivenessPassed() const { return m_livenessPassed; }
     bool IsLivenessChecking() const { return m_livenessChecking; }
     bool ValidatePassword(const std::wstring& password);
+    // Soft quality hint from the LAST save (UTF-8; empty = no hint). Set when
+    // the saved angle templates sit closer than the measured cross-angle
+    // minimum (0.68) — suggests a bigger turn on re-enrollment, never blocks.
+    const std::string& GetEnrollmentHint() const { return m_lastEnrollHint; }
     // Save enrollment with the given password. label names this face (may be
     // empty — the backend falls back to L"脸N").
     bool SaveEnrollment(const std::wstring& password, const std::wstring& label = L"");
@@ -126,6 +130,9 @@ public:
     // Configuration
     std::string GetConfig() const;
     bool SetConfig(const std::string& json);
+    // LEARNING_STATUS pipe query → compact JSON ({"error":...} on failure).
+    // Read-only data for the learning-observability view.
+    std::string GetLearningStatus();
     bool RestartPreview();
 
     // Camera device enumeration for the settings UI.
@@ -212,6 +219,9 @@ private:
     std::atomic<float> m_lastYaw{0.0f};
     static constexpr int kAngleTargetFrames = 5;
     static constexpr int kAngleTargets[3] = {0, 30, -30};  // 正面 / 左转 / 右转
+
+    // Soft pair-spacing hint for the UI (see GetEnrollmentHint).
+    std::string m_lastEnrollHint;
 
     std::wstring m_username;
     std::wstring m_upn;       // UserPrincipalName (e.g. "john@outlook.com") or empty for local

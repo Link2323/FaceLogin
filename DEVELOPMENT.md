@@ -57,7 +57,7 @@
 - 安装包载荷白名单（唯一事实源）：[`docs/BUILD.md`](docs/BUILD.md)
 - 命名管道线格式：[`docs/contracts/ipc.md`](docs/contracts/ipc.md)
 - 父服务/认证 worker 私有线格式：[`docs/contracts/auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md)
-- `users.dat` V4：[`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)
+- `users.dat` V5(读 V4/V5,写 V5)：[`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)
 
 <a id="sec-paths"></a>
 ## 路径与配置

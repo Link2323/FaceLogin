@@ -42,10 +42,15 @@ struct AuthPipelineCallbacks {
     // password. Retry means the current frame is not counted for PAD.
     // preNorm is the embedding's L2 norm before normalization (quality
     // signal; the embedding itself arrives unit-length so the raw norm is
-    // unrecoverable downstream).
+    // unrecoverable downstream). yawDeg/pitchDeg are the weak-perspective
+    // pose estimates from the same frame's keypoints (face_align.h) — the
+    // progressive-learning pose-cone gate consumes them (docs/
+    // progressive-learning-v2.md §3).
     std::function<BindingDecision(const std::vector<float>&,
                                   unsigned int bindingIndex,
-                                  float preNorm)> verifyBinding;
+                                  float preNorm,
+                                  float yawDeg,
+                                  float pitchDeg)> verifyBinding;
 };
 
 struct AuthPipelineConfig {

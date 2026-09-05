@@ -10,6 +10,7 @@
 - 父进程加载配置、凭据数据库并维持公开命名管道
 - 锁屏时预加载一个私有认证子进程；子进程独占四个 ONNX 模型和摄像头
 - 检测、PAD、身份一致性和匹配
+- 认证成功后的模板渐进学习（`TemplateLearner`，设计见 `docs/progressive-learning-v2.md` §3；含 `LEARNING_STATUS` 只读内存快照查询，供控制台学习状态视图）
 - 通过事件驱动命名管道向 Credential Provider 返回终态，并以 2 秒有界 `AUTH_ACK` 确认交付
 
 服务不负责注册人脸、验证用户输入的 Windows 密码或安装 COM DLL。
@@ -77,7 +78,7 @@ SCRFD 5 点经 [`face_align.h`](../../face_service/face_align.h) 做相似变换
 
 生产 worker 与 standalone 都在构造 ONNX Session 前校验四个模型的 SHA-256，C++ 常量集中在 `common/model_hashes.h`；安装器还会在提取前后独立校验同一组模型。模型已在当前工作区准备完成，普通构建不要重新下载或量化。
 
-模型生命周期状态为 `Unloaded → Loading → Ready/Failed`，其中 `Ready` 表示私有 worker 的 Hello/Init/Ready 握手已经完成。`HandlerEx` 只提交加载/释放请求，构造/关闭由长期生命周期线程完成；`AUTH_REQUEST` 是锁屏通知之外的加载兜底。`CONFIG_RELOAD` 在桌面已解锁时只更新下一次 worker 的配置；锁屏时会以配置代次替换 worker，确认新 worker 已就绪后才回复成功。`service.log` 记录父进程资源和成功终态计时，`auth_worker.log` 记录 worker 的模型加载、预热选择、相机/PAD 过程以及失败终态；成功路径不在 worker 内同步写终态日志。身份不匹配的失败轮会补齐诊断字段：父进程 WARN 附"closest identity distance=…, threshold=…"(该轮最近身份距离，`FindBestIdentity` 出参收集)，worker 的 unknown-face 快速失败与成功终态行附"width=… px, face luma=…"(首次身份 miss / 末次绑定帧的人脸宽与亮度)，用于区分"差一点过阈值"与"完全不是本人"、以及光照域差问题。`CameraLifecycleTest` 用 DirectShow 的 inproc/child 模式确认驱动与隔离边界；`AuthWorkerProtocolTest` 验证私有协议与畸形输入；`AuthWorkerLifecycleTest` 覆盖 supervisor 故障、Job 清理和 100 次模拟认证退出；`CredentialStoreTest` 覆盖 identity-only 匹配、最终单次解密和仅 V4 的 fail-closed 读取。
+模型生命周期状态为 `Unloaded → Loading → Ready/Failed`，其中 `Ready` 表示私有 worker 的 Hello/Init/Ready 握手已经完成。`HandlerEx` 只提交加载/释放请求，构造/关闭由长期生命周期线程完成；`AUTH_REQUEST` 是锁屏通知之外的加载兜底。`CONFIG_RELOAD` 在桌面已解锁时只更新下一次 worker 的配置；锁屏时会以配置代次替换 worker，确认新 worker 已就绪后才回复成功。`service.log` 记录父进程资源和成功终态计时，`auth_worker.log` 记录 worker 的模型加载、预热选择、相机/PAD 过程以及失败终态；成功路径不在 worker 内同步写终态日志。身份不匹配的失败轮会补齐诊断字段：父进程 WARN 附"closest identity distance=…, threshold=…"(该轮最近身份距离，`FindBestIdentity` 出参收集)，worker 的 unknown-face 快速失败与成功终态行附"width=… px, face luma=…"(首次身份 miss / 末次绑定帧的人脸宽与亮度)，用于区分"差一点过阈值"与"完全不是本人"、以及光照域差问题。`CameraLifecycleTest` 用 DirectShow 的 inproc/child 模式确认驱动与隔离边界；`AuthWorkerProtocolTest` 验证私有协议与畸形输入；`AuthWorkerLifecycleTest` 覆盖 supervisor 故障、Job 清理和 100 次模拟认证退出；`CredentialStoreTest` 覆盖 identity-only 匹配、最终单次解密、V4/V5 读取与标称角往返。
 
 ## 当前认证常量
 

@@ -210,16 +210,19 @@ void TestUpdateTemplateFace() {
     Check(store.UpdateTemplateFace(L"SID-A", 1, inCone),
           "same-pose EMA update is accepted");
 
-    // Cross-angle sentinel: replacing face #1 with a vector only ~0.10 from
-    // face #2 would collapse the pair below kCrossAngleSentinelDist.
+    // Pair-spacing observation (2026-09-04): replacing face #1 with a vector
+    // only ~0.10 from face #2 collapses the pair below
+    // kCrossAngleSentinelDist — the update COMMITS anyway (a rejecting
+    // sentinel wedged the whole learning channel on legacy near-pair
+    // accounts; convergence is fail-safe coverage loss, docs red line 3).
     const auto nearFace2 = NearBasis(1, 0.10f);
-    Check(!store.UpdateTemplateFace(L"SID-A", 1, nearFace2),
-          "cross-angle sentinel rejects a converging update");
+    Check(store.UpdateTemplateFace(L"SID-A", 1, nearFace2),
+          "converging update commits (pair distance is observation-only)");
     {
         const auto& users = store.GetUsers();
         Check(users.size() == 1 && users[0].faces.size() == 2 &&
-                  VectorDistance(users[0].faces[0].embedding, inCone) < 1e-5f,
-              "rejected update leaves the previous template byte-identical");
+                  VectorDistance(users[0].faces[0].embedding, nearFace2) < 1e-5f,
+              "observation-only update actually replaces the template");
     }
 
     Check(!store.UpdateTemplateFace(L"SID-MISSING", 1, inCone),
@@ -240,7 +243,7 @@ void TestUpdateTemplateFace() {
         Check(users.size() == 1 && users[0].faces.size() == 2 &&
                   users[0].faces[0].label == L"正面" &&
                   users[0].faces[1].label == L"左转" &&
-                  VectorDistance(users[0].faces[0].embedding, inCone) < 1e-5f,
+                  VectorDistance(users[0].faces[0].embedding, nearFace2) < 1e-5f,
               "updated template round-trips with labels and slot order");
         auto credential = reloaded.LoadCredentialForSid(L"SID-A", 0.1f);
         Check(credential && credential->password == L"test-password",
@@ -289,17 +292,100 @@ void TestV4RoundTripAndReload() {
     CleanupTempRoot(root);
 }
 
+void TestV5NominalAnglesAndUpgradeRead() {
+    const std::wstring root = MakeTempRoot();
+    Check(!root.empty(), "temp root created for V5 nominal-angle tests");
+    if (root.empty()) return;
+
+    // V5 round trip: nominal angles persist per face.
+    {
+        facelogin::CredentialStore writer;
+        writer.SetDataDir(root);
+        const auto encrypted = facelogin::DpapiUtil::Protect(L"v5-password");
+        Check(writer.AddFace(L"v5", L"", L"SID-V5", encrypted, Basis(0),
+                             L"正面", nullptr, 0.0f, 0.0f),
+              "front face with nominal angles is added");
+        Check(writer.AddFace(L"v5", L"", L"SID-V5", {}, Basis(1),
+                             L"左转", nullptr, 30.0f, 0.0f),
+              "left face with nominal yaw +30 is added");
+        Check(writer.SaveDatabase(), "V5 database saves");
+        facelogin::CredentialStore reader;
+        reader.SetDataDir(root);
+        Check(reader.LoadDatabase(), "V5 database reloads");
+        const auto& users = reader.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 2 &&
+                  users[0].faces[0].nominalYaw == 0.0f &&
+                  users[0].faces[1].nominalYaw == 30.0f &&
+                  users[0].faces[0].nominalPitch == 0.0f &&
+                  users[0].faces[1].nominalPitch == 0.0f,
+              "V5 nominal angles round-trip per face");
+        auto credential = reader.LoadCredentialForSid(L"SID-V5");
+        Check(credential && credential->password == L"v5-password",
+              "V5 reload preserves decryptable credential");
+
+        // Landing-clarity input: the winning account's second-nearest face
+        // is exposed on IdentityMatch; a probe near face #1 reports face #2's
+        // distance as the runner-up.
+        const auto probe = NearBasis(0, 0.05f);
+        auto identity = reader.FindBestIdentity(probe.data(), probe.size(), 0.80f);
+        Check(identity && identity->faceId == 1 &&
+                  identity->secondFaceDistance > 1.30f,
+              "identity match reports the winning account's runner-up face");
+        // Single-face account: negative runner-up = clarity gate passes.
+        facelogin::CredentialStore single;
+        single.SetDataDir(root);
+        const auto encrypted2 = facelogin::DpapiUtil::Protect(L"v5b");
+        Check(single.AddFace(L"solo", L"", L"SID-SOLO", encrypted2, Basis(4)),
+              "single-face account is added");
+        auto solo = single.FindBestIdentity(Basis(4).data(), 512, 0.80f);
+        Check(solo && solo->secondFaceDistance < 0.0f,
+              "single-face account reports no runner-up face");
+    }
+
+    // V4 upgrade read: a legacy file loads with invalid nominal angles.
+    {
+        {
+            std::ofstream file(root + L"\\data\\users.dat",
+                               std::ios::binary | std::ios::trunc);
+            const uint32_t version = 4;
+            const uint32_t count = 1;
+            Write(file, kFileMagic);
+            Write(file, version);
+            Write(file, count);
+            WriteValidV4Record(file, L"legacy", L"SID-LEGACY");
+        }  // close+flush the fixture before the reader opens it
+        facelogin::CredentialStore reader;
+        reader.SetDataDir(root);
+        Check(reader.LoadDatabase(), "V4 database still loads (V5 reader)");
+        const auto& users = reader.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 1 &&
+                  users[0].faces[0].nominalYaw == facelogin::kNominalAngleInvalid &&
+                  users[0].faces[0].nominalPitch == facelogin::kNominalAngleInvalid,
+              "V4 faces load with invalid nominal angles");
+        // Saving upgrades the file to V5 with the sentinel round-tripped.
+        Check(reader.SaveDatabase(), "upgraded database saves as V5");
+        facelogin::CredentialStore rereader;
+        rereader.SetDataDir(root);
+        Check(rereader.LoadDatabase(), "upgraded V5 file reloads");
+        const auto& upgraded = rereader.GetUsers();
+        Check(upgraded.size() == 1 && upgraded[0].faces.size() == 1 &&
+                  upgraded[0].faces[0].nominalYaw == facelogin::kNominalAngleInvalid,
+              "V5 round-trips the invalid-angle sentinel (cone stays off)");
+    }
+    CleanupTempRoot(root);
+}
+
 void TestUnsupportedVersionsAreRejected() {
     const std::wstring root = MakeTempRoot();
     Check(!root.empty(), "unsupported-version fixture directory is created");
     if (root.empty()) return;
 
-    for (uint32_t version = 1; version <= 3; ++version) {
+    for (uint32_t version : {1u, 2u, 3u, 6u}) {
         WriteUnsupportedDatabase(root, version);
         facelogin::CredentialStore store;
         store.SetDataDir(root);
         Check(!store.LoadDatabase() && store.GetUserCount() == 0,
-              "non-V4 database version is rejected");
+              "unsupported database version is rejected");
     }
     CleanupTempRoot(root);
 }
@@ -353,6 +439,7 @@ int wmain() {
     TestPasswordBlobValidation();
     TestV4RoundTripAndReload();
     TestUpdateTemplateFace();
+    TestV5NominalAnglesAndUpgradeRead();
     TestUnsupportedVersionsAreRejected();
     TestMalformedReloadIsTransactional();
     if (g_failures != 0) {

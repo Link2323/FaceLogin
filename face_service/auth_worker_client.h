@@ -13,11 +13,14 @@ namespace facelogin {
 struct AuthWorkerCallbacks {
     std::function<void(const std::wstring&)> reportStatus;
     std::function<bool()> isCancelled;
-    // preNorm = embedding L2 norm before normalization (quality signal for
-    // progressive-learning gating).
+    // preNorm = embedding L2 norm before normalization; yawDeg/pitchDeg =
+    // the frame's pose estimates (quality signals for progressive-learning
+    // gating — docs/progressive-learning-v2.md §3).
     std::function<BindingDecision(const std::vector<float>&,
                                   unsigned int bindingIndex,
-                                  float preNorm)> verifyBinding;
+                                  float preNorm,
+                                  float yawDeg,
+                                  float pitchDeg)> verifyBinding;
 };
 
 struct AuthWorkerResult {
