@@ -634,6 +634,87 @@ bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame, unsigned long long* frameS
     return true;
 }
 
+// ============================================================================
+// Gain controls (face_gain_tune.h)
+// ============================================================================
+
+// The procamp interface lives on the capture filter. QI per call — the tune
+// touches it a handful of times per graph init, so caching adds state for
+// nothing.
+bool WebcamCaptureDS::GetGainRange(long* pMin, long* pMax, long* pStep) {
+    *pMin = *pMax = *pStep = 0;
+    if (!m_pCapture) return false;
+    IAMVideoProcAmp* procAmp = nullptr;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
+        return false;
+    long def = 0, caps = 0;
+    const bool ok = SUCCEEDED(procAmp->GetRange(VideoProcAmp_Gain,
+                                                pMin, pMax, pStep, &def, &caps));
+    procAmp->Release();
+    return ok;
+}
+
+bool WebcamCaptureDS::GetGain(long* pValue) {
+    *pValue = 0;
+    if (!m_pCapture) return false;
+    IAMVideoProcAmp* procAmp = nullptr;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
+        return false;
+    long flags = 0;
+    const bool ok = SUCCEEDED(procAmp->Get(VideoProcAmp_Gain, pValue, &flags));
+    procAmp->Release();
+    return ok;
+}
+
+bool WebcamCaptureDS::SetGain(long value) {
+    if (!m_pCapture) return false;
+    IAMVideoProcAmp* procAmp = nullptr;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
+        return false;
+    const bool ok = SUCCEEDED(procAmp->Set(VideoProcAmp_Gain, value,
+                                           VideoProcAmp_Flags_Manual));
+    procAmp->Release();
+    return ok;
+}
+
+// Exposure time lives on IAMCameraControl (a separate interface from the
+// procamp gain above). Same QI-per-call policy.
+bool WebcamCaptureDS::GetExposureRange(long* pMin, long* pMax, long* pStep) {
+    *pMin = *pMax = *pStep = 0;
+    if (!m_pCapture) return false;
+    IAMCameraControl* camCtrl = nullptr;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
+        return false;
+    long def = 0, caps = 0;
+    const bool ok = SUCCEEDED(camCtrl->GetRange(CameraControl_Exposure,
+                                                pMin, pMax, pStep, &def, &caps));
+    camCtrl->Release();
+    return ok;
+}
+
+bool WebcamCaptureDS::GetExposure(long* pValue) {
+    *pValue = 0;
+    if (!m_pCapture) return false;
+    IAMCameraControl* camCtrl = nullptr;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
+        return false;
+    long flags = 0;
+    const bool ok = SUCCEEDED(camCtrl->Get(CameraControl_Exposure, pValue, &flags));
+    camCtrl->Release();
+    return ok;
+}
+
+bool WebcamCaptureDS::SetExposure(long value) {
+    if (!m_pCapture) return false;
+    IAMCameraControl* camCtrl = nullptr;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
+        return false;
+    const bool ok = SUCCEEDED(camCtrl->Set(CameraControl_Exposure, value,
+                                           CameraControl_Flags_Manual));
+    camCtrl->Release();
+    return ok;
+}
+
 void WebcamCaptureDS::Shutdown() {
     // Stop streaming first so BufferCB stops firing
     if (m_pControl) {

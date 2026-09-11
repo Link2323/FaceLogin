@@ -5,6 +5,7 @@
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
 #include "../common/frame_image.h"
+#include "../face_service/face_gain_tune.h"
 #include <comdef.h>
 #include <shlobj.h>
 #include <wincodec.h>
@@ -362,6 +363,31 @@ bool EnrollmentWizard::StartPreview() {
         FACELOGIN_ERROR(L"No supported liveness method available — enrollment refused");
         m_webcam->Shutdown();
         return false;
+    }
+
+    // Face-priority gain tune — same policy as the auth worker
+    // (face_gain_tune.h): under the driver's full-frame-average AE a small
+    // backlit face stays dark, and the preview must show (and enrollment
+    // capture) the same brightened domain unlock will see. No face in frame
+    // just skips the tune; it retries on the next StartPreview.
+    {
+        SensorKnobs knobs;
+        knobs.exposureRange = [this](long& mn, long& mx, long& st) {
+            return m_webcam->GetExposureRange(&mn, &mx, &st);
+        };
+        knobs.exposureGet = [this](long& v) { return m_webcam->GetExposure(&v); };
+        knobs.exposureSet = [this](long v) { return m_webcam->SetExposure(v); };
+        knobs.gainRange = [this](long& mn, long& mx, long& st) {
+            return m_webcam->GetGainRange(&mn, &mx, &st);
+        };
+        knobs.gainGet = [this](long& v) { return m_webcam->GetGain(&v); };
+        knobs.gainSet = [this](long v) { return m_webcam->SetGain(v); };
+        const auto noCancel = [] { return false; };
+        TuneFaceExposure(knobs,
+                         [this](FrameImage& f, unsigned long long& s) {
+                             return m_webcam->GrabFrame(f, &s);
+                         },
+                         *m_onnxDetector, noCancel, m_config.camera_rotation);
     }
 
     FACELOGIN_INFO(L"Liveness method: antispoof (mandatory) | Preview started: 1280x720");

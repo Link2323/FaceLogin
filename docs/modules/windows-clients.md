@@ -50,7 +50,7 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 `FaceLoginConsole.exe` 是管理员运行的 Win32 + WebView2 应用。`EnrollmentWizard` 负责摄像头、检测/PAD、身份、密码验证和持久化；`WebviewHost` 把后端通过 `IDispatch` 暴露给嵌入的 `index.html`。
 
-控制台 UI 线程由 WebView2 初始化为 STA。DirectShow 预览必须复用该 COM 公寓，不能再次请求 MTA，否则会得到 `RPC_E_CHANGED_MODE` 并使预览在模型初始化前失败。服务 worker 则在其自己的 MTA 中运行。
+控制台 UI 线程由 WebView2 初始化为 STA。DirectShow 预览必须复用该 COM 公寓，不能再次请求 MTA，否则会得到 `RPC_E_CHANGED_MODE` 并使预览在模型初始化前失败。服务 worker 则在其自己的 MTA 中运行。 预览与解锁共用 `WebcamCaptureDS`（face exposure tune 在其调用链上），两侧曝光行为一致；预览分辨率 1280×720、worker 640×480，驱动 AE 为传感器级测光不受分辨率影响。
 
 ### 账号身份
 

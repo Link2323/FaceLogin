@@ -116,7 +116,7 @@ ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
 
 `FaceService::ProcessAuthRequest` 的认证循环要点:
 
-1. 延迟相机初始化;自适应曝光预热(`face_service/exposure_warmup.h`)——按 DS 帧序号去重采样均值亮度,2 帧窗口 max-min ≤ 20 即通过:稳定场景 2 个不同帧开门(严于旧固定 3 次循环的实际效果),慢收敛场景最多 10 帧。
+1. 延迟相机初始化;自适应曝光预热(`face_service/exposure_warmup.h`)——按 DS 帧序号去重采样均值亮度,2 帧窗口 max-min ≤ 20 即通过:稳定场景 2 个不同帧开门(严于旧固定 3 次循环的实际效果),慢收敛场景最多 10 帧。预热后另有 face luma 驱动的曝光调谐(`face_service/face_gain_tune.h`):检测框亮度 <40 时先步进抬 `IAMCameraControl_Exposure`(抢掉 AE 的补偿轴、真加光子),增益 `VideoProcAmp_Gain` 仅作曝光无效时的兜底;>180 过曝(手动曝光持久化进亮场景)反向步降;旋钮连抬两步 luma 纹丝不动即判死弃用;fail-open,注册控制台预览同享。背景亮/小脸欠曝场景下 BLC 与 low_light_enhance 均实测不足(2026-09-09,均废弃)、VideoProcAmp_Gain 在实测机上为假属性(2026-09-11)——勿再回头试这三者;曝光调谐 9-11 装机验证通过(远距 8/8,luma 入带,距离回 0.66–0.78)。
 2. **融合一致性+活体循环(全部计帧必须通过)**:每帧 SCRFD 检测 → 双 MiniFAS 活体(50/50 融合),单预取槽软件流水线调度——PAD(N) 异步运行时主线程预取帧 N+1 的抓帧+检测,判定逻辑与逐帧顺序不变。帧 pacing 由显式抓帧守卫保证:相邻已计帧采集间隔 ≥60ms 且帧序号严格递增(锚点在预取前乐观前移)。身份绑定在部分绑定帧(首锚点锁定 SID,后续绑定帧必须返回相同 SID,否则 fail closed 换脸攻击);非绑定帧用 bbox IoU 连续性。
 3. 匹配:欧氏距离 < 阈值(`match_threshold`,可配置)**且** 最佳/次佳比门控。具体阈值与钳制区间见代码及 `docs/threshold-calibration.md`。
 4. 全局超时(PAD 另有独立时间窗口)→ `AUTH_TIMEOUT`。

@@ -289,6 +289,16 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         return camera->GrabFrame(frame, &frameSequence);
     };
     callbacks.isCancelled = [&channelHealthy]() { return !channelHealthy.load(); };
+    callbacks.sensorKnobs.exposureRange = [&camera](long& mn, long& mx, long& st) {
+        return camera->GetExposureRange(&mn, &mx, &st);
+    };
+    callbacks.sensorKnobs.exposureGet = [&camera](long& v) { return camera->GetExposure(&v); };
+    callbacks.sensorKnobs.exposureSet = [&camera](long v) { return camera->SetExposure(v); };
+    callbacks.sensorKnobs.gainRange = [&camera](long& mn, long& mx, long& st) {
+        return camera->GetGainRange(&mn, &mx, &st);
+    };
+    callbacks.sensorKnobs.gainGet = [&camera](long& v) { return camera->GetGain(&v); };
+    callbacks.sensorKnobs.gainSet = [&camera](long v) { return camera->SetGain(v); };
     callbacks.isClientDisconnected = []() { return false; };
     callbacks.reportStatus = [&channel, &channelHealthy, requestId = command.requestId](const std::wstring& text) {
         if (!channel.Write(MessageType::Status, requestId, auth_worker::EncodeWString(text))) {

@@ -50,7 +50,7 @@ ServiceMain / RunStandalone
 
 1. 无注册账号直接返回错误。
 2. 双 MiniFAS 活体检测强制启用；没有可切换的方法或关闭开关。
-3. 延迟初始化摄像头并做自适应曝光预热（`exposure_warmup.h`：按帧序号去重采样均值亮度，稳定窗口即通过，2–10 帧）。
+3. 延迟初始化摄像头并做自适应曝光预热（`exposure_warmup.h`：按帧序号去重采样均值亮度，稳定窗口即通过，2–10 帧）。预热后若检测框亮度在带外（<40 暗或 >180 过曝），运行 face luma 驱动的曝光调谐（`face_gain_tune.h`：先步进 `IAMCameraControl_Exposure` 再兜底 `VideoProcAmp_Gain`，旋钮两步无效即判死弃用，触发测量复用预热种子检测，亮场景零额外推理；背景亮/小脸欠曝时驱动 AE 只平衡全帧平均，low_light_enhance 与 VideoProcAmp_Gain 对此实测不足/为假属性）；调成功则预热种子作废重抓。注册控制台预览在 `StartPreview` 跑同一调谐，注册域与解锁域保持一致。
 4. 在同一融合循环中完成 SCRFD 检测、双 MiniFAS PAD 和身份一致性。
 5. 所有计入的 PAD 帧都必须通过。
 6. 首个身份锚点锁定 SID，中间和末尾绑定帧必须匹配同一 SID。

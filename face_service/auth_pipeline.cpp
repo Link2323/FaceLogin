@@ -3,6 +3,7 @@
 #include "../common/logger.h"
 #include "exposure_warmup.h"
 #include "face_align.h"
+#include "face_gain_tune.h"
 
 #include <algorithm>
 #include <chrono>
@@ -18,20 +19,10 @@ namespace facelogin {
 // config_util.h low_light_enhance). Diagnostic only, computed once per
 // outcome-relevant frame.
 static float FaceRegionLuma(const FrameImage& frame, const FaceRect& r) {
-    const long y0 = std::max<long>(0, r.top());
-    const long y1 = std::min<long>(frame.nr() - 1, r.bottom());
-    const long x0 = std::max<long>(0, r.left());
-    const long x1 = std::min<long>(frame.nc() - 1, r.right());
-    double sum = 0.0;
-    long n = 0;
-    for (long y = y0; y <= y1; ++y) {
-        for (long x = x0; x <= x1; ++x) {
-            const auto& p = frame(y, x);
-            sum += 0.299 * p.red + 0.587 * p.green + 0.114 * p.blue;
-            ++n;
-        }
-    }
-    return n > 0 ? static_cast<float>(sum / n) : -1.0f;
+    return FaceBoxLuma(frame, static_cast<float>(r.left()),
+                       static_cast<float>(r.top()),
+                       static_cast<float>(r.right()),
+                       static_cast<float>(r.bottom()));
 }
 
 AuthPipeline::AuthPipeline(OnnxDetector& detector,
@@ -191,6 +182,24 @@ AuthPipelineResult AuthPipeline::Run() {
                               std::chrono::steady_clock::now() - seed.grabWall).count()
                               > kSeedMaxAgeMs) {
             seed = Prefetch{};                      // stale seed: grab fresh like the legacy loop
+        }
+
+        // Face-priority gain tune (face_gain_tune.h): the trigger measurement
+        // reuses the seed's detection, so bright scenes — the common case —
+        // pay one bbox luma pass and zero extra inference. A successful tune
+        // changes the sensor state, so the seed frame no longer represents
+        // what PAD will see: drop it, the loop grabs fresh.
+        if (seed.valid && seed.det) {
+            const GainTuneConfig tuneCfg;
+            const float faceLuma = FaceBoxLuma(seed.frame, *seed.det);
+            if (faceLuma >= 0.0f &&
+                (faceLuma < tuneCfg.minFaceLuma || faceLuma > tuneCfg.maxFaceLuma)) {
+                const int tuneSteps = TuneFaceExposure(
+                    faceLuma, m_callbacks.sensorKnobs, m_callbacks.grabFrame,
+                    m_detector, m_callbacks.isCancelled,
+                    m_config.cameraRotation, tuneCfg);
+                if (tuneSteps > 0) seed = Prefetch{};
+            }
         }
 
         m_callbacks.reportStatus(L"正在识别...");

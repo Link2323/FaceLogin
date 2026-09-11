@@ -1,6 +1,7 @@
 #pragma once
 
 #include "liveness_types.h"
+#include "face_gain_tune.h"
 #include "onnx_models.h"
 #include "../common/frame_image.h"
 
@@ -35,6 +36,9 @@ struct AuthPipelineCallbacks {
     std::function<bool(FrameImage&, unsigned long long& frameSequence)> grabFrame;
     std::function<bool()> isCancelled;
     std::function<bool()> isClientDisconnected;
+    // Sensor exposure/gain controls for the face-priority exposure tune
+    // (face_gain_tune.h). Empty functions = unsupported knob → skipped.
+    SensorKnobs sensorKnobs;
     std::function<void(const std::wstring&)> reportStatus;
 
     // Called for binding frames 1/3/5. The callback must preserve the
