@@ -82,8 +82,12 @@ Step "2/6 stage binaries + slim uninstaller" {
     }
     Push-Location $inst
     try {
-        & $wails build -tags slim -platform windows/amd64 -ldflags "-s -w" 2>&1 |
-            ForEach-Object { "$_" }
+        # wails writes progress (incl. a benign "Elevation failed" line from
+        # bindings generation, 2026-09-10) to stderr; under
+        # $ErrorActionPreference=Stop a raw 2>&1 turns the first stderr line
+        # into a terminating NativeCommandError. Merge inside cmd instead so
+        # PowerShell only sees stdout.
+        cmd /c "`"$wails`" build -tags slim -platform windows/amd64 -ldflags `"-s -w`" 2>&1"
         if ($LASTEXITCODE -ne 0) { throw "slim wails build failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
     Copy-Item (Join-Path $inst "build/bin/FaceLoginSetup.exe") (Join-Path $res "uninstall.exe") -Force
@@ -127,11 +131,11 @@ Step "6/6 wails build (full)" {
         for ($attempt = 1; ; $attempt++) {
             Write-Host "    attempt $attempt"
             if ($attempt -eq 1) {
-                & $wails build -clean -platform windows/amd64 -ldflags "-s -w" 2>&1 |
-                    ForEach-Object { "$_" } | Tee-Object -Variable wailsOut
+                cmd /c "`"$wails`" build -clean -platform windows/amd64 -ldflags `"-s -w`" 2>&1" |
+                    Tee-Object -Variable wailsOut
             } else {
-                & $wails build -platform windows/amd64 -ldflags "-s -w" 2>&1 |
-                    ForEach-Object { "$_" } | Tee-Object -Variable wailsOut
+                cmd /c "`"$wails`" build -platform windows/amd64 -ldflags `"-s -w`" 2>&1" |
+                    Tee-Object -Variable wailsOut
             }
             if ($LASTEXITCODE -eq 0 -and (Test-Path $setupExe)) { break }
             if ($attempt -ge 2) {
