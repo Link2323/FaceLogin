@@ -16,6 +16,7 @@
 #include <lmerr.h>
 #include <thread>
 #include <chrono>
+#include <cmath>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -369,26 +370,21 @@ bool EnrollmentWizard::StartPreview() {
     // (face_gain_tune.h): under the driver's full-frame-average AE a small
     // backlit face stays dark, and the preview must show (and enrollment
     // capture) the same brightened domain unlock will see. No face in frame
-    // just skips the tune; it retries on the next StartPreview.
+    // just skips the tune; the streaming watch below retries while preview
+    // runs, and the next StartPreview re-tunes otherwise.
     {
-        SensorKnobs knobs;
-        knobs.exposureRange = [this](long& mn, long& mx, long& st) {
-            return m_webcam->GetExposureRange(&mn, &mx, &st);
-        };
-        knobs.exposureGet = [this](long& v) { return m_webcam->GetExposure(&v); };
-        knobs.exposureSet = [this](long v) { return m_webcam->SetExposure(v); };
-        knobs.gainRange = [this](long& mn, long& mx, long& st) {
-            return m_webcam->GetGainRange(&mn, &mx, &st);
-        };
-        knobs.gainGet = [this](long& v) { return m_webcam->GetGain(&v); };
-        knobs.gainSet = [this](long v) { return m_webcam->SetGain(v); };
         const auto noCancel = [] { return false; };
-        TuneFaceExposure(knobs,
+        TuneFaceExposure(BuildSensorKnobs(),
                          [this](FrameImage& f, unsigned long long& s) {
                              return m_webcam->GrabFrame(f, &s);
                          },
                          *m_onnxDetector, noCancel, m_config.camera_rotation);
     }
+    // The tune above just moved the sensor: hold the streaming watch off for
+    // its cooldown so it doesn't re-judge the settle frames.
+    m_lastExposureTune = std::chrono::steady_clock::now();
+    m_lastExposureWatch = m_lastExposureTune;
+    m_pendingWatchLuma = -1.0f;
 
     FACELOGIN_INFO(L"Liveness method: antispoof (mandatory) | Preview started: 1280x720");
 
@@ -436,6 +432,7 @@ bool EnrollmentWizard::StartPreview() {
             if (m_onnxDetector) {
                 auto det = m_onnxDetector->DetectLargestFace(frame);
                 if (det) {
+                    WatchPreviewExposure(frame, *det);
                     std::vector<facelogin::FaceWithKps> faces;
                     FaceWithKps fwl;
                     fwl.rect = FaceRect(static_cast<long>(det->x1),
@@ -459,6 +456,75 @@ bool EnrollmentWizard::StartPreview() {
     });
 
     return true;
+}
+
+// ============================================================================
+// Streaming exposure governor (frame thread)
+// ============================================================================
+
+namespace {
+
+constexpr std::chrono::seconds kExposureWatchInterval(3);
+constexpr std::chrono::seconds kExposureTuneCooldown(10);
+
+} // namespace
+
+// Driver-facing exposure/gain controls shared by the StartPreview tune and the
+// frame-thread streaming watch.
+SensorKnobs EnrollmentWizard::BuildSensorKnobs() {
+    SensorKnobs knobs;
+    knobs.exposureRange = [this](long& mn, long& mx, long& st) {
+        return m_webcam->GetExposureRange(&mn, &mx, &st);
+    };
+    knobs.exposureGet = [this](long& v) { return m_webcam->GetExposure(&v); };
+    knobs.exposureSet = [this](long v) { return m_webcam->SetExposure(v); };
+    knobs.gainRange = [this](long& mn, long& mx, long& st) {
+        return m_webcam->GetGainRange(&mn, &mx, &st);
+    };
+    knobs.gainGet = [this](long& v) { return m_webcam->GetGain(&v); };
+    knobs.gainSet = [this](long v) { return m_webcam->SetGain(v); };
+    return knobs;
+}
+
+void EnrollmentWizard::WatchPreviewExposure(const FrameImage& frame,
+                                            const OnnxDetector::Detection& det) {
+    // A capture in flight must see one stable capture domain — never move the
+    // sensor between its PAD/embedding frames.
+    if (m_capturing) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_lastExposureWatch < kExposureWatchInterval) return;
+    m_lastExposureWatch = now;
+    if (now - m_lastExposureTune < kExposureTuneCooldown) return;
+    const GainTuneConfig cfg;
+    const float luma = FaceBoxLuma(frame, det);
+    const bool outOfBand =
+        luma >= 0.0f && (luma < cfg.minFaceLuma || luma > cfg.maxFaceLuma);
+    if (!outOfBand) {
+        m_pendingWatchLuma = -1.0f;
+        return;
+    }
+    // Two consecutive out-of-band cycles (3 s apart): single readings jitter
+    // with face fill ratio, and one spurious hit must not move the sensor.
+    if (m_pendingWatchLuma < 0.0f ||
+        std::fabs(luma - m_pendingWatchLuma) > 40.0f) {
+        m_pendingWatchLuma = luma;
+        return;
+    }
+    m_pendingWatchLuma = -1.0f;
+    m_lastExposureTune = now;
+    FACELOGIN_INFO(L"Preview exposure watch: face luma %.0f outside %.0f–%.0f "
+                   L"(twice) — re-tuning",
+                   luma, cfg.minFaceLuma, cfg.maxFaceLuma);
+    // Runs inline on the frame thread: the preview image pauses for the tune
+    // budget (hundreds of ms) once per drift event — invisible next to a
+    // washed-out preview. The trigger luma is this frame's; the tune grabs
+    // its own fresh settle frames.
+    TuneFaceExposure(luma, BuildSensorKnobs(),
+                     [this](FrameImage& f, unsigned long long& s) {
+                         return m_webcam->GrabFrame(f, &s);
+                     },
+                     *m_onnxDetector, [] { return false; },
+                     m_config.camera_rotation, cfg);
 }
 
 void EnrollmentWizard::StopPreview() {

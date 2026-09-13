@@ -8,10 +8,12 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 
 #include "../common/frame_image.h"
 #include "../face_service/face_align.h"
+#include "../face_service/face_gain_tune.h"
 #include "../face_service/liveness_types.h"
 #include "../face_service/onnx_models.h"
 #include "../face_service/webcam_capture_dshow.h"
@@ -159,6 +161,25 @@ public:
 private:
     std::string EncodeJPEGBase64(const FrameImage& frame);
     std::string FacesToJson(const std::vector<facelogin::FaceWithKps>& faces);
+
+    // Driver-facing exposure/gain controls shared by the StartPreview tune and
+    // the streaming watch below.
+    SensorKnobs BuildSensorKnobs();
+    // Preview-streaming exposure watch — called by the frame thread on every
+    // detected face, throttled. While a preview session is open the persisted
+    // manual exposure/gain has no other governor: ambient light drifts
+    // (2026-09-13: tune landed luma 89, worker read 178 washed-out frames 40 s
+    // later), and nothing re-runs the face-priority tune mid-stream. Skips
+    // while a capture is in flight so an enrollment sees one stable domain.
+    void WatchPreviewExposure(const FrameImage& frame,
+                              const OnnxDetector::Detection& det);
+    // Watch state, frame-thread only (StartPreview initializes before the
+    // thread starts; StopPreview joins before anything else touches them).
+    std::chrono::steady_clock::time_point m_lastExposureWatch{};
+    std::chrono::steady_clock::time_point m_lastExposureTune{};
+    // Single face-box luma readings jitter (face fill ratio, ambient flicker);
+    // a tune only fires on two consecutive out-of-band watch cycles.
+    float m_pendingWatchLuma = -1.0f;
 
     // Reads <m_dataDir>\log\<logFileName> and returns a JSON array of lines
     // for the JS log viewer (shared by Service/AuthWorker/CredentialProvider).

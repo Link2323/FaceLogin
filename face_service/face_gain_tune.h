@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <thread>
@@ -40,12 +41,35 @@ namespace facelogin {
 // produced, so in-band scenes — the common case — pay one bbox luma pass and
 // zero extra inference.
 struct GainTuneConfig {
-    float minFaceLuma = 40.0f;    // below: dark — tune up
-    float targetLumaLow = 50.0f;  // stop once face luma >= this...
-    float targetLumaHigh = 90.0f; // ...or overshoots this (still fine, just stop)
-    float maxFaceLuma = 180.0f;   // above: over-bright (stuck manual exposure) — tune down
+    float minFaceLuma = 50.0f;    // below: dark — tune up. Equal to targetLumaLow
+                                  // so no luma is simultaneously under target yet
+                                  // "no tune needed" (the old 40 left a 41–49 dead
+                                  // zone: console logged "not needed" at 41–45
+                                  // while the target band starts at 50)
+    float targetLumaLow = 50.0f;  // up-steps stop once face luma >= this...
+    float targetLumaHigh = 90.0f; // ...nominal band top (log label only; the
+                                  // step loops land anywhere in [min,max] below)
+    float maxFaceLuma = 120.0f;   // landing-band top AND over-bright trigger:
+                                  // down-steps stop once luma <= this. One
+                                  // exposure granule is about a doubling, wider
+                                  // than the 50–90 nominal band — a controller
+                                  // that must land <= 90 with a 45/89/150
+                                  // quantized knob (this camera's measured
+                                  // states) can never stop at -3 and ping-pongs
+                                  // -2↔-4 forever. 90–120 is a legal landing.
     int maxSteps = 3;             // hard cap on adjust-settle-measure cycles per knob
-    int settleFrames = 3;         // distinct frames waited per step
+    // Settle gate — time floor plus agreement. This driver applies an
+    // exposure write with a large lag (reads through a 10-frame window stay
+    // flat, then the combined effect lands during the NEXT control write's
+    // window, 2026-09-13): any shorter settle reads the PRE-step state, so
+    // the controller took one extra step every time, declared the working
+    // exposure knob "dead" on the way up and drafted gain into the loop —
+    // the preview ping-ponged -2↔-4 with gain ratcheting 39→48→54→58.
+    // A reading is trusted only after settleMs of wall time AND two
+    // consecutive samples agreeing.
+    int settleFrames = 40;        // per-step sample cap (≈1.3 s at 30 fps)
+    float settleTol = 6.0f;       // consecutive readings within this = converged
+    int settleMs = 900;           // minimum wall time per step before trusting
     float maxGainBoostFraction = 0.67f;    // of the span above the start value
     float maxExposureBoostFraction = 0.5f; // lower: long exposures throttle fps
     float deadKnobRise = 3.0f;    // a knob moving luma less than this per step
@@ -98,6 +122,7 @@ struct KnobTrio {
     const std::function<bool(long&)>& get;
     const std::function<bool(long)>& set;
     float boostFraction;
+    bool fineDown = false;  // down steps take single granules (see StepKnob)
 };
 
 // One distinct (per frame-sequence) grab, rotated, detected, measured.
@@ -150,27 +175,64 @@ inline int StepKnob(const KnobTrio& knob,
                     bool& haveSeq) {
     long mn = 0, mx = 0, st = 0;
     long cur = 0;
-    if (!knob.range(mn, mx, st) || !knob.get(cur)) return 0;
-    const long limit = up
-        ? cur + static_cast<long>(static_cast<float>(mx - cur) * knob.boostFraction)
-        : cur - static_cast<long>(static_cast<float>(cur - mn) * knob.boostFraction);
+    if (!knob.range(mn, mx, st)) return 0;
+    if (!knob.get(cur)) return 0;
+    // Ceil the boost span: floor-halving wedged the exposure knob at one
+    // unit of headroom — (mx-cur)*0.5 floors to 0, limit==cur, and no step
+    // is ever taken again on any later graph init (real logs: repeated
+    // "+0 step(s), -4→-4" on 2026-09-12/13 with range max -1 still unused).
+    // Ceil costs at most one extra unit (= one exposure doubling) beyond the
+    // boostFraction budget and lets the persistent manual value ratchet to
+    // the range top across inits.
+    const long span = up ? mx - cur : cur - mn;
+    const long boost =
+        static_cast<long>(std::ceil(static_cast<float>(span) * knob.boostFraction));
+    const long limit = up ? cur + boost : cur - boost;
     int steps = 0;
     int deadSteps = 0;
     const long startVal = cur;
+    // Each step moves half the remaining span toward the limit, but never
+    // less than one driver granule, and lands exactly on the limit — plain
+    // integer halving ((limit-cur)/2 == 0 → break) stopped dead once the
+    // remaining span dropped below 2.
+    const long granule = st > 0 ? st : 1;
     while (steps < cfg.maxSteps &&
-           (up ? luma < cfg.targetLumaLow : luma > cfg.targetLumaHigh)) {
-        const long half = (limit - cur) / 2;
-        if (half == 0) break;
-        const long next = cur + (up ? std::max(1L, half) : -std::max(1L, -half));
+           (up ? luma < cfg.targetLumaLow : luma > cfg.maxFaceLuma)) {
+        const long delta = up ? limit - cur : cur - limit;
+        if (delta <= 0) break;
+        // Up: ceil of half the remaining span — exponential ratchet toward the
+        // top, one init at a time. Down on a fineDown knob (exposure): single
+        // granules, each settle-measured — exposure units are potent (about a
+        // doubling each) and a halved span from a mild over-bright crashes
+        // deep into the dark side and flip-flops across inits. Gain units are
+        // small and near-linear, so it halves its span both ways.
+        long move;
+        if (up || !knob.fineDown) {
+            move = (delta + 1) / 2;                        // ceil of half-span
+            move = ((move + granule - 1) / granule) * granule;
+            move = std::min(std::max(move, 1L), delta);    // clamp to limit
+        } else {
+            move = std::min(granule, delta);
+        }
+        const long next = up ? cur + move : cur - move;
         if ((up && next <= cur) || (!up && next >= cur)) break;
         if (!knob.set(next)) break;
         cur = next;
         ++steps;
         float measured = -1.0f;
         bool alive = true;
+        float prev = -1.0f;
+        const auto settleStart = std::chrono::steady_clock::now();
         for (int f = 0; f < cfg.settleFrames && alive; ++f) {
             alive = GrabMeasure(grab, detector, isCancelled, cameraRotation, cfg,
                                 lastSeq, haveSeq, measured);
+            if (!alive) break;
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - settleStart).count();
+            if (prev >= 0.0f && elapsedMs >= cfg.settleMs &&
+                std::fabs(measured - prev) <= cfg.settleTol)
+                break;  // past the actuator lag and settled on the new value
+            prev = measured;
         }
         if (!alive) break;
         if (up ? (measured - luma < cfg.deadKnobRise)
@@ -220,25 +282,34 @@ inline int TuneFaceExposure(float firstLuma,
     if (detail::KnobReady(knobs.exposureRange, knobs.exposureSet)) {
         const detail::KnobTrio exposure{
             knobs.exposureRange, knobs.exposureGet, knobs.exposureSet,
-            cfg.maxExposureBoostFraction};
+            cfg.maxExposureBoostFraction, true};
         steps += detail::StepKnob(exposure, up, luma, grab, detector, isCancelled,
                                   cameraRotation, cfg, expText, 64, lastSeq, haveSeq);
     }
-    // Gain only if exposure left the face dark (never on the down path —
-    // analog gain cannot cause white-out).
-    if (up && luma < cfg.targetLumaLow &&
+    // Gain is the fine actuator. Exposure is quantized in ~2× steps — wider
+    // than the nominal 50–90 band — so in some ambient light NO exposure
+    // state lands in band (measured 2026-09-13: luma(-3)≈45–54 vs
+    // luma(-2)≈137–165 — hunting between them is unavoidable on exposure
+    // alone). Whatever way the tune came in, trim gain toward the nominal
+    // band on the landed state; gain also covers what exposure cannot:
+    // persisted dark-scene gain keeps a brighter room washed even at the
+    // exposure floor (2026-09-13: exposure -2 + gain 54 read face luma 178).
+    const bool gainUp = luma < cfg.targetLumaLow;
+    const bool gainDown = luma > cfg.targetLumaHigh;
+    if ((gainUp || gainDown) &&
         detail::KnobReady(knobs.gainRange, knobs.gainSet)) {
         const detail::KnobTrio gain{
             knobs.gainRange, knobs.gainGet, knobs.gainSet,
             cfg.maxGainBoostFraction};
-        steps += detail::StepKnob(gain, true, luma, grab, detector, isCancelled,
-                                  cameraRotation, cfg, gainText, 64, lastSeq, haveSeq);
+        steps += detail::StepKnob(gain, gainUp, luma, grab, detector,
+                                  isCancelled, cameraRotation, cfg, gainText,
+                                  64, lastSeq, haveSeq);
     }
 
     FACELOGIN_INFO(L"Face exposure tune: face luma %.0f (%s) → exposure %s, gain %s → "
-                   L"face luma now %.0f (target %.0f–%.0f) — %lld ms",
+                   L"face luma now %.0f (land %.0f–%.0f) — %lld ms",
                    firstLuma, up ? L"dark" : L"over-bright", expText, gainText,
-                   luma, cfg.targetLumaLow, cfg.targetLumaHigh,
+                   luma, cfg.minFaceLuma, cfg.maxFaceLuma,
                    static_cast<long long>(
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - tuneStart).count()));
