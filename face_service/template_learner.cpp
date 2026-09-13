@@ -234,8 +234,6 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         }
         LeaveCriticalSection(&m_cs);
         if (tooSoon) {
-            FACELOGIN_INFO(L"Template update skipped: interval %llds < %ds",
-                           sinceAccept, cfg.minIntervalSec);
             RecordEvent(eff, cfg.distanceGate, false, L"interval", 0.0f);
             return;
         }
@@ -497,7 +495,6 @@ void TemplateLearner::Run() {
             LeaveCriticalSection(&m_cs);
             if (dirty) {
                 m_hooks.flush();
-                FACELOGIN_INFO(L"Template learner: users.dat flushed (debounce)");
             }
         }
     }

@@ -780,9 +780,7 @@ void FaceService::ModelWorkerLoop() {
             workerToRelease.reset();
             const auto usage = CurrentProcessResourceUsage();
             if (m_isServiceMode) {
-                FACELOGIN_INFO(L"Authentication worker released (unlocked idle state; parent handles=%lu, private=%.1f MiB, working_set=%.1f MiB, threads=%lu)",
-                               usage.handles, usage.privateMiB, usage.workingSetMiB,
-                               usage.threads);
+                FACELOGIN_INFO(L"Authentication worker released (unlocked idle state)");
             } else {
                 FACELOGIN_INFO(L"Inference models released (unlocked idle state; handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
                                usage.handles, usage.privateMiB, usage.workingSetMiB);
@@ -1194,7 +1192,13 @@ BindingDecision FaceService::VerifyIdentityBinding(
                                L"活体验证期间人脸不匹配，请重试"};
     }
 
-    FACELOGIN_INFO(L"Identity confirmed: %s [%u/3]", initialSid.c_str(),
+    // Binding evidence is "same SID as the locked frame"; the RID tail is
+    // enough here, the full SID stays on the CP log's success line.
+    const size_t lastDash = initialSid.rfind(L'-');
+    const std::wstring sidTail = lastDash == std::wstring::npos
+                                     ? initialSid
+                                     : initialSid.substr(lastDash + 1);
+    FACELOGIN_INFO(L"Identity confirmed: sid=…-%s [%u/3]", sidTail.c_str(),
                    bindingIndex + 1);
     return BindingDecision{BindingDecisionKind::Accept, {}};
 }

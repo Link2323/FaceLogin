@@ -312,6 +312,12 @@ public:
 private:
     std::wstring m_dataDir;  // If empty, uses default
     std::vector<UserRecord> m_users;
+
+    // Slot-coverage shrink warning de-dup: log only when the pair or the
+    // distance actually changes (m_lastShrinkDist = -1 re-arms).
+    uint32_t m_lastShrinkPairA = 0;
+    uint32_t m_lastShrinkPairB = 0;
+    float m_lastShrinkDist = -1.0f;
 };
 
 } // namespace facelogin

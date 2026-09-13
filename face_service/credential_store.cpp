@@ -69,7 +69,6 @@ bool CredentialStore::LoadDatabase() {
         return false;
     }
 
-    FACELOGIN_INFO(L"Loading %u user record(s) from database (v%u)", count, version);
     std::vector<UserRecord> loadedUsers;
     loadedUsers.reserve(count);
 
@@ -190,7 +189,8 @@ bool CredentialStore::LoadDatabase() {
     }
 
     m_users = std::move(loadedUsers);
-    FACELOGIN_INFO(L"Loaded %zu user(s) successfully", m_users.size());
+    FACELOGIN_INFO(L"Loaded %zu user(s) from database (v%u)", m_users.size(),
+                   version);
     return true;
 }
 
@@ -282,7 +282,7 @@ bool CredentialStore::SaveDatabase() {
     }
 
     file.close();
-    FACELOGIN_INFO(L"Saved %zu user(s) to database (v4)", count);
+    FACELOGIN_INFO(L"Saved %zu user(s) to database (v%u)", count, FILE_VERSION);
     return true;
 }
 
@@ -706,13 +706,22 @@ bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceI
     }
     if (minPairDist >= 0.0f) {
         if (minPairDist < kCrossAngleSentinelDist) {
-            FACELOGIN_WARN(L"UpdateTemplateFace observation: faces #%u/#%u now "
-                           L"%.3f apart (< %.2f) — slot coverage shrinking, learning "
-                           L"continues (observation-only since 2026-09-04)",
-                           pairA, pairB, minPairDist, kCrossAngleSentinelDist);
+            // Same pair at the same distance recurs on every accepted
+            // unlock; warn only when the picture actually changes.
+            if (pairA != m_lastShrinkPairA || pairB != m_lastShrinkPairB ||
+                std::fabs(minPairDist - m_lastShrinkDist) > 0.005f) {
+                FACELOGIN_WARN(L"UpdateTemplateFace observation: faces #%u/#%u now "
+                               L"%.3f apart (< %.2f) — slot coverage shrinking, learning "
+                               L"continues (observation-only since 2026-09-04)",
+                               pairA, pairB, minPairDist, kCrossAngleSentinelDist);
+                m_lastShrinkPairA = pairA;
+                m_lastShrinkPairB = pairB;
+                m_lastShrinkDist = minPairDist;
+            }
         } else {
             FACELOGIN_INFO(L"UpdateTemplateFace: min template-pair distance "
                            "#%u/#%u = %.3f", pairA, pairB, minPairDist);
+            m_lastShrinkDist = -1.0f;
         }
     }
     return true;

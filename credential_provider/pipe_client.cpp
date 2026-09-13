@@ -258,8 +258,8 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
         // log without a special-cased redaction branch.
         if (msg.starts_with(ipc::MSG_STATUS_PREFIX)) {
             std::wstring statusText = msg.substr(wcslen(ipc::MSG_STATUS_PREFIX));
-            FACELOGIN_INFO(L"Background read received: STATUS:%s (len=%zu)",
-                           statusText.substr(0, 80).c_str(), len);
+            FACELOGIN_INFO(L"Background read received: STATUS:%s",
+                           statusText.substr(0, 80).c_str());
             if (self->m_onStatus) {
                 self->m_onStatus(statusText);
             }

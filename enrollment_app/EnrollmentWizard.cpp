@@ -135,8 +135,6 @@ static std::wstring ResolveSessionMsaUpnFromToken() {
                     std::wstring domainW = domain;
                     if (domainW == L"MicrosoftAccount" &&
                         nameW.find(L'@') != std::wstring::npos) {
-                        FACELOGIN_INFO(L"ResolveSessionMsaUpnFromToken: MSA group SID hit %s -> %s\\%s",
-                                       sidStrW.c_str(), domainW.c_str(), nameW.c_str());
                         result = nameW;
                         break;
                     }
@@ -280,10 +278,19 @@ EnrollmentWizard::EnrollmentWizard() {
     }
 
     // Identity summary — referenced by the MSA-detection verification steps.
+    // SID logs as RID tail only, matching the service binding lines.
+    std::wstring sidLog;
+    if (m_sid.empty()) {
+        sidLog = L"<empty>";
+    } else {
+        const size_t lastDash = m_sid.rfind(L'-');
+        sidLog = L"…-" +
+                 (lastDash == std::wstring::npos ? m_sid : m_sid.substr(lastDash + 1));
+    }
     FACELOGIN_INFO(L"Session identity: username=%s upn=%s sid=%s accountType=%hs",
                    m_username.c_str(),
                    m_upn.empty() ? L"<empty>" : m_upn.c_str(),
-                   m_sid.empty() ? L"<empty>" : m_sid.c_str(),
+                   sidLog.c_str(),
                    m_accountType.c_str());
 
     m_webcam     = std::make_unique<WebcamCaptureDS>();

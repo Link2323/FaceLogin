@@ -611,7 +611,6 @@ bool OnnxAntiSpoof::Initialize(const std::wstring& miniFasV2Path,
     }
 
     m_initialized = true;
-    FACELOGIN_INFO(L"Dual MiniFAS PAD initialized (V2 + V1SE, 50/50 fusion)");
     return true;
 }
 

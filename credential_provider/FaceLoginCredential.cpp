@@ -808,7 +808,6 @@ void FaceLoginCredential::StartAuth() {
     // the pipe callbacks (OnPipeResponse/OnPipeStatus) run on the pipe read
     // thread and lock m_cs only for their own m_statusText writes; state
     // transitions are ordered by the auth_interaction_policy guards instead.
-    FACELOGIN_INFO(L"StartAuth: connecting to face service pipe (state=%d)", static_cast<int>(m_state));
 
     if (m_pipeClient && m_pipeClient->IsConnected()) {
         FACELOGIN_INFO(L"StartAuth: already connected, skipping");
@@ -954,10 +953,6 @@ HRESULT FaceLoginCredential::PackCredentials(
     // the credential's lifetime (security #9).
     facelogin::SecureWStringGuard pwdGuard(m_password);
 
-    FACELOGIN_INFO(L"Packing credentials for: %s\\%s (UPN=%s)",
-                  m_domain.c_str(), m_username.c_str(),
-                  m_upn.empty() ? L"<none>" : m_upn.c_str());
-
     // Auth package: MSV1_0 for LOGON/UNLOCK.
     // (CredUI/PLAP never reach here — they're filtered in SetUsageScenario.)
     ULONG ulAuthPackage = 0;
@@ -978,7 +973,6 @@ HRESULT FaceLoginCredential::PackCredentials(
     } else {
         FACELOGIN_ERROR(L"LsaConnectUntrusted failed: 0x%08X", lsastatus);
     }
-    FACELOGIN_INFO(L"Auth package MSV1_0: %lu", ulAuthPackage);
 
     DWORD packFlags = 0;
     DWORD cbPackedCreds = 0;
@@ -1047,7 +1041,9 @@ HRESULT FaceLoginCredential::PackCredentials(
     pcpcs->ulAuthenticationPackage = ulAuthPackage;
     pcpcs->clsidCredentialProvider = CLSID_FaceLoginProvider;
 
-    FACELOGIN_INFO(L"PackCred SUCCESS: cbSerialization=%lu, ulAuthPackage=%lu",
+    FACELOGIN_INFO(L"PackCred SUCCESS: user=%s\\%s (UPN=%s), cbSerialization=%lu, ulAuthPackage=%lu",
+                  m_domain.c_str(), m_username.c_str(),
+                  m_upn.empty() ? L"<none>" : m_upn.c_str(),
                   cbPackedCreds, ulAuthPackage);
     return S_OK;
 }
@@ -1135,9 +1131,9 @@ void FaceLoginCredential::OnPipeResponse(bool success, const std::wstring& messa
         auto result = facelogin::ipc::ParseAuthMessage(message);
 
         if (result.status == facelogin::ipc::AuthResult::Status::Success) {
-            FACELOGIN_INFO(L"OnPipeResponse: Auth success: domain=%s, username=%s (SID=%s, UPN=%s)",
+            FACELOGIN_INFO(L"OnPipeResponse: Auth success: domain=%s, username=%s (UPN=%s)",
                           result.domain.c_str(), result.username.c_str(),
-                          result.sid.c_str(), result.upn.c_str());
+                          result.upn.c_str());
             // NOTE: the password itself is never logged — only metadata.
             m_upn = result.upn;
             m_domain = result.domain;
