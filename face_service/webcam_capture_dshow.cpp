@@ -156,31 +156,49 @@ bool WebcamCaptureDS::FindMoniker(const std::wstring& devicePath,
         return false;
     }
 
-    // Match the configured DirectShow DevicePath; otherwise keep the first
-    // moniker as the fallback choice.
+    // Match the configured DirectShow DevicePath. A configured path is
+    // authoritative: right after boot the configured camera can drop off the
+    // enumeration for tens of seconds (USB re-enumeration churn, observed
+    // 2026-09-13: matched at preload, 0x80070003 on activation ~12 s later,
+    // back in enumeration ~10 s after that). Falling back to the first
+    // moniker then silently put a DIFFERENT camera on the auth critical path
+    // — two guaranteed empty-scene failures per cold boot — so an absent
+    // configured camera now fails fast into the existing "摄像头不可用"
+    // report; only a host with no camera configured at all may take the
+    // first device.
     IMoniker* pMatch = nullptr;
+    std::wstring matchName;
     IMoniker* pFirst = nullptr;
+    std::wstring firstName;
     IMoniker* pMoniker = nullptr;
     ULONG fetched = 0;
     while (pEnum->Next(1, &pMoniker, &fetched) == S_OK && fetched == 1) {
+        IPropertyBag* pBag = nullptr;
+        std::wstring friendly;
+        std::wstring dsPath;
+        if (SUCCEEDED(pMoniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&pBag)))) {
+            VARIANT var; VariantInit(&var);
+            if (SUCCEEDED(pBag->Read(L"FriendlyName", &var, nullptr)) && var.vt == VT_BSTR) {
+                friendly = var.bstrVal;
+            }
+            VariantClear(&var);
+            if (!devicePath.empty()) {
+                if (SUCCEEDED(pBag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
+                    dsPath = var.bstrVal;
+                }
+                VariantClear(&var);
+            }
+            pBag->Release();
+        }
         if (!pFirst) {
             pFirst = pMoniker;
             pFirst->AddRef();
+            firstName = friendly;
         }
-        if (!devicePath.empty() && !pMatch) {
-            IPropertyBag* pBag = nullptr;
-            if (SUCCEEDED(pMoniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&pBag)))) {
-                VARIANT var; VariantInit(&var);
-                if (SUCCEEDED(pBag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
-                    std::wstring dsPath = var.bstrVal;
-                    if (devicePath == dsPath) {
-                        pMatch = pMoniker;
-                        pMatch->AddRef();
-                    }
-                }
-                VariantClear(&var);
-                pBag->Release();
-            }
+        if (!devicePath.empty() && !pMatch && dsPath == devicePath) {
+            pMatch = pMoniker;
+            pMatch->AddRef();
+            matchName = friendly;
         }
         pMoniker->Release();
         fetched = 0;
@@ -191,14 +209,16 @@ bool WebcamCaptureDS::FindMoniker(const std::wstring& devicePath,
     if (pMatch) {
         chosen = pMatch;
         if (pFirst) pFirst->Release();
-        FACELOGIN_INFO(L"DS: using configured camera (matched DevicePath)");
-    } else if (pFirst) {
+        FACELOGIN_INFO(L"DS: using configured camera (matched DevicePath, \"%s\")",
+                       matchName.c_str());
+    } else if (pFirst && devicePath.empty()) {
         chosen = pFirst;
-        if (!devicePath.empty()) {
-            FACELOGIN_WARN(L"DS: configured camera not found — falling back to first device");
-        }
+        FACELOGIN_INFO(L"DS: no camera configured — using first device (\"%s\")",
+                       firstName.c_str());
     } else {
-        FACELOGIN_WARN(L"DS: no camera monikers available");
+        if (pFirst) pFirst->Release();
+        FACELOGIN_WARN(L"DS: configured camera not found in enumeration "
+                       L"(device absent or not ready)");
         return false;
     }
     *ppMoniker = chosen;
