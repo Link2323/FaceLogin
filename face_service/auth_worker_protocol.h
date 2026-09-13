@@ -9,10 +9,15 @@
 namespace facelogin::auth_worker {
 
 inline constexpr uint32_t kProtocolMagic = 0x4B574C46; // "FLWK"
-// v5: MatchProbe gained two trailing floats — the frame's yaw/pitch pose
-// estimates (progressive-learning pose-cone gate, docs/progressive-
-// learning-v2.md §3). v4 appended the pre-normalization recognizer norm.
-inline constexpr uint16_t kProtocolVersion = 5;
+// v7: WorkerConfig gained the trailing fastUnlock flag (fast unlock mode:
+// 3 counted PAD frames, every frame binds — AppConfig fast_unlock). v6:
+// WorkerConfig dropped the lowLightEnhance flag (recognizer-side
+// low-light stretch deleted 2026-09-13 — the sensor-level exposure
+// governor owns dark scenes now; face-service.md). v5: MatchProbe gained
+// two trailing floats — the frame's yaw/pitch pose estimates (progressive-
+// learning pose-cone gate, docs/progressive-learning-v2.md §3). v4
+// appended the pre-normalization recognizer norm.
+inline constexpr uint16_t kProtocolVersion = 7;
 inline constexpr uint32_t kMaxPayloadBytes = 16 * 1024;
 inline constexpr uint32_t kEmbeddingDimension = 512;
 // The recognizer L2-normalizes every production embedding before it crosses
@@ -155,8 +160,10 @@ struct WorkerConfig {
     int cameraRotation = 0;
     float antiSpoofThreshold = 0.28f;
     int authTimeoutSeconds = 15;
-    bool lowLightEnhance = false;
     std::wstring cameraDevice;
+    // v7 trailing field. Fast unlock: 3 counted PAD frames, every frame
+    // binds identity. Wire format: I32, must be 0 or 1.
+    bool fastUnlock = false;
 };
 
 // Success-path timing is returned with the terminal message so the worker can

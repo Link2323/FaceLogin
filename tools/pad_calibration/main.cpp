@@ -51,8 +51,6 @@ struct Options {
     int warmupFrames = 10;
     int attemptSize = 5;
     int maxSeconds = 180;
-    bool lowLightEnhance = false;
-    bool lowLightExplicit = false;
     int cameraRotation = 0;
     bool rotationExplicit = false;
     bool cameraExplicit = false;
@@ -70,8 +68,7 @@ void PrintUsage() {
         << L"      [--pad-models <MiniFASNet-model-dir>]\n"
         << L"      [--output <csv>] [--count 50]\n"
         << L"      [--attempt-size 5] [--warmup 10] [--max-seconds 180]\n"
-        << L"      [--camera-device <symbolic-link>] [--rotation <0|90|180|270>]\n"
-        << L"      [--low-light-enhance <0|1>]\n\n"
+        << L"      [--camera-device <symbolic-link>] [--rotation <0|90|180|270>]\n\n"
         << L"      [--validate-models-only]\n\n"
         << L"      [--benchmark-iterations <count>] (with --validate-models-only)\n\n"
         << L"Example:\n"
@@ -135,11 +132,6 @@ bool ParseArgs(int argc, wchar_t* argv[], Options& options) {
             auto v = read(); if (!v || !ParsePositiveInt(*v, options.attemptSize)) return false;
         } else if (arg == L"--max-seconds") {
             auto v = read(); if (!v || !ParsePositiveInt(*v, options.maxSeconds)) return false;
-        } else if (arg == L"--low-light-enhance") {
-            auto v = read();
-            if (!v || (*v != L"0" && *v != L"1")) return false;
-            options.lowLightEnhance = (*v == L"1");
-            options.lowLightExplicit = true;
         } else if (arg == L"--rotation") {
             auto v = read();
             if (!v) return false;
@@ -422,7 +414,7 @@ struct CsvWriter {
             "frame_in_attempt,accepted_index,camera_frame,status,production_score,"
             "minifas_v2_score,minifas_v1se_score,minifas_ensemble_score,"
             "minifas_v2_sha256,minifas_v1se_sha256,det_score,face_width,face_height,"
-            "frame_width,frame_height,low_light_enhance,camera_rotation,frame_hash";
+            "frame_width,frame_height,camera_rotation,frame_hash";
         std::error_code ec;
         const bool needsHeader = !fs::exists(m_path, ec) || fs::file_size(m_path, ec) == 0;
         if (m_path.has_parent_path()) fs::create_directories(m_path.parent_path(), ec);
@@ -469,7 +461,7 @@ struct CsvWriter {
         if (std::isfinite(detScore)) m_out << std::fixed << std::setprecision(6) << detScore;
         m_out << ',' << std::fixed << std::setprecision(2)
               << faceWidth << ',' << faceHeight << ',' << frameWidth << ',' << frameHeight << ','
-              << (options.lowLightEnhance ? 1 : 0) << ',' << options.cameraRotation
+              << options.cameraRotation
               << ',' << frameHash << "\r\n";
         m_out.flush();
     }
@@ -517,7 +509,6 @@ int wmain(int argc, wchar_t* argv[]) {
 
     facelogin::Logger::Instance().SetMinLevel(facelogin::LogLevel::Warning);
     const facelogin::AppConfig activeConfig = facelogin::LoadConfig(options.dataDir.wstring());
-    if (!options.lowLightExplicit) options.lowLightEnhance = activeConfig.low_light_enhance;
     if (!options.rotationExplicit) options.cameraRotation = activeConfig.camera_rotation;
     if (!options.cameraExplicit) options.cameraDevice = Utf8ToWide(activeConfig.camera_device);
 
@@ -651,8 +642,7 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wcout << L"Session: " << options.session << L"\n"
                << L"Label: " << options.label << L", split: " << options.split << L"\n"
                << L"Condition: " << options.condition << L"\n"
-               << L"Production config: rotation=" << options.cameraRotation
-               << L", low-light-enhance=" << (options.lowLightEnhance ? L"on" : L"off") << L"\n"
+               << L"Production config: rotation=" << options.cameraRotation << L"\n"
                << L"Camera backend: DirectShow\n"
                << L"PAD models: " << padDir.wstring() << L"\n"
                << L"Output: " << options.output << L"\n"

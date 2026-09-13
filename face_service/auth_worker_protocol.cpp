@@ -225,8 +225,8 @@ std::vector<uint8_t> EncodeConfig(const WorkerConfig& config) {
     writer.WriteI32(config.cameraRotation);
     writer.WriteFloat(config.antiSpoofThreshold);
     writer.WriteI32(config.authTimeoutSeconds);
-    writer.WriteU32(config.lowLightEnhance ? 1U : 0U);
     writer.WriteWString(config.cameraDevice);
+    writer.WriteI32(config.fastUnlock ? 1 : 0);
     return writer.Data();
 }
 
@@ -234,23 +234,23 @@ bool DecodeConfig(const std::vector<uint8_t>& payload, WorkerConfig& config) {
     PayloadReader reader(payload);
     int32_t rotation = 0;
     int32_t timeout = 0;
-    uint32_t lowLight = 0;
+    int32_t fastUnlock = 0;
     if (!reader.ReadI32(rotation) ||
         !reader.ReadFloat(config.antiSpoofThreshold) || !reader.ReadI32(timeout) ||
-        !reader.ReadU32(lowLight) ||
-        !reader.ReadWString(config.cameraDevice) ||
+        !reader.ReadWString(config.cameraDevice) || !reader.ReadI32(fastUnlock) ||
         !reader.Done()) {
         return false;
     }
     if ((rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) ||
         !std::isfinite(config.antiSpoofThreshold) ||
         config.antiSpoofThreshold < 0.15f || config.antiSpoofThreshold > 0.50f ||
-        timeout < 1 || timeout > 60 || lowLight > 1) {
+        timeout < 1 || timeout > 60 ||
+        (fastUnlock != 0 && fastUnlock != 1)) {
         return false;
     }
     config.cameraRotation = rotation;
     config.authTimeoutSeconds = timeout;
-    config.lowLightEnhance = lowLight != 0;
+    config.fastUnlock = (fastUnlock != 0);
     return true;
 }
 

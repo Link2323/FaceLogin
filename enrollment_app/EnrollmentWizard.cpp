@@ -347,7 +347,6 @@ bool EnrollmentWizard::StartPreview() {
         m_webcam->Shutdown();
         return false;
     }
-    m_onnxRecognizer->SetLowLightEnhance(m_config.low_light_enhance);
 
     // Anti-spoof is mandatory for enrollment.  Allowing capture without it
     // would let a photograph become the trusted template for later logons.
@@ -801,7 +800,10 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                        angleIndex);
 
         if (m_antiSpoof && m_antiSpoof->IsInitialized()) {
-            int totalChecks = AntiSpoofCheckCount(m_antiSpoofThreshold);
+            // Enrollment keeps the calibrated five-frame gate regardless of
+            // the fast_unlock preference: that switch trades liveness
+            // evidence for speed at unlock time only.
+            int totalChecks = AntiSpoofCheckCount(/*fastUnlock=*/false);
             int passRequired = AntiSpoofPassRequired(totalChecks);
             FACELOGIN_INFO(L"Enrollment anti-spoof: threshold=%.3f → %d checks, %d required",
                            m_antiSpoofThreshold, totalChecks, passRequired);
@@ -1857,10 +1859,6 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
     }
     m_config = newConfig;
     m_antiSpoofThreshold = newConfig.anti_spoof_threshold;
-
-    // Low-light enhancement is recognition-only. PAD stays on its calibrated
-    // raw-camera preprocessing path.
-    if (m_onnxRecognizer) m_onnxRecognizer->SetLowLightEnhance(newConfig.low_light_enhance);
 
     // Notify the service and require an explicit acknowledgement. Saving a
     // file is not enough: if the service cannot load the mandatory PAD model,

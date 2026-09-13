@@ -15,9 +15,9 @@
 namespace facelogin {
 
 // Mean luma over the face bbox — the capture condition that dominates
-// identity-match distance (dark chips shift embeddings; see
-// config_util.h low_light_enhance). Diagnostic only, computed once per
-// outcome-relevant frame.
+// identity-match distance (dark chips shift embeddings; the exposure
+// governor, face_gain_tune.h, owns keeping this in band). Diagnostic
+// only, computed once per outcome-relevant frame.
 static float FaceRegionLuma(const FrameImage& frame, const FaceRect& r) {
     return FaceBoxLuma(frame, static_cast<float>(r.left()),
                        static_cast<float>(r.top()),
@@ -207,7 +207,7 @@ AuthPipelineResult AuthPipeline::Run() {
         // No per-round echo of the PAD threshold/check counts here: the
         // active config (threshold included) is logged once per load by
         // LoadConfig, and "need N" appears in the failure line.
-        const int totalChecks = AntiSpoofCheckCount(m_config.antiSpoofThreshold);
+        const int totalChecks = AntiSpoofCheckCount(m_config.fastUnlock);
         const int passRequired = AntiSpoofPassRequired(totalChecks);
 
         const auto livenessStart = std::chrono::steady_clock::now();
@@ -353,7 +353,15 @@ AuthPipelineResult AuthPipeline::Run() {
                                     static_cast<long>(cur.det->y1),
                                     static_cast<long>(cur.det->x2),
                                     static_cast<long>(cur.det->y2));
-            const bool isAnchor = bindingCount == 0 || totalChecked == totalChecks - 1;
+            // Default plan: anchor frames are the first bound frame (locks
+            // the SID) and the last counted frame (tail anchor), with the
+            // counted-3 consensus frame between them — bindings land on
+            // counted frames 1/3/5. Fast unlock binds EVERY counted frame,
+            // so 3 frames carry all 3 bindings (required by the pass
+            // condition below and by the parent's 3-probe exchange
+            // validator) and the IoU-only path never runs.
+            const bool isAnchor = m_config.fastUnlock || bindingCount == 0 ||
+                                  totalChecked == totalChecks - 1;
             const bool isConsensusFrame = totalChecked == 2;
 
             auto scoreFuture = std::async(std::launch::async, [&cur, &faceRect, this] {

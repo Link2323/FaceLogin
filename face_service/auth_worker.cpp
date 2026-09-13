@@ -85,7 +85,6 @@ std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
     }
     models->recognizer = std::make_unique<OnnxRecognizer>();
     if (!models->recognizer->Initialize(recognizerPath)) return {};
-    models->recognizer->SetLowLightEnhance(config.lowLightEnhance);
 
     const std::wstring v2Path = modelsDir + L"\\MiniFASNetV2.onnx";
     const std::wstring v1SePath = modelsDir + L"\\MiniFASNetV1SE.onnx";
@@ -344,7 +343,8 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     AuthPipeline pipeline(*models->detector, *models->recognizer, *models->antiSpoof,
                           AuthPipelineConfig{config.antiSpoofThreshold,
                                              config.authTimeoutSeconds,
-                                             config.cameraRotation},
+                                             config.cameraRotation,
+                                             config.fastUnlock},
                           std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
     const auto pipelineDoneAt = std::chrono::steady_clock::now();

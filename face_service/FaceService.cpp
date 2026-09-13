@@ -543,10 +543,6 @@ bool FaceService::Initialize() {
                        m_config.camera_device.empty() ? L"" : L" (configured device)");
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        m_modelLowLightEnhance = m_config.low_light_enhance;
-    }
     if (!StartModelWorker()) {
         FACELOGIN_ERROR(L"Failed to start model lifecycle worker");
         return false;
@@ -705,8 +701,8 @@ std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
     workerConfig.cameraRotation = appConfig.camera_rotation;
     workerConfig.antiSpoofThreshold = appConfig.anti_spoof_threshold;
     workerConfig.authTimeoutSeconds = m_authTimeoutSeconds;
-    workerConfig.lowLightEnhance = appConfig.low_light_enhance;
     workerConfig.cameraDevice = Utf8ToWstr(appConfig.camera_device);
+    workerConfig.fastUnlock = appConfig.fast_unlock;
 
     auto worker = std::make_shared<AuthWorkerClient>(std::move(workerConfig));
     if (!worker->Start(errorMessage)) return {};
@@ -847,7 +843,6 @@ void FaceService::ModelWorkerLoop() {
             m_loadedWorkerConfigGeneration = workerConfigGeneration;
             published = true;
         } else if (!m_isServiceMode && loaded && m_modelsWanted) {
-            loaded->recognizer->SetLowLightEnhance(m_modelLowLightEnhance);
             m_models = loaded;
             m_modelState = ModelState::Ready;
             m_modelLoadFailure.store(ModelLoadFailure::None);
@@ -960,7 +955,6 @@ void FaceService::Run() {
             // worker when the lock screen is active. A generation prevents a
             // child that was already loading from being acknowledged as the
             // newly configured backend.
-            std::shared_ptr<InferenceModels> loadedModels;
             bool waitForConfiguredWorker = false;
             uint64_t requiredWorkerGeneration = 0;
             {
@@ -968,7 +962,6 @@ void FaceService::Run() {
                 m_config = std::move(reloadedConfig);
                 m_matchThreshold = m_config.match_threshold;
                 m_antiSpoofThreshold = m_config.anti_spoof_threshold;
-                m_modelLowLightEnhance = m_config.low_light_enhance;
                 if (m_isServiceMode) {
                     ++m_workerConfigGeneration;
                     requiredWorkerGeneration = m_workerConfigGeneration;
@@ -977,19 +970,13 @@ void FaceService::Run() {
                         waitForConfiguredWorker = true;
                     }
                 } else {
-                    if (m_modelState == ModelState::Ready) {
-                        loadedModels = m_models;
-                    } else if (m_modelsWanted && m_modelState == ModelState::Failed) {
+                    if (m_modelsWanted && m_modelState == ModelState::Failed) {
                         m_modelLoadRequested = true;
                         waitForConfiguredWorker = true;
                     }
                 }
             }
             m_modelCv.notify_all();
-            if (loadedModels) {
-                // PAD remains on its calibrated raw-camera preprocessing path.
-                loadedModels->recognizer->SetLowLightEnhance(m_config.low_light_enhance);
-            }
             if (m_learner) {
                 LearningConfig learning;
                 learning.enabled = m_config.ema_learning;
@@ -1509,7 +1496,7 @@ bool FaceService::ProcessAuthRequest() {
     AuthPipeline pipeline(
         *models->detector, *models->recognizer, *models->antiSpoof,
         AuthPipelineConfig{m_antiSpoofThreshold, m_authTimeoutSeconds,
-                           m_config.camera_rotation},
+                           m_config.camera_rotation, m_config.fast_unlock},
         std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
 

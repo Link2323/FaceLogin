@@ -4,10 +4,15 @@
 
 namespace facelogin {
 
-// Calibration and validation use independent five-frame attempts. Production
-// mirrors that policy exactly: five valid frames, and every frame must pass.
-inline int AntiSpoofCheckCount(float) {
-    return 5;
+// Calibration and validation use independent five-frame attempts. The
+// default (secure) policy mirrors that exactly: five valid frames, and
+// every frame must pass. Fast unlock (config fast_unlock=true) counts
+// three frames with every frame binding identity — a user-facing
+// speed/security trade-off, NOT a calibration result (docs/
+// threshold-calibration.md is five-frame; the 3-frame mode was not
+// recalibrated and keeps the same per-frame 0.281 threshold).
+inline int AntiSpoofCheckCount(bool fastUnlock) {
+    return fastUnlock ? 3 : 5;
 }
 
 inline int AntiSpoofPassRequired(int checkCount) {

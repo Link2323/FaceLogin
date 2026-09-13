@@ -29,13 +29,13 @@ std::vector<float> UnitEmbedding() {
 
 std::vector<uint8_t> MakeConfigPayload(int32_t rotation,
                                        float threshold, int32_t timeout,
-                                       uint32_t lowLight) {
+                                       int32_t fastUnlock = 0) {
     facelogin::auth_worker::PayloadWriter writer;
     writer.WriteI32(rotation);
     writer.WriteFloat(threshold);
     writer.WriteI32(timeout);
-    writer.WriteU32(lowLight);
     writer.WriteWString(L"camera-path");
+    writer.WriteI32(fastUnlock);
     return writer.Data();
 }
 
@@ -45,8 +45,8 @@ void TestConfigRoundTrip() {
     input.cameraRotation = 270;
     input.antiSpoofThreshold = 0.381f;
     input.authTimeoutSeconds = 23;
-    input.lowLightEnhance = true;
     input.cameraDevice = L"\\\\?\\usb#test-camera";
+    input.fastUnlock = true;
 
     WorkerConfig output;
     const auto encoded = EncodeConfig(input);
@@ -54,20 +54,25 @@ void TestConfigRoundTrip() {
     Check(output.cameraRotation == input.cameraRotation &&
           std::fabs(output.antiSpoofThreshold - input.antiSpoofThreshold) < 0.0001f &&
           output.authTimeoutSeconds == input.authTimeoutSeconds &&
-          output.lowLightEnhance == input.lowLightEnhance &&
-          output.cameraDevice == input.cameraDevice,
+          output.cameraDevice == input.cameraDevice &&
+          output.fastUnlock == input.fastUnlock,
           "worker configuration round trip preserves every field");
 
-    Check(!DecodeConfig(MakeConfigPayload(45, 0.281f, 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(45, 0.281f, 15), output),
           "invalid camera rotation is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(0, std::numeric_limits<float>::quiet_NaN(), 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, std::numeric_limits<float>::quiet_NaN(), 15), output),
           "non-finite PAD threshold is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(0, 0.10f, 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.10f, 15), output),
           "below-range PAD threshold is rejected");
-    Check(DecodeConfig(MakeConfigPayload(0, 0.15f, 15, 0), output),
+    Check(DecodeConfig(MakeConfigPayload(0, 0.15f, 15), output),
           "lower-bound PAD threshold 0.15 is accepted");
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.281f, 61), output),
+          "above-range auth timeout is rejected");
     Check(!DecodeConfig(MakeConfigPayload(0, 0.281f, 15, 2), output),
-          "invalid low-light flag is rejected");
+          "non-binary fastUnlock flag is rejected");
+    Check(DecodeConfig(MakeConfigPayload(0, 0.281f, 15, 1), output) &&
+          output.fastUnlock,
+          "fastUnlock=1 decodes to fast mode");
 
     auto truncated = encoded;
     truncated.pop_back();

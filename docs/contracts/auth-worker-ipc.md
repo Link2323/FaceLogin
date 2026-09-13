@@ -18,7 +18,7 @@
 ```cpp
 struct MessageHeader {
     uint32_t magic;       // 0x4B574C46，即 "FLWK"
-    uint16_t version;     // 5
+    uint16_t version;     // 7
     uint16_t type;
     uint64_t requestId;
     uint32_t payloadSize;
@@ -58,9 +58,15 @@ struct MessageHeader {
 int32  cameraRotation      // 0/90/180/270
 float  antiSpoofThreshold // 有限值，[0.15, 0.50]
 int32  authTimeoutSeconds // [1, 60]
-uint32 lowLightEnhance     // 0/1
 wstring cameraDevice
+int32  fastUnlock          // 0/1（v7，2026-09-13）：快速解锁模式——3 个计帧、
+                           // 每帧绑定身份；默认 0 = 5 帧标定策略
 ```
+
+v5 及之前的线上在该表 `cameraDevice` 之前还有一个 `uint32 lowLightEnhance`；
+识别器侧暗光增强删除后（v6，2026-09-13）移除该字段。v7 在表尾追加
+`fastUnlock`（config `fast_unlock`）；两种模式下绑定序列相同（bindingIndex
+仍严格 0 → 1 → 2，父端 `AuthExchangeValidator` 契约不变）。
 
 `MatchProbe` 的 payload 为（v4 起附带范数，v5 起附带姿态角）：
 
@@ -94,7 +100,7 @@ spawn suspended → assign Job → resume
   子加载四模型；默认不打开相机
   子 Ready(0)
   父 StartAuth(requestId)
-  子按需打开相机并运行 PAD 5/5
+  子按需打开相机并运行 PAD N/N（默认 5 帧；fastUnlock=1 时 3 帧）
   子 MatchProbe(0) ↔ 父 decision
   子 MatchProbe(1) ↔ 父 decision
   子 MatchProbe(2) ↔ 父 decision

@@ -197,7 +197,6 @@ private:
     bool m_modelsWanted = false;
     bool m_modelLoadRequested = false;
     bool m_modelStopRequested = false;
-    bool m_modelLowLightEnhance = false;
     std::wstring m_workerLoadError;
     // CONFIG_RELOAD may arrive while a child is preloading. A generation lets
     // the lifecycle thread discard that stale child and acknowledge only the

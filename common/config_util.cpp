@@ -121,7 +121,6 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "{\n";
     ss << "  "; jsonWriteString(ss, "match_threshold"); ss << ": " << cfg.match_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "anti_spoof_threshold"); ss << ": " << cfg.anti_spoof_threshold << ",\n";
-    ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_rotation"); ss << ": " << cfg.camera_rotation << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << ",\n";
     ss << "  "; jsonWriteString(ss, "ema_learning"); ss << ": " << (cfg.ema_learning ? "true" : "false") << ",\n";
@@ -129,7 +128,8 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "  "; jsonWriteString(ss, "learning_alpha"); ss << ": " << cfg.learning_alpha << ",\n";
     ss << "  "; jsonWriteString(ss, "learning_distance_gate"); ss << ": " << cfg.learning_distance_gate << ",\n";
     ss << "  "; jsonWriteString(ss, "learning_norm_floor"); ss << ": " << cfg.learning_norm_floor << ",\n";
-    ss << "  "; jsonWriteString(ss, "learning_min_interval_sec"); ss << ": " << cfg.learning_min_interval_sec << "\n";
+    ss << "  "; jsonWriteString(ss, "learning_min_interval_sec"); ss << ": " << cfg.learning_min_interval_sec << ",\n";
+    ss << "  "; jsonWriteString(ss, "fast_unlock"); ss << ": " << (cfg.fast_unlock ? "true" : "false") << "\n";
     ss << "}\n";
     return ss.str();
 }
@@ -158,12 +158,6 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.anti_spoof_threshold);
         cfg.anti_spoof_threshold = 0.28f;
     }
-    // Missing key adopts the current default (true); an explicit value is
-    // honored as written. Configs persisted by older builds carry an explicit
-    // false and keep it — the loader must not silently flip user files.
-    const std::string enhance = jsonGetString(json, "low_light_enhance");
-    cfg.low_light_enhance = enhance.empty() ? cfg.low_light_enhance
-                                            : (enhance == "true");
     int rotation = jsonGetInt(json, "camera_rotation", 0);
     // Only accept 0/90/180/270; anything else silently does nothing in
     // RotateFrame, so fall back to 0 and log it — a configured-but-ignored
@@ -218,6 +212,7 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.learning_min_interval_sec);
         cfg.learning_min_interval_sec = 60;
     }
+    cfg.fast_unlock = (jsonGetString(json, "fast_unlock") == "true");
     cfg.camera_rotation = rotation;
     auto cam = jsonGetString(json, "camera_device");
     if (!cam.empty()) cfg.camera_device = cam;

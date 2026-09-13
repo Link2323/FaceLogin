@@ -7,15 +7,6 @@ namespace facelogin {
 struct AppConfig {
     float          match_threshold        = 0.80f;       // 512-D calibrated; EmbeddingThresholdForDim clamps to [0.70, 1.00]
     float          anti_spoof_threshold   = 0.28f;       // 50/50 MiniFAS fusion threshold; UI default on a 0.01 grid (calibration point 0.281)
-    // Low-light enhancement. Default false since 2026-09-05 (was true
-    // 2026-08-31 – 2026-09-05): normalize brightness of dark face chips
-    // before recognition. Measured on the production chain: underexposed
-    // chips (luma 14-22) cost +0.25-0.30 match distance with enhancement
-    // off, ~+0.05 with it on — a night-enrolled / day-unlocked (or
-    // backlit) setup otherwise lands at the 0.80 threshold's edge. Bright
-    // chips are untouched (no-op above luma 40). PAD intentionally keeps
-    // the raw preprocessing used during calibration.
-    bool           low_light_enhance      = false;
     std::string    camera_device          = "";          // device symbolic link; empty = first camera
     // Camera rotation in degrees clockwise. Valid: 0, 90, 180, 270.
     // Use when the camera is physically mounted in a non-standard
@@ -58,6 +49,15 @@ struct AppConfig {
     float          learning_norm_floor    = 19.1f;
     // Minimum wall-clock spacing between accepted updates. Clamped [10, 3600].
     int            learning_min_interval_sec = 60;
+    // Fast unlock mode (2026-09-13): the liveness loop counts 3 frames
+    // instead of the calibrated 5, and every counted frame performs identity
+    // binding (the 5-frame plan binds counted frames 1/3/5). Saves two
+    // pacing slots (~120 ms dev / ~250-370 ms 1360P) at a quantified
+    // security cost: an attack must pass all counted frames, so per-frame
+    // false-accept q yields q^3 instead of q^5, and the binding span
+    // shrinks ~240 ms -> ~120 ms. Default false = the 5-frame calibrated
+    // policy; 0.281 stays the per-frame PAD threshold in both modes.
+    bool           fast_unlock            = false;
 };
 
 AppConfig LoadConfig(const std::wstring& dataDir);

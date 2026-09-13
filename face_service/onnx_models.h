@@ -10,17 +10,6 @@
 
 namespace facelogin {
 
-// In-place low-light enhancement for a face chip. Detects darkness (mean
-// luma below kLowLightMeanThreshold) and stretches brightness so the mean
-// lands at a reference level, clamped to [0,255]. No-op for chips at normal
-// brightness. Called on the RESIZED chip before the model's own normalization
-// loop, so InsightFace sees brightness-normalized input in dark scenes.
-//
-// Safe by construction: only affects genuinely dark chips; a normal-brightness
-// chip is returned unchanged, so the match threshold and photo-rejection
-// boundary are untouched.
-void ApplyLowLightEnhance(FrameImage& chip);
-
 // ONNX-based face recognition using InsightFace (w600k_mbf / w600k_r50).
 // Embedding dimension: 512 (auto-detected from the model output).
 class OnnxRecognizer {
@@ -48,14 +37,10 @@ public:
 
     bool IsInitialized() const { return m_initialized; }
 
-    // Enable/disable low-light brightness normalization for dark face chips.
-    void SetLowLightEnhance(bool enable) { m_lowLightEnhance = enable; }
-
 private:
     std::unique_ptr<Ort::Session> m_session;
     std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
     bool m_initialized = false;
-    bool m_lowLightEnhance = false;
 
     // Input/output names (cached after session creation)
     std::string m_inputName;
