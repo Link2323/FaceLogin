@@ -114,6 +114,22 @@ AuthPipelineResult AuthPipeline::Run() {
         unsigned long long seedSeq = 0;
         std::chrono::steady_clock::time_point seedWall{};
 
+        // Replay the persisted last-good sensor combo BEFORE the warmup:
+        // the driver intermittently forgets its manual UVC controls across
+        // the idle power-down (2026-09-13), and without the replay every
+        // such round starts at the driver default and pays the full
+        // settle-loop tune. A replayed gain lands instantly; a replayed
+        // exposure settles inside the warmup window. Equal values are never
+        // re-written, so an intact driver pays nothing.
+        bool replayWrote = false;
+        const auto replayAt = std::chrono::steady_clock::now();
+        if (!m_config.tuneStatePath.empty()) {
+            TuneKnobState saved;
+            if (LoadTuneKnobState(m_config.tuneStatePath, saved)) {
+                replayWrote = ApplyTuneKnobState(m_callbacks.sensorKnobs, saved);
+            }
+        }
+
         // Let auto-exposure settle before the first PAD frame. Adaptive gate
         // (see exposure_warmup.h): sample the mean luma of distinct frames
         // and proceed once a 2-sample window is stable, or at the 10-sample
@@ -186,14 +202,50 @@ AuthPipelineResult AuthPipeline::Run() {
 
         // Face-priority gain tune (face_gain_tune.h): the trigger measurement
         // reuses the seed's detection, so bright scenes — the common case —
-        // pay one bbox luma pass and zero extra inference. A successful tune
-        // changes the sensor state, so the seed frame no longer represents
-        // what PAD will see: drop it, the loop grabs fresh.
+        // pay one bbox luma pass and zero extra inference. In-band rounds
+        // take the early return, which also refreshes the persisted combo;
+        // only an actual tune invalidates the seed frame.
+        GainTuneConfig tuneCfg;
+        tuneCfg.persistPath = m_config.tuneStatePath;
+        // A just-applied replay write needs the driver's lag window (the
+        // same ~0.5–1 s family as the tune settle floor) before readings
+        // are trustworthy. Judging the trigger on the pre-settle reading
+        // stacks a second write on top of the replay and mis-flags the gain
+        // knob as dead (2026-09-13 21:59: one 4.3 s round landing
+        // over-bright). Out-of-band readings inside that window get one
+        // re-measure after it instead. (Curve sampling during this window
+        // showed the post-replug sensor is untrustworthy for several
+        // seconds no matter what — delayed jump, not a smooth ramp — so the
+        // window stays fixed and the first re-measure decides.)
+        if (replayWrote && seed.valid && seed.det) {
+            const float lumaNow = FaceBoxLuma(seed.frame, *seed.det);
+            if (lumaNow >= 0.0f &&
+                (lumaNow < tuneCfg.minFaceLuma || lumaNow > tuneCfg.maxFaceLuma)) {
+                const auto settleUntil =
+                    replayAt + std::chrono::milliseconds(tuneCfg.settleMs);
+                FrameImage fresh;
+                unsigned long long freshSeq = 0;
+                while (std::chrono::steady_clock::now() < settleUntil) {
+                    if (m_callbacks.isCancelled()) {
+                        result.cancelled = true;
+                        return result;
+                    }
+                    if (m_callbacks.grabFrame(fresh, freshSeq)) {
+                        RotateFrame(fresh, m_config.cameraRotation);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                }
+                auto freshDet = m_detector.DetectLargestFace(fresh);
+                if (freshDet) {
+                    seed = Prefetch{true, std::move(fresh), freshSeq,
+                                    std::move(freshDet),
+                                    std::chrono::steady_clock::now()};
+                }
+            }
+        }
         if (seed.valid && seed.det) {
-            const GainTuneConfig tuneCfg;
             const float faceLuma = FaceBoxLuma(seed.frame, *seed.det);
-            if (faceLuma >= 0.0f &&
-                (faceLuma < tuneCfg.minFaceLuma || faceLuma > tuneCfg.maxFaceLuma)) {
+            if (faceLuma >= 0.0f) {
                 const int tuneSteps = TuneFaceExposure(
                     faceLuma, m_callbacks.sensorKnobs, m_callbacks.grabFrame,
                     m_detector, m_callbacks.isCancelled,

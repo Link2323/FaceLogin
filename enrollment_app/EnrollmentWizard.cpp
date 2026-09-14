@@ -333,6 +333,19 @@ bool EnrollmentWizard::StartPreview() {
         return false;
     }
 
+    // Replay the persisted last-good combo before the models load: the
+    // driver intermittently forgets manual UVC controls across idle
+    // power-downs (2026-09-13), and the model-load window absorbs the
+    // exposure write's settle lag, so the tune check below measures the
+    // replayed state instead of the transition.
+    const std::wstring tuneStatePath = m_dataDir + L"\\camera_tune.state";
+    {
+        TuneKnobState saved;
+        if (LoadTuneKnobState(tuneStatePath, saved)) {
+            ApplyTuneKnobState(BuildSensorKnobs(), saved);
+        }
+    }
+
     std::wstring modelsDir = m_dataDir + L"\\models";
 
     // Load SCRFD ONNX detector (gnkps variant — provides the 5 alignment
@@ -380,11 +393,14 @@ bool EnrollmentWizard::StartPreview() {
     // runs, and the next StartPreview re-tunes otherwise.
     {
         const auto noCancel = [] { return false; };
+        GainTuneConfig tuneCfg;
+        tuneCfg.persistPath = tuneStatePath;
         TuneFaceExposure(BuildSensorKnobs(),
                          [this](FrameImage& f, unsigned long long& s) {
                              return m_webcam->GrabFrame(f, &s);
                          },
-                         *m_onnxDetector, noCancel, m_config.camera_rotation);
+                         *m_onnxDetector, noCancel, m_config.camera_rotation,
+                         tuneCfg);
     }
     // The tune above just moved the sensor: hold the streaming watch off for
     // its cooldown so it doesn't re-judge the settle frames.
@@ -501,15 +517,15 @@ void EnrollmentWizard::WatchPreviewExposure(const FrameImage& frame,
     if (now - m_lastExposureWatch < kExposureWatchInterval) return;
     m_lastExposureWatch = now;
     if (now - m_lastExposureTune < kExposureTuneCooldown) return;
-    const GainTuneConfig cfg;
+    GainTuneConfig cfg;
+    cfg.persistPath = m_dataDir + L"\\camera_tune.state";
     const float luma = FaceBoxLuma(frame, det);
     const bool outOfBand =
         luma >= 0.0f && (luma < cfg.minFaceLuma || luma > cfg.maxFaceLuma);
     if (!outOfBand) {
         m_pendingWatchLuma = -1.0f;
         return;
-    }
-    // Two consecutive out-of-band cycles (3 s apart): single readings jitter
+    }    // Two consecutive out-of-band cycles (3 s apart): single readings jitter
     // with face fill ratio, and one spurious hit must not move the sensor.
     if (m_pendingWatchLuma < 0.0f ||
         std::fabs(luma - m_pendingWatchLuma) > 40.0f) {

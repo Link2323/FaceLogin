@@ -66,6 +66,10 @@ struct AuthPipelineConfig {
     // default 5-frame plan binds counted frames 1/3/5). Security
     // trade-off documented on AppConfig::fast_unlock.
     bool fastUnlock = false;
+    // Absolute path of the persisted last-good exposure/gain combo
+    // (camera_tune.state in the data dir, face_gain_tune.h). Empty disables
+    // persistence and replay.
+    std::wstring tuneStatePath;
 };
 
 struct AuthPipelineResult {

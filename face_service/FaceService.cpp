@@ -1500,7 +1500,8 @@ bool FaceService::ProcessAuthRequest() {
     AuthPipeline pipeline(
         *models->detector, *models->recognizer, *models->antiSpoof,
         AuthPipelineConfig{m_antiSpoofThreshold, m_authTimeoutSeconds,
-                           m_config.camera_rotation, m_config.fast_unlock},
+                           m_config.camera_rotation, m_config.fast_unlock,
+                           m_dataDir + L"\\camera_tune.state"},
         std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
 

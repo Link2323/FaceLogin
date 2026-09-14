@@ -344,7 +344,8 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
                           AuthPipelineConfig{config.antiSpoofThreshold,
                                              config.authTimeoutSeconds,
                                              config.cameraRotation,
-                                             config.fastUnlock},
+                                             config.fastUnlock,
+                                             dataDir + L"\\camera_tune.state"},
                           std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
     const auto pipelineDoneAt = std::chrono::steady_clock::now();
