@@ -34,9 +34,9 @@ namespace facelogin {
 // Two-sided: manual settings persist across graph builds (observed), so a
 // long exposure tuned in a dark room would white-out a bright scene with no
 // way back — when the face measures over-bright the exposure is stepped back
-// down toward the band. Fail-open throughout: any unsupported control,
-// cancelled wait, lost face, or exhausted budget leaves the capture exactly
-// like an untuned graph.
+// down toward the band. Tuning failure does not bypass identity or PAD;
+// unsupported controls, cancelled waits, lost faces and exhausted budgets
+// leave capture at its current settings.
 //
 // Runs once per capture-graph init, between exposure warmup and the first PAD
 // frame (auth worker) / before preview streaming starts (console). The
@@ -49,7 +49,7 @@ struct GainTuneConfig {
                                   // "no tune needed" (the old 40 left a 41–49 dead
                                   // zone: console logged "not needed" at 41–45
                                   // while the target band starts at 50)
-    float targetLumaLow = 50.0f;  // up-steps stop once face luma >= this...
+    float targetLumaLow = 50.0f;  // exposure stop; correcting gain adds settleTol margin
     float targetLumaHigh = 90.0f; // ...nominal band top (log label only; the
                                   // step loops land anywhere in [min,max] below)
     float maxFaceLuma = 120.0f;   // landing-band top AND over-bright trigger:
@@ -105,13 +105,14 @@ struct GainTuneConfig {
     // below the driver's range min is unenforceable and ignored (a driver
     // with absolute-µs units degrades to the uncapped legacy behavior).
     long exposureUpCapValue = -4;
-    // When non-empty, every in-band outcome persists the current {exposure,
-    // gain} combo here (SaveTuneKnobState) and hosts replay it at camera
+    // When non-empty, in-band observations AND settled tuning progress persist
+    // the current {exposure, gain} combo here. Hosts replay it at camera
     // init (LoadTuneKnobState + ApplyTuneKnobState). The driver intermittently
     // loses manual UVC controls across its idle power-down (2026-09-13: a
     // written -3 read back as the -5 default, an older gain 22 read back as
-    // 0), so "remembering" must live app-side; replay keeps the trigger
-    // measurement in band so the settle-loop tune never fires.
+    // 0), so "remembering" must live app-side. Progress need not reach the
+    // target band: otherwise a budget-limited 50->58 gain adjustment is
+    // undone by replaying the old 50 every round (2026-09-15).
     std::wstring persistPath;
 };
 
@@ -129,7 +130,7 @@ struct SensorKnobs {
 };
 
 // ---------------------------------------------------------------------------
-// Persisted last-good sensor combo (see GainTuneConfig::persistPath)
+// Persisted last settled sensor combo (not necessarily in the target band)
 // ---------------------------------------------------------------------------
 
 struct TuneKnobState {
@@ -245,6 +246,8 @@ struct KnobTrio {
                             // LONG_MAX = uncapped (gain). Exposure passes the
                             // config cap — long exposures throttle fps (see
                             // GainTuneConfig::exposureUpCapValue).
+    bool adaptiveGain = false; // gain only: use settled step response to approach
+                               // an interior target without repeated tiny steps
 };
 
 // One distinct (per frame-sequence) grab, rotated, detected, measured.
@@ -287,14 +290,11 @@ inline bool KnobReady(const std::function<bool(long&, long&, long&)>& range,
 inline int StepKnob(const KnobTrio& knob,
                     bool up,
                     float& luma,
-                    const std::function<bool(FrameImage&, unsigned long long&)>& grab,
-                    OnnxDetector& detector,
+                    const std::function<bool(float&)>& measure,
                     const std::function<bool()>& isCancelled,
-                    int cameraRotation,
                     const GainTuneConfig& cfg,
                     wchar_t* deltaText, size_t deltaTextLen,
-                    unsigned long long& lastSeq,
-                    bool& haveSeq,
+                    bool& measurementValid,
                     int* deadStepsOut = nullptr) {
     long mn = 0, mx = 0, st = 0;
     long cur = 0;
@@ -324,14 +324,28 @@ inline int StepKnob(const KnobTrio& knob,
     int steps = 0;
     int deadSteps = 0;
     const long startVal = cur;
+    // Starting a correction at <50 and stopping exactly at 50 re-triggers on
+    // the next graph's small measurement variation. Gain can land inside the
+    // band without paying exposure's frame-rate cost; reserve one measurement
+    // tolerance. Exposure retains its original stop line and upward cap.
+    const float stopLuma = up && knob.adaptiveGain
+        ? std::min(cfg.targetLumaHigh, cfg.targetLumaLow + cfg.settleTol)
+        : cfg.targetLumaLow;
+    float gainResponse = 0.0f;
+    long measuredMove = 0;
     // Each step moves half the remaining span toward the limit, but never
     // less than one driver granule, and lands exactly on the limit — plain
     // integer halving ((limit-cur)/2 == 0 → break) stopped dead once the
     // remaining span dropped below 2.
     const long granule = st > 0 ? st : 1;
     while (steps < cfg.maxSteps &&
-           (up ? luma < cfg.targetLumaLow : luma > cfg.maxFaceLuma)) {
-        const long delta = up ? limit - cur : cur - limit;
+           (up ? luma < stopLuma : luma > cfg.maxFaceLuma)) {
+        if (isCancelled()) { measurementValid = false; break; }
+        // After a responsive, settled gain step, the actual driver range is
+        // the useful bound. The old fraction-of-headroom budget stranded a
+        // working knob below target for several separate unlocks.
+        const bool predictGain = up && knob.adaptiveGain && gainResponse > 0.0f;
+        const long delta = up ? (predictGain ? mx : limit) - cur : cur - limit;
         if (delta <= 0) break;
         // Up: ceil of half the remaining span — exponential ratchet toward the
         // top, one init at a time. Down on a fineDown knob (exposure): single
@@ -340,7 +354,16 @@ inline int StepKnob(const KnobTrio& knob,
         // deep into the dark side and flip-flops across inits. Gain units are
         // small and near-linear, so it halves its span both ways.
         long move;
-        if (up || !knob.fineDown) {
+        if (predictGain) {
+            // Secant estimate from this round's measured response. Cap the
+            // extrapolation at twice the tested step and the physical range;
+            // every prediction must still pass the full settle/measure gate.
+            const double requested = std::ceil(
+                static_cast<double>(stopLuma - luma) / gainResponse / granule) * granule;
+            const double bound = std::min(static_cast<double>(delta),
+                                           2.0 * measuredMove);
+            move = static_cast<long>(std::clamp(requested, 1.0, bound));
+        } else if (up || !knob.fineDown) {
             move = (delta + 1) / 2;                        // ceil of half-span
             move = ((move + granule - 1) / granule) * granule;
             move = std::min(std::max(move, 1L), delta);    // clamp to limit
@@ -352,22 +375,33 @@ inline int StepKnob(const KnobTrio& knob,
         if (!knob.set(next)) break;
         cur = next;
         ++steps;
+        measurementValid = false;
         float measured = -1.0f;
         bool alive = true;
         float prev = -1.0f;
         const auto settleStart = std::chrono::steady_clock::now();
         for (int f = 0; f < cfg.settleFrames && alive; ++f) {
-            alive = GrabMeasure(grab, detector, isCancelled, cameraRotation, cfg,
-                                lastSeq, haveSeq, measured);
+            alive = !isCancelled() && measure(measured) &&
+                    std::isfinite(measured) && measured >= 0.0f;
             if (!alive) break;
             const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - settleStart).count();
             if (prev >= 0.0f && elapsedMs >= cfg.settleMs &&
-                std::fabs(measured - prev) <= cfg.settleTol)
+                std::fabs(measured - prev) <= cfg.settleTol) {
+                measurementValid = true;
                 break;  // past the actuator lag and settled on the new value
+            }
             prev = measured;
         }
-        if (!alive) break;
+        // A sample-budget exit is not proof that the write has settled.
+        // Do not persist it or stack another knob write on stale readings.
+        if (!measurementValid) break;
+        if (up && knob.adaptiveGain) {
+            const float rise = measured - luma;
+            gainResponse = rise >= cfg.deadKnobRise
+                ? rise / static_cast<float>(move) : 0.0f;
+            measuredMove = move;
+        }
         if (up ? (measured - luma < cfg.deadKnobRise)
                : (luma - measured < cfg.deadKnobRise)) {
             ++deadSteps;
@@ -392,12 +426,10 @@ inline int StepKnob(const KnobTrio& knob,
 // line when action was attempted.
 inline int TuneFaceExposure(float firstLuma,
                             const SensorKnobs& knobs,
-                            const std::function<bool(FrameImage&, unsigned long long&)>& grab,
-                            OnnxDetector& detector,
+                            const std::function<bool(float&)>& measure,
                             const std::function<bool()>& isCancelled,
-                            int cameraRotation,
                             const GainTuneConfig& cfg = {}) {
-    if (firstLuma < 0.0f) return 0;
+    if (!std::isfinite(firstLuma) || firstLuma < 0.0f || isCancelled()) return 0;
     if (firstLuma >= cfg.minFaceLuma && firstLuma <= cfg.maxFaceLuma) {
         // In-band: whatever the knobs hold right now is a certified combo —
         // refresh the persisted state so the next camera init can replay it
@@ -408,8 +440,7 @@ inline int TuneFaceExposure(float firstLuma,
     const bool up = firstLuma < cfg.minFaceLuma;
     const auto tuneStart = std::chrono::steady_clock::now();
 
-    unsigned long long lastSeq = 0;
-    bool haveSeq = false;
+    bool measurementValid = true;
     float luma = firstLuma;
     wchar_t expText[96] = L"n/a";
     wchar_t gainText[96] = L"n/a";
@@ -437,25 +468,25 @@ inline int TuneFaceExposure(float firstLuma,
     if (gainFirst && detail::KnobReady(knobs.gainRange, knobs.gainSet)) {
         const detail::KnobTrio gain{
             knobs.gainRange, knobs.gainGet, knobs.gainSet,
-            cfg.maxGainBoostFraction};
+            cfg.maxGainBoostFraction, false, LONG_MAX, true};
         wchar_t* seg = gainSeg();
-        steps += detail::StepKnob(gain, true, luma, grab, detector, isCancelled,
-                                  cameraRotation, cfg, seg,
+        steps += detail::StepKnob(gain, true, luma, measure, isCancelled,
+                                  cfg, seg,
                                   96 - static_cast<size_t>(seg - gainText),
-                                  lastSeq, haveSeq, &gainDeadSteps);
+                                  measurementValid, &gainDeadSteps);
     }
     // Exposure next — photons beat amplification for genuine dark, and
     // seizing the exposure axis removes the AE feedback that cancels gain
     // adjustments. The climb stops at the config cap: past it each doubling
     // halves the camera's frame rate and the pacing guard stops binding.
     // Skipped when the gain-first pass already landed in band.
-    if (!(gainFirst && luma >= cfg.minFaceLuma) &&
+    if (measurementValid && !(gainFirst && luma >= cfg.minFaceLuma) &&
         detail::KnobReady(knobs.exposureRange, knobs.exposureSet)) {
         const detail::KnobTrio exposure{
             knobs.exposureRange, knobs.exposureGet, knobs.exposureSet,
             cfg.maxExposureBoostFraction, true, cfg.exposureUpCapValue};
-        steps += detail::StepKnob(exposure, up, luma, grab, detector, isCancelled,
-                                  cameraRotation, cfg, expText, 96, lastSeq, haveSeq);
+        steps += detail::StepKnob(exposure, up, luma, measure, isCancelled,
+                                  cfg, expText, 96, measurementValid);
     }
     // Gain is the fine actuator — and the designated lifter once exposure
     // caps out: amplification adds no frame time. Exposure is quantized in
@@ -469,16 +500,16 @@ inline int TuneFaceExposure(float firstLuma,
     // read face luma 178).
     const bool gainUp = luma < cfg.targetLumaLow;
     const bool gainDown = luma > cfg.targetLumaHigh;
-    if ((gainUp || gainDown) &&
+    if (measurementValid && (gainUp || gainDown) &&
         detail::KnobReady(knobs.gainRange, knobs.gainSet)) {
         const detail::KnobTrio gain{
             knobs.gainRange, knobs.gainGet, knobs.gainSet,
-            cfg.maxGainBoostFraction};
+            cfg.maxGainBoostFraction, false, LONG_MAX, true};
         wchar_t* seg = gainSeg();
-        steps += detail::StepKnob(gain, gainUp, luma, grab, detector,
-                                  isCancelled, cameraRotation, cfg, seg,
+        steps += detail::StepKnob(gain, gainUp, luma, measure,
+                                  isCancelled, cfg, seg,
                                   96 - static_cast<size_t>(seg - gainText),
-                                  lastSeq, haveSeq, &gainDeadSteps);
+                                  measurementValid, &gainDeadSteps);
     }
     // Extreme-dark fallback: the cap plus a maxed (or dead/absent) gain
     // still leave the face under minFaceLuma — the room is darker than
@@ -492,7 +523,7 @@ inline int TuneFaceExposure(float firstLuma,
             (knobs.gainRange(gmn, gmx, gstp) && knobs.gainGet(gcur) &&
              gcur >= gmx);
     }
-    if (luma < cfg.minFaceLuma && gainExhausted &&
+    if (measurementValid && luma < cfg.minFaceLuma && gainExhausted &&
         detail::KnobReady(knobs.exposureRange, knobs.exposureSet)) {
         if (wcscmp(expText, L"n/a") == 0) expText[0] = L'\0';
         const size_t expLen = wcslen(expText);
@@ -503,24 +534,46 @@ inline int TuneFaceExposure(float firstLuma,
         // Direction is always "brighten": the trigger is luma below the
         // band floor, so an over-bright entry that overshot past it must
         // climb back — `up` would darken here.
-        steps += detail::StepKnob(uncappedExposure, true, luma, grab, detector,
-                                  isCancelled, cameraRotation, cfg,
+        steps += detail::StepKnob(uncappedExposure, true, luma, measure,
+                                  isCancelled, cfg,
                                   expText + wcslen(expText),
-                                  96 - wcslen(expText), lastSeq, haveSeq);
+                                  96 - wcslen(expText), measurementValid);
     }
 
     FACELOGIN_INFO(L"Face exposure tune: face luma %.0f (%s) → exposure %s, gain %s → "
-                   L"face luma now %.0f (land %.0f–%.0f) — %lld ms",
+                   L"face luma now %.0f (target %.0f–%.0f, %s) — %lld ms",
                    firstLuma, up ? L"dark" : L"over-bright", expText, gainText,
-                   luma, cfg.minFaceLuma, cfg.maxFaceLuma,
+                    luma, cfg.minFaceLuma, cfg.maxFaceLuma,
+                    measurementValid ? L"settled" : L"unconfirmed",
                    static_cast<long long>(
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - tuneStart).count()));
-    if (!cfg.persistPath.empty() &&
-        luma >= cfg.minFaceLuma && luma <= cfg.maxFaceLuma) {
-        SaveTuneKnobState(cfg.persistPath, knobs);
+    if (!cfg.persistPath.empty() && steps > 0 && measurementValid && !isCancelled()) {
+        // Save progress even when the per-round budget ends outside the band.
+        // The next round resumes here, and can eventually exhaust gain and
+        // reach the existing exposure fallback in a genuinely dark scene.
+        if (!SaveTuneKnobState(cfg.persistPath, knobs)) {
+            FACELOGIN_WARN(L"Failed to save settled camera tune progress");
+        }
     }
     return steps;
+}
+
+// Production measurement adapter. Tests exercise the same controller with
+// deterministic sensor feedback, without a camera or ONNX model.
+inline int TuneFaceExposure(float firstLuma,
+                            const SensorKnobs& knobs,
+                            const std::function<bool(FrameImage&, unsigned long long&)>& grab,
+                            OnnxDetector& detector,
+                            const std::function<bool()>& isCancelled,
+                            int cameraRotation,
+                            const GainTuneConfig& cfg = {}) {
+    unsigned long long lastSeq = 0;
+    bool haveSeq = false;
+    return TuneFaceExposure(firstLuma, knobs, [&](float& luma) {
+        return detail::GrabMeasure(grab, detector, isCancelled, cameraRotation,
+                                   cfg, lastSeq, haveSeq, luma);
+    }, isCancelled, cfg);
 }
 
 // Self-contained variant for hosts without a warmup-produced detection
