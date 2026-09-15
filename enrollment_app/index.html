@@ -762,27 +762,25 @@ function drawOverlay(json) {
 
     // Gate state drives the frame color: green in gate, amber = keep turning.
     // targetYaw is only present while capturing (backend contract).
-    var col = '#22c55e', hint = '';
+    var col = '#1bb253', hint = '';
     if (typeof f.targetYaw !== 'undefined' && typeof f.yaw !== 'undefined') {
       var diff = f.targetYaw - f.yaw;      // >0 keep turning own-left, <0 own-right
       var inGate = Math.abs(diff) <= 10;   // same ±10° gate the collector uses
-      col = inGate ? '#22c55e' : '#f59e0b';
+      col = inGate ? '#1bb253' : '#f59e0b';
       hint = inGate ? '角度到位 · 请保持'
                     : '再' + (diff > 0 ? '左转 ' : '右转 ') +
                       Math.round(Math.abs(diff)) + '°';
     }
 
     // Viewfinder-style corner brackets instead of the old hard rectangle —
-    // same gate color, softened with rounded joins and a faint glow.
+    // same gate color, crisp square ends and near-square corners.
     ctx.save();
     ctx.strokeStyle = col;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.shadowColor = col;
-    ctx.shadowBlur = 6;
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
     ctx.lineWidth = 3.5;
-    var cl = Math.max(16, Math.min(bw, bh) * 0.22);   // bracket arm length
-    var cr = 10;                                       // corner rounding
+    var cl = Math.max(20, Math.min(bw, bh) * 0.26);   // bracket arm length (uniform)
+    var cr = 6;                                        // corner rounding
     ctx.beginPath();
     ctx.moveTo(bx, by + cl); ctx.lineTo(bx, by + cr);
     ctx.quadraticCurveTo(bx, by, bx + cr, by); ctx.lineTo(bx + cl, by);
