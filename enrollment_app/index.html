@@ -133,6 +133,17 @@ body{
 #screen-settings .settings-scroll{flex:1;min-height:0;overflow-y:auto;width:100%}
 #screen-settings .settings-body{margin:0 auto;padding:16px 0 20px}
 #screen-settings .settings-body .dim{color:#6b7280;font-weight:400}
+/* The save banner floats ABOVE the scroller (out of the flex flow): the page
+   scrolls internally, so a banner inside the scroll content sits at the top
+   of the scrolled-away area and is invisible exactly when it fires — the
+   user is scrolled down at the save button. And as an in-flow row it would
+   squeeze the scroller by its own height on every appearance, jolting the
+   whole page. Absolute here: always visible at the top, layout untouched. */
+#screen-settings > .banner{
+  position:absolute;top:112px;left:50%;transform:translateX(-50%);
+  width:calc(100% - 32px);max-width:640px;z-index:5;
+  border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);
+}
 /* Card groups: camera / recognition & security / experimental learning. */
 .set-group{border:1px solid #e5e7eb;border-radius:10px;padding:14px 16px 2px;margin-top:14px;background:#fff}
 .set-group>h3{font-size:13px;font-weight:600;color:#111827;margin-bottom:10px;
@@ -368,9 +379,9 @@ body{
     <span class="tab active">设置</span>
     <span class="tab" onclick="switchTab('logs')">日志</span>
   </div>
+  <div class="banner" id="settings-banner"></div>
   <div class="settings-scroll">
     <div class="pwd-body settings-body" style="width:100%;max-width:640px">
-    <div class="banner" id="settings-banner"></div>
     <h2>系统设置</h2>
     <p class="dim">保存后立即生效，无需重启。</p>
 
