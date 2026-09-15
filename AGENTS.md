@@ -2,14 +2,14 @@
 
 本文件是 AI 编码 agent 在本仓库工作时的**守则**:只保留稳定约束、踩坑和代码里 grep 不到的约定。
 
-**代码导航索引**:[`DEVELOPMENT.md`](DEVELOPMENT.md) 只提供任务路由、关键文件和验证入口;IPC / `users.dat` 契约在 [`docs/contracts/`](docs/contracts/),模块生命周期在 [`docs/modules/`](docs/modules/)。本文件不重复易变化的字段和清单。设计背景、运维、开发指南见 [`docs/design/`](docs/design/) 与 [`docs/operations/`](docs/operations/)。文档与实现冲突时,以代码、构建结果和测试结果为准,并在同一改动中修正文档;安装包资源清单以 [`docs/BUILD.md`](docs/BUILD.md) 为唯一事实源。
+**代码导航索引**:[`DEVELOPMENT.md`](DEVELOPMENT.md) 只提供任务路由、关键文件和验证入口;IPC / `users.dat` 契约在 [`docs/contracts/`](docs/contracts/),模块生命周期在 [`docs/modules/`](docs/modules/)。本文件不重复易变化的字段和清单。设计背景、运维、开发指南见 [`docs/design/`](docs/design/) 与 [`docs/operations/`](docs/operations/)。文档与实现冲突时,以代码、构建结果和测试结果为准,同步修正本次改动涉及的文档事实；其他不一致简要记录;安装包资源清单以 [`docs/BUILD.md`](docs/BUILD.md) 为唯一事实源。
 
 ## Working Philosophy
 
 以第一性原理！从原始需求和问题本质出发，不从惯例或模板出发。
-1. 不要假设我清楚自己想要什么。动机或目标不清晰时，停下来讨论。
+1. 不要假设我清楚自己想要什么。仅当歧义影响目标、验收或不可逆操作时提问；可逆实现细节自行判断，继续不依赖答案的工作。
 2. 目标清晰但路径不是最短的，直接告诉我并建议更好的办法。
-3. 遇到问题追根因，不打补丁。每个决策都要能回答"为什么"。
+3. 查明足以解释并修复当前问题的原因；优先最小完整修复，扩大范围须有直接证据。
 4. 输出说重点，砍掉一切不改变决策的信息。
 
 ## 项目概述
@@ -116,7 +116,7 @@ ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
 
 `FaceService::ProcessAuthRequest` 的认证循环要点:
 
-1. 延迟相机初始化;自适应曝光预热(`face_service/exposure_warmup.h`)——按 DS 帧序号去重采样均值亮度,2 帧窗口 max-min ≤ 20 即通过:稳定场景 2 个不同帧开门(严于旧固定 3 次循环的实际效果),慢收敛场景最多 10 帧。预热后另有 face luma 驱动的曝光调谐(`face_service/face_gain_tune.h`):触发带 [50,120],曝光 `IAMCameraControl_Exposure` 为粗执行器(抢掉 AE 的补偿轴、真加光子,~2× 一档,步进循环落 [50,120] 即停,**上行封顶 -4**——2⁻⁴=62.5ms≈帧守卫 60ms,再亮一档(-3=125ms)相机掉到 ~8fps:计帧间隔 95–118ms、预热不再收敛,9-13 晚连续 6 轮 ~1.0s 的根因;封顶后的亮度缺口由增益补,增益打满/判死仍暗才允许曝光破帽),增益 `VideoProcAmp_Gain` 为细调执行器(**暗侧贴线缺口(luma ≥ 下限×0.75)增益先行**——一个曝光档是 2× 光子,对几个单位的缺口是过冲,且落点把帧率永久锁进低档:9-13 晚拔插轮 3 单位缺口 -5→-4,16fps 每轮 +180ms;增益不占帧时间,补不进带再走曝光路径),曝光落定后 <50 抬、>90 降,桥接"任何曝光档都进不了带"的环境光区间);每步测量是 900ms 时间底+相邻采样一致的稳定门——**该驱动曝光写入生效延迟 ~0.5–1s,读短了必多走一步**(2026-09-13 预览 -2↔-4 极限环的根因);旋钮连抬两步 luma 纹丝不动即判死弃用(须在稳定门之后判,否则误判);fail-open,注册控制台预览同享(StartPreview 调谐+帧线程每 3s 双确认流式看护,采集进行中跳过)。**落带内或本轮调节结果经稳定门确认后，把当前 {曝光,增益} 写入 DataPath 根目录 `camera_tune.state`（即使预算耗尽仍未落带也保存进度；取消/丢脸/未稳定不保存），worker/console 开相机先重放**(等值不重写,曝光生效延迟由预热/模型加载窗口吸收);重放有写入且首测出带时,worker 会等完生效窗口(~900ms)重测一次再决定是否调谐——否则叠写会误判死旋钮并把状态堆到过曝(9-13 21:59 一次 4.3s 轮的根因,已修)。手动曝光/增益在驱动内跨 graph/进程保存,但 9-13 晚实测**设备断电(闲置 >~9s 再开)会间歇性静默回默认**(-3 写入读回 -5、gain 22 读回 0)——"记住"由 camera_tune.state 应用层重放兜底;亮场景降档毒化下次暗启动仍由双向治理闭环纠正(单轮代价 ~930ms 测量底)。背景亮/小脸欠曝场景下 BLC 均实测不足(2026-09-09,9-11 删除,勿回头);识别器侧 low_light_enhance 同日证伪后于 9-13 删除(设置项/配置键/worker 协议字段一并移除,协议 v6,旧 config.json 中残留键被忽略);同日新增 `fast_unlock` 字段(协议 v7,WorkerConfig 表尾追加 I32 0/1)。VideoProcAmp_Gain 曾在 9-10/9-11 观察为"假属性",实为 AE 补偿轴未抢掉所致——曝光转手动后实测有效(9-12/9-13),不要再引用旧结论。曝光调谐 9-11 装机验证通过(远距 8/8,luma 入带,距离回 0.66–0.78),9-13 双旋钮治理闭环(稳定门/落点带/增益细调)修复预览极限环并经用户真机确认。相机枚举:配置了 DevicePath 即权威选择,枚举不到(开机 USB 重枚举窗口)快速失败报"摄像头不可用",绝不静默回退"第一个设备"(同机另有 Integrated Camera,曾因此连吃空场景失败)。
+1. 相机仅在认证开始后激活。配置了 DevicePath 时必须使用指定设备，枚举不到就失败，禁止静默回退。曝光/增益调谐必须等待驱动生效并通过稳定门（当前约 900ms）；不能把尚未生效的读数当作无响应。保留曝光上行帽及暗光例外，稳定结果写入 `camera_tune.state` 供下次重放；取消、丢脸或未稳定时不覆盖旧记录。AE 转手动后增益才可可靠评估，设备断电可能静默复位。具体参数、预览看护与实验记录按需查阅 [`face-service.md`](docs/modules/face-service.md#认证主循环)。
 2. **融合一致性+活体循环(全部计帧必须通过)**:每帧 SCRFD 检测 → 双 MiniFAS 活体(50/50 融合),单预取槽软件流水线调度——PAD(N) 异步运行时主线程预取帧 N+1 的抓帧+检测,判定逻辑与逐帧顺序不变。帧 pacing 由显式抓帧守卫保证:相邻已计帧采集间隔 ≥60ms 且帧序号严格递增(锚点在预取前乐观前移)。计帧数默认 5(与标定策略一致,绑定帧为计帧 1/3/5:首锚点锁定 SID,后续绑定帧必须返回相同 SID,否则 fail closed 换脸攻击;非绑定帧用 bbox IoU 连续性);config `fast_unlock`(设置页"快速解锁"开关,2026-09-13)= 3 计帧且**每帧都绑定**,省两个 pacing 槽位(开发机 ~120ms、1360P ~250-370ms),代价是防攻击证据 5→3 帧(q^5→q^3)且绑定跨度 ~240ms→~120ms,阈值两种模式不变——用户自选的安全/速度权衡,非标定结果;录入 PAD 门不受此开关影响,恒为 5 帧。
 3. 匹配:欧氏距离 < 阈值(`match_threshold`,可配置)**且** 最佳/次佳比门控。具体阈值与钳制区间见代码及 `docs/threshold-calibration.md`。
 4. 全局超时(PAD 另有独立时间窗口)→ `AUTH_TIMEOUT`。
@@ -153,14 +153,14 @@ ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
 
 ## 完成标准
 
-- 先按 [DEVELOPMENT.md 任务路由](DEVELOPMENT.md#sec-task-routing) 定位入口和关联契约,不要靠目录名猜实现。
+- 入口或影响范围不明确时查 [DEVELOPMENT.md 任务路由](DEVELOPMENT.md#sec-task-routing)；涉及模块边界或契约时阅读对应文档。
 - 代码改动至少通过对应模块的构建/静态检查;安装器改动必须在 `installer/FaceLoginSetup/` 运行 `go test ./...`,前端改动必须在其 `frontend/` 下运行 `npm run build`。
 - 认证、相机、Credential Provider 等缺少自动化覆盖的路径,交付时说明实际执行的 standalone/GUI/锁屏验证;未执行也要明确说明原因。
 - 若改动改变路径、协议、模型、部署清单、CLSID、配置字段或 `users.dat` 格式,同一任务必须同步 `AGENTS.md` / `DEVELOPMENT.md` / 对应 `docs/` 中受影响的事实。
 
 ## 相关文档
 
-修改对应模块前先查阅:
+按任务需要查阅，无需逐项通读:
 
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) —— **精简代码导航**(任务 → 入口 → 联查文档 → 验证)
 - [`docs/contracts/ipc.md`](docs/contracts/ipc.md) / [`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) / [`users-dat.md`](docs/contracts/users-dat.md) —— 公共线格式、私有 worker 线格式与磁盘格式契约
