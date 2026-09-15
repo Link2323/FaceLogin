@@ -64,6 +64,22 @@ STDMETHODIMP CtrlCallback::Invoke(HRESULT hr, ICoreWebView2Controller* ctrl) {
     if (settings) {
         settings->put_AreDefaultContextMenusEnabled(FALSE);
         settings->put_AreDevToolsEnabled(FALSE);
+        // The page is a fixed-form tool UI (no responsive fallback): one
+        // accidental Ctrl+wheel shrinks the CSS viewport and pushes the
+        // capture/save buttons outside the overflow-hidden body, with no way
+        // to scroll to them. Zoom has no user value here — disable it.
+        settings->put_IsZoomControlEnabled(FALSE);
+        // Kill the browser accelerator set entirely: F5/Ctrl+R would reload the
+        // page and reset all enrollment state mid-capture, Ctrl+P pops a print
+        // dialog, F3/Ctrl+F are find keys with no find UI behind them. Keys the
+        // UI relies on (Enter submit, Esc cancel, Tab focus, IME composition,
+        // Ctrl+C/V/A editing in fields and the log viewer) are page-level, not
+        // browser accelerators, and keep working.
+        ICoreWebView2Settings3* settings3 = nullptr;
+        if (SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings3)))) {
+            settings3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
+            settings3->Release();
+        }
         settings->Release();
     }
 
@@ -257,6 +273,31 @@ LRESULT WebviewHost::HandleMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
             nullptr, wv2DataDir.empty() ? nullptr : wv2DataDir.c_str(), nullptr, cb);
         return 0;
     }
+    case WM_GETMINMAXINFO: {
+        // The layout is designed for one size (client 680x600 CSS px) and has
+        // no responsive fallback: a shorter window clips the capture/save
+        // buttons below the non-scrolling screens (pwd page content is 575px
+        // tall), a taller one leaves dead space between the button and the
+        // footer. Clamp the draggable range around the design height instead.
+        // Track sizes are physical px — apply the monitor DPI scale the same
+        // way Run() does for the initial size, so this stays correct if the
+        // user changes display scaling while the app is open.
+        HDC hdc = GetDC(nullptr);
+        float dpiScale = GetDeviceCaps(hdc, LOGPIXELSY) / 96.0f;
+        ReleaseDC(nullptr, hdc);
+        DWORD style = static_cast<DWORD>(GetWindowLongW(hWnd, GWL_STYLE));
+        RECT rcMin = {0, 0, static_cast<int>(420 * dpiScale), static_cast<int>(600 * dpiScale)};
+        RECT rcMax = {0, 0, static_cast<int>(680 * dpiScale), static_cast<int>(600 * dpiScale)};
+        AdjustWindowRect(&rcMin, style, FALSE);
+        AdjustWindowRect(&rcMax, style, FALSE);
+        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+        mmi->ptMinTrackSize.x = rcMin.right - rcMin.left;
+        mmi->ptMinTrackSize.y = rcMin.bottom - rcMin.top;
+        mmi->ptMaxTrackSize.x = rcMax.right - rcMax.left;
+        mmi->ptMaxTrackSize.y = rcMax.bottom - rcMax.top;
+        return 0;
+    }
+
     case WM_SIZE:
         ResizeWebView(hWnd);
         return 0;
