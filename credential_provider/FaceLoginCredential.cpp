@@ -269,7 +269,6 @@ static const wchar_t kWaitingPrompt[] = L"按下任意按键以开始人脸识�
 
 FaceLoginCredential::FaceLoginCredential() {
     InitializeCriticalSection(&m_cs);
-    m_csInitialized = true;
 
     FACELOGIN_DEBUG(L"FaceLoginCredential created");
 }
@@ -287,10 +286,7 @@ FaceLoginCredential::~FaceLoginCredential() {
     // is a use-after-free. Idempotent and safe to call when not running.
     StopInputDetectionThread();
 
-    if (m_csInitialized) {
-        DeleteCriticalSection(&m_cs);
-        m_csInitialized = false;
-    }
+    DeleteCriticalSection(&m_cs);
 
     FACELOGIN_DEBUG(L"FaceLoginCredential destroyed");
 }
@@ -668,7 +664,7 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
     // detection thread is still waiting for user input. Return "not
     // finished" — no credentials yet.
     if (m_state == State::Waiting) {
-        FACELOGIN_INFO(L"GetSerialization: still Waiting for user input");
+        FACELOGIN_DEBUG(L"GetSerialization: still Waiting for user input");
         return S_OK;
     }
 
@@ -810,7 +806,7 @@ void FaceLoginCredential::StartAuth() {
     // transitions are ordered by the auth_interaction_policy guards instead.
 
     if (m_pipeClient && m_pipeClient->IsConnected()) {
-        FACELOGIN_INFO(L"StartAuth: already connected, skipping");
+        FACELOGIN_DEBUG(L"StartAuth: already connected, skipping");
         return;
     }
 
@@ -894,7 +890,7 @@ void FaceLoginCredential::StopInputDetectionThread() {
 
     const bool wasRunning = m_inputThreadRunning;
     if (wasRunning) {
-        FACELOGIN_INFO(L"Stopping input detection thread...");
+        FACELOGIN_DEBUG(L"Stopping input detection thread...");
     }
 
     // Signal only a live watcher. A naturally completed watcher merely needs
@@ -921,7 +917,7 @@ void FaceLoginCredential::StopInputDetectionThread() {
 
     m_inputThreadRunning = false;
     if (wasRunning) {
-        FACELOGIN_INFO(L"Input detection thread stopped");
+        FACELOGIN_DEBUG(L"Input detection thread stopped");
     }
 }
 

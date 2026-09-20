@@ -174,5 +174,4 @@ private:
 
     // Synchronization
     CRITICAL_SECTION m_cs;
-    bool m_csInitialized = false;
 };

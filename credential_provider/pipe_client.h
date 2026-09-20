@@ -60,6 +60,7 @@ public:
 private:
     static DWORD WINAPI ReadThreadProc(LPVOID param);
     void CleanupReadThread();
+    void NotifyReadFailure();
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
     // Written by the read thread (pipe breakage) and by the owning thread

@@ -30,6 +30,14 @@ PipeClient::~PipeClient() {
     }
 }
 
+void PipeClient::NotifyReadFailure() {
+    m_connected = false;
+    // The callback can destroy this client. Copy it before invoking it and
+    // do not access members afterwards, including at the call site.
+    auto onResponse = m_onResponse;
+    if (onResponse) onResponse(false, L"");
+}
+
 void PipeClient::CleanupReadThread() {
     if (m_hReadThread) {
         // AUTH_SUCCESS can synchronously trigger CredentialsChanged ->
@@ -167,9 +175,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
     HANDLE readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!readEvent) {
         FACELOGIN_ERROR(L"CreateEvent for pipe read failed: %lu", GetLastError());
-        self->m_connected = false;
-        auto onResponse = self->m_onResponse;
-        if (onResponse) onResponse(false, L"");
+        self->NotifyReadFailure();
         return 0;
     }
 
@@ -179,7 +185,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
     wchar_t buffer[4096] = {};
     while (true) {
         if (WaitForSingleObject(self->m_hReadStop, 0) == WAIT_OBJECT_0) {
-            FACELOGIN_INFO(L"Background read: stop signaled — exiting");
+            FACELOGIN_DEBUG(L"Background read: stop signaled — exiting");
             break;
         }
 
@@ -205,7 +211,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
                 CancelIoEx(self->m_hPipe, &overlapped);
                 DWORD ignored = 0;
                 GetOverlappedResult(self->m_hPipe, &overlapped, &ignored, TRUE);
-                FACELOGIN_INFO(L"Background read: stop signaled — I/O cancelled");
+                FACELOGIN_DEBUG(L"Background read: stop signaled — I/O cancelled");
                 break;
             }
             if (wait == WAIT_OBJECT_0 + 1) {
@@ -228,7 +234,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
         // Disconnect may race an immediately-completed read. Teardown wins;
         // discard the completed message instead of issuing a late callback.
         if (WaitForSingleObject(self->m_hReadStop, 0) == WAIT_OBJECT_0) {
-            FACELOGIN_INFO(L"Background read: stop won completion race");
+            FACELOGIN_DEBUG(L"Background read: stop won completion race");
             break;
         }
 
@@ -239,9 +245,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             } else {
                 FACELOGIN_WARN(L"Background overlapped read failed: %lu", error);
             }
-            self->m_connected = false;
-            auto onResponse = self->m_onResponse;
-            if (onResponse) onResponse(false, L"");
+            self->NotifyReadFailure();
             break;
         }
 
