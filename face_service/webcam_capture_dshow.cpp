@@ -674,25 +674,27 @@ bool WebcamCaptureDS::GetGainRange(long* pMin, long* pMax, long* pStep) {
     return ok;
 }
 
-bool WebcamCaptureDS::GetGain(long* pValue) {
+bool WebcamCaptureDS::GetGain(long* pValue, bool* pManual) {
     *pValue = 0;
+    if (pManual) *pManual = false;
     if (!m_pCapture) return false;
     IAMVideoProcAmp* procAmp = nullptr;
     if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
         return false;
     long flags = 0;
     const bool ok = SUCCEEDED(procAmp->Get(VideoProcAmp_Gain, pValue, &flags));
+    if (ok && pManual) *pManual = (flags & VideoProcAmp_Flags_Manual) != 0;
     procAmp->Release();
     return ok;
 }
 
-bool WebcamCaptureDS::SetGain(long value) {
+bool WebcamCaptureDS::SetGain(long value, bool manual) {
     if (!m_pCapture) return false;
     IAMVideoProcAmp* procAmp = nullptr;
     if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
         return false;
     const bool ok = SUCCEEDED(procAmp->Set(VideoProcAmp_Gain, value,
-                                           VideoProcAmp_Flags_Manual));
+                                             manual ? VideoProcAmp_Flags_Manual : VideoProcAmp_Flags_Auto));
     procAmp->Release();
     return ok;
 }
@@ -712,25 +714,27 @@ bool WebcamCaptureDS::GetExposureRange(long* pMin, long* pMax, long* pStep) {
     return ok;
 }
 
-bool WebcamCaptureDS::GetExposure(long* pValue) {
+bool WebcamCaptureDS::GetExposure(long* pValue, bool* pManual) {
     *pValue = 0;
+    if (pManual) *pManual = false;
     if (!m_pCapture) return false;
     IAMCameraControl* camCtrl = nullptr;
     if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
         return false;
     long flags = 0;
     const bool ok = SUCCEEDED(camCtrl->Get(CameraControl_Exposure, pValue, &flags));
+    if (ok && pManual) *pManual = (flags & CameraControl_Flags_Manual) != 0;
     camCtrl->Release();
     return ok;
 }
 
-bool WebcamCaptureDS::SetExposure(long value) {
+bool WebcamCaptureDS::SetExposure(long value, bool manual) {
     if (!m_pCapture) return false;
     IAMCameraControl* camCtrl = nullptr;
     if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
         return false;
     const bool ok = SUCCEEDED(camCtrl->Set(CameraControl_Exposure, value,
-                                           CameraControl_Flags_Manual));
+                                            manual ? CameraControl_Flags_Manual : CameraControl_Flags_Auto));
     camCtrl->Release();
     return ok;
 }

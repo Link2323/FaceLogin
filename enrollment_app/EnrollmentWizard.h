@@ -171,8 +171,9 @@ private:
     // (2026-09-13: tune landed luma 89, worker read 178 washed-out frames 40 s
     // later), and nothing re-runs the face-priority tune mid-stream. Skips
     // while a capture is in flight so an enrollment sees one stable domain.
+    // A null detection also permits bounded no-face white-out recovery.
     void WatchPreviewExposure(const FrameImage& frame,
-                              const OnnxDetector::Detection& det);
+                              const OnnxDetector::Detection* det);
     // Watch state, frame-thread only (StartPreview initializes before the
     // thread starts; StopPreview joins before anything else touches them).
     std::chrono::steady_clock::time_point m_lastExposureWatch{};

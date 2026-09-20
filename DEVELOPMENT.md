@@ -17,9 +17,9 @@
 
 | 改动目标 | 代码入口 | 联查文档 | 最低验证 |
 |---|---|---|---|
-| 认证循环、活体、识别、超时 | `face_service/FaceService.cpp`、`auth_pipeline.*`、`auth_worker*`、`onnx_models.*` | [`face-service.md`](docs/modules/face-service.md)、[`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | Release 构建 + `AuthWorkerProtocolTest` + `ModelIntegrityTest` + `AuthWorkerLifecycleTest` + 锁屏 |
+| 认证循环、活体、识别、超时 | `face_service/FaceService.cpp`、`auth_pipeline.*`、`auth_worker*`、`onnx_models.*` | [`face-service.md`](docs/modules/face-service.md)、[`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | Release 构建 + `AuthWorkerProtocolTest` + `ModelIntegrityTest` + `AuthWorkerLifecycleTest` + `LivenessTimingTest` + 锁屏 |
 | worker 启动、私有 IPC、Job/超时 | `face_service/auth_worker_client.*`、`auth_worker_protocol.*`、`main.cpp` | [`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | 两个 AuthWorker 测试 + 进程/Job 故障注入 |
-| 曝光/增益调节与参数重放 | `face_service/face_gain_tune.h`、`auth_pipeline.cpp`、`enrollment_app/EnrollmentWizard.cpp` | [`face-service.md`](docs/modules/face-service.md) | Service/Console Release 构建 + `FaceGainTuneTest` + 暗处连续锁屏 |
+| 曝光/增益调节、无脸过曝恢复、首绑前迟到纠正与参数重放 | `face_service/face_gain_tune.h`、`auth_pipeline.cpp`、`enrollment_app/EnrollmentWizard.cpp` | [`face-service.md`](docs/modules/face-service.md) | Service/Console Release 构建 + `FaceGainTuneTest` + `ExposureResponseProbe` 实测响应 + 暗处连续锁屏（含暗光首脸迟到入场）/暗转亮及预览 |
 | 摄像头/Session 0 | `face_service/webcam_capture_dshow.*`、`auth_worker.cpp` | [`face-service.md`](docs/modules/face-service.md) | `CameraLifecycleTest` child 100 轮 + 服务 Session 0 |
 | IPC 字段、终态、缓冲区、ACK/取消 | `common/ipc_protocol.*`、`face_service/pipe_server.*`、`credential_provider/pipe_client.*`、`enrollment_app/EnrollmentWizard.cpp` | [`ipc.md`](docs/contracts/ipc.md) | 三端构建 + `IpcProtocolTest` + `PipeLifecycleTest` + 断开/超长消息 |
 | 人脸匹配、多人脸、`users.dat` | `face_service/credential_store.*`、`enrollment_app/EnrollmentWizard.*`、`credential_provider/FaceLoginProvider.cpp`（header） | [`users-dat.md`](docs/contracts/users-dat.md) | `CredentialStoreTest` + 保存/重载/匹配 |

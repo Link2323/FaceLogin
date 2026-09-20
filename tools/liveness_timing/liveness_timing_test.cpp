@@ -95,6 +95,54 @@ void TestTimerBaseIsFirstDetection() {
     Check(timing.AnyFaceSeen(), "any-face-seen latch survives reappearance");
 }
 
+// Suspend/Resume shifts every timer origin by the paused span: a bounded
+// pre-binding exposure correction is sensor settling (capture preparation),
+// not liveness evaluation, and must not burn the empty-scene, attack or
+// window budgets while the loop is not evaluating frames.
+void TestSuspendPausesEmptySceneClock() {
+    LivenessTiming timing{At(0.0)};
+    timing.Suspend(At(1.0));
+    timing.Resume(At(3.5));  // 2.5 s correction before any face is seen
+    Check(!timing.ShouldFailEmptyScene(At(3.4)),
+          "empty-scene timer pauses while the sensor settles");
+    Check(timing.ShouldFailEmptyScene(At(5.1)),
+          "empty-scene fast fail fires 2.5s of ACTIVE evaluation after resume");
+    Check(!timing.WindowExpired(At(8.0)), "8s PAD window pauses with the correction");
+    Check(timing.WindowExpired(At(10.5)), "8s window expires 8s after the shifted origin");
+}
+
+void TestSuspendPausesAttackClock() {
+    // A face seen before the correction (e.g. an unmatched Retry frame that
+    // was never counted) keeps its attack clock relative to active time.
+    LivenessTiming timing{At(0.0)};
+    timing.OnFaceDetected(At(1.0));
+    timing.Suspend(At(1.5));
+    timing.Resume(At(4.5));  // 3 s correction
+    Check(!timing.ShouldFailPersistentAttack(At(5.9)),
+          "attack clock pauses while the sensor settles");
+    Check(timing.ShouldFailPersistentAttack(At(6.1)),
+          "attack verdict still arrives 2s of active time after the first face");
+}
+
+void TestResumeWithoutSuspendIsNoOp() {
+    LivenessTiming timing{At(0.0)};
+    timing.Resume(At(9.0));
+    Check(timing.ShouldFailEmptyScene(At(2.6)),
+          "Resume without Suspend shifts nothing");
+}
+
+void TestBackToBackSuspendsAccumulate() {
+    LivenessTiming timing{At(0.0)};
+    timing.Suspend(At(1.0));
+    timing.Resume(At(2.0));
+    timing.Suspend(At(3.0));
+    timing.Resume(At(5.0));  // total shift 3.0 s
+    Check(!timing.ShouldFailEmptyScene(At(5.4)),
+          "two corrections shift the empty-scene clock by their total span");
+    Check(timing.ShouldFailEmptyScene(At(5.6)),
+          "empty-scene fast fail still fires after the accumulated shift");
+}
+
 } // namespace
 
 int main() {
@@ -103,6 +151,10 @@ int main() {
     TestPersistentAttackTimesFromFirstFace();
     TestPassDisablesAttackFastFail();
     TestTimerBaseIsFirstDetection();
+    TestSuspendPausesEmptySceneClock();
+    TestSuspendPausesAttackClock();
+    TestResumeWithoutSuspendIsNoOp();
+    TestBackToBackSuspendsAccumulate();
     if (g_failures == 0) {
         std::printf("LivenessTimingTest: all checks passed\n");
     }

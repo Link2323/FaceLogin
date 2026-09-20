@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cwchar>
+#include <deque>
 #include <functional>
 #include <string>
 #include <thread>
@@ -22,14 +23,12 @@ namespace facelogin {
 // dark-domain identity distance +0.25..0.3; BLC and the recognizer-side
 // low-light stretch both measured ineffective on 2026-09-09).
 //
-// Two knobs, tried in this order:
-//   1. Exposure time (IAMCameraControl) — the only knob that adds photons.
-//      Seizing it also removes the AE axis that silently cancels gain.
-//   2. Analog gain (VideoProcAmp_Gain) — amplification only. On the
-//      2026-09-10 camera (external vid_32e6) this knob proved DEAD: the
-//      driver accepted every set while face luma stayed flat (0→36→45→55
-//      gain, luma 17–29 throughout), so a knob that fails to move luma is
-//      abandoned early instead of burning the budget.
+// Keep a usable face at the shortest practical exposure: pin AE before
+// measuring gain response, try gain before lengthening exposure, and reclaim
+// a long exposure when one shorter step still has a conservative luma margin.
+// Gain response is measured, never assumed; dead/absent gain falls back to
+// photons. Detection and brightness are capture-quality evidence only:
+// identity and PAD still decide whether any frame can authenticate.
 //
 // Two-sided: manual settings persist across graph builds (observed), so a
 // long exposure tuned in a dark room would white-out a bright scene with no
@@ -68,25 +67,21 @@ struct GainTuneConfig {
     // the controller took one extra step every time, declared the working
     // exposure knob "dead" on the way up and drafted gain into the loop —
     // the preview ping-ponged -2↔-4 with gain ratcheting 39→48→54→58.
-    // A reading is trusted only after settleMs of wall time AND two
-    // consecutive samples agreeing.
+    // Prefer response + plateau + low trend; unchanged pre-write frames
+    // must wait settleMs. Both paths require a stable window (see gate).
     int settleFrames = 40;        // per-step sample cap (≈1.3 s at 30 fps)
     float settleTol = 6.0f;       // consecutive readings within this = converged
-    int settleMs = 900;           // minimum wall time per step before trusting
+    int settleMs = 900;           // fallback delay when no directional response is proven
+    // Early completion needs an observed directional response followed by
+    // a tighter 200 ms plateau. Unchanged pre-write frames cannot qualify.
+    int responseStableMs = 200;
+    float maxSettleDriftPerSecond = 2.0f; // reject a quiet-looking but continuing ramp
     float maxGainBoostFraction = 0.67f;    // of the span above the start value
     float maxExposureBoostFraction = 0.5f; // lower: long exposures throttle fps
-    // Dark-side triggers this close to the band floor (firstLuma >=
-    // minFaceLuma * gainFirstFraction) take the GAIN actuator first: one
-    // exposure granule is ~2× photons — massively oversized for a few-unit
-    // deficit — and the landed state is a permanent tax, because the camera
-    // delivers ~1 frame per exposure time (-4 = 62.5 ms → ~16 fps: first
-    // frame +140 ms and warmup +170 ms on every later round; 2026-09-13
-    // evening, a 3-unit deficit stepped -5→-4). Amplification costs no frame
-    // time, and identity/PAD passed every gain state observed so far
-    // (0–55). If gain cannot reach the band, the exposure pass runs as
-    // below; genuine dark (below the fraction) still goes photons-first.
-    // 0 disables the bypass.
-    float gainFirstFraction = 0.75f;
+    // Stop proactive shortening at 1/32 s, enough for the requested 30 fps.
+    // Shorter exposures may still be needed to correct an over-bright face.
+    // This is a preference, not a hard cap: low light can retain longer times.
+    long preferredExposureValue = -5;
     float deadKnobRise = 3.0f;    // a knob moving luma less than this per step
                                   // is fake/unwired — abandoned after 2 dead steps
     int maxGrabAttempts = 40;     // per distinct frame, bounds a dead camera
@@ -127,6 +122,7 @@ struct SensorKnobs {
     std::function<bool(long& minOut, long& maxOut, long& stepOut)> gainRange;
     std::function<bool(long& valueOut)> gainGet;
     std::function<bool(long value)> gainSet;      // Manual flag
+    std::function<bool(bool& manual)> exposureIsManual;
 };
 
 // ---------------------------------------------------------------------------
@@ -241,13 +237,14 @@ struct KnobTrio {
     const std::function<bool(long&)>& get;
     const std::function<bool(long)>& set;
     float boostFraction;
-    bool fineDown = false;  // down steps take single granules (see StepKnob)
+    bool fineDown = false;  // exposure: both directions take single granules
     long upCap = LONG_MAX;  // bright-direction ceiling in driver units;
                             // LONG_MAX = uncapped (gain). Exposure passes the
                             // config cap — long exposures throttle fps (see
                             // GainTuneConfig::exposureUpCapValue).
     bool adaptiveGain = false; // gain only: use settled step response to approach
                                // an interior target without repeated tiny steps
+    const wchar_t* name = L"knob"; // diagnostics only
 };
 
 // One distinct (per frame-sequence) grab, rotated, detected, measured.
@@ -283,6 +280,125 @@ inline bool KnobReady(const std::function<bool(long&, long&, long&)>& range,
     return static_cast<bool>(range) && static_cast<bool>(set);
 }
 
+// Pure wall-time gate, also replayed against real-camera response CSVs.
+// 900 ms remains the no-response fallback; it is not a mandatory delay when
+// the actuator has visibly responded and its new output has stopped moving.
+class FaceSettleGate {
+public:
+    FaceSettleGate(const GainTuneConfig& cfg, float before, int direction)
+        : cfg_(cfg), before_(before), direction_(direction) {}
+    bool Feed(float luma, long long elapsedMs) {
+        if (!std::isfinite(luma) || luma < 0 || elapsedMs < lastMs_) return false;
+        const bool fallback = prev_ >= 0 && elapsedMs >= cfg_.settleMs &&
+                              std::fabs(luma - prev_) <= cfg_.settleTol;
+        prev_ = luma;
+        lastMs_ = elapsedMs;
+        // Zero delay is reserved for deterministic controller tests.
+        if (cfg_.settleMs == 0) {
+            if (fallback) confirmedEarly_ = false;
+            return fallback;
+        }
+        const float responseFloor = std::max(cfg_.settleTol, std::fabs(before_) * 0.05f);
+        plateau_.push_back({elapsedMs, luma});
+        // Keep a contiguous window whose total range fits the tighter band.
+        while (!plateau_.empty()) {
+            float lo = luma, hi = luma;
+            for (const auto& item : plateau_) {
+                lo = std::min(lo, item.second);
+                hi = std::max(hi, item.second);
+            }
+            if (hi - lo <= cfg_.settleTol * 0.5f) break;
+            plateau_.pop_front();
+        }
+        if (plateau_.size() < 4 ||
+            elapsedMs - plateau_.front().first < cfg_.responseStableMs) return false;
+        bool responseObserved = direction_ != 0 && before_ >= 0;
+        for (const auto& item : plateau_)
+            if ((item.second - before_) * direction_ < responseFloor) responseObserved = false;
+        if (!fallback && !responseObserved) return false;
+        // A small range alone accepts the early flat-looking part of a slow
+        // ramp. Regress brightness against time to reject residual drift.
+        double sumT = 0, sumY = 0, sumTT = 0, sumTY = 0;
+        for (const auto& [ms, value] : plateau_) {
+            const double t = (ms - plateau_.front().first) / 1000.0;
+            sumT += t; sumY += value; sumTT += t*t; sumTY += t*value;
+        }
+        const double n = static_cast<double>(plateau_.size());
+        const double denom = n*sumTT - sumT*sumT;
+        const bool confirmed = denom > 0 && std::fabs((n*sumTY - sumT*sumY) / denom) <=
+                               cfg_.maxSettleDriftPerSecond;
+        if (confirmed) confirmedEarly_ = !fallback;
+        return confirmed;
+    }
+    // Valid after Feed returned true: confirmed by observed directional
+    // response + plateau before the settleMs floor, vs the no-response floor.
+    bool ConfirmedEarly() const { return confirmedEarly_; }
+private:
+    const GainTuneConfig& cfg_;
+    float before_;
+    int direction_;
+    float prev_ = -1.0f;
+    long long lastMs_ = -1;
+    bool confirmedEarly_ = false;
+    std::deque<std::pair<long long, float>> plateau_;
+};
+
+// Shared gate for actuator writes. A face lost during settling, cancellation
+// or the sample cap never authorizes another write or persistence. Every exit
+// logs one line: how long the knob wait took and, on failure, why the
+// measurement was not confirmed (post-mortem 2026-09-19 17:46:32: a 151 ms
+// "unconfirmed" with all-knob "n/a" left the reason guessable).
+inline bool SettleFace(const std::function<bool(float&)>& measure,
+                       const std::function<bool()>& isCancelled,
+                       const GainTuneConfig& cfg, float& luma,
+                       float before = -1.0f, int direction = 0) {
+    const auto start = std::chrono::steady_clock::now();
+    FaceSettleGate gate(cfg, before, direction);
+    for (int f = 0; f < cfg.settleFrames; ++f) {
+        float sample = -1.0f;
+        if (isCancelled() || !measure(sample) || isCancelled() ||
+            !std::isfinite(sample) || sample < 0.0f) {
+            FACELOGIN_INFO(L"Sensor settle unconfirmed after %lld ms: %s",
+                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - start).count(),
+                           isCancelled() ? L"cancelled" : L"face lost or grab failed");
+            return false;
+        }
+        if (gate.Feed(sample, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - start).count())) {
+            luma = sample;
+            FACELOGIN_INFO(L"Sensor settle: face luma %.0f after %lld ms (%s)",
+                           sample,
+                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - start).count(),
+                           gate.ConfirmedEarly()
+                               ? L"early — response + plateau"
+                               : L"no-response floor");
+            return true;
+        }
+    }
+    FACELOGIN_INFO(L"Sensor settle unconfirmed after %lld ms: sample budget (%d frames) "
+                   L"without a stable window",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start).count(),
+                   cfg.settleFrames);
+    return false;
+}
+
+// Only shorten if the next driver granule is predicted to retain the full
+// brightness floor plus hysteresis margin. Never speculate by doubling gain
+// and halving exposure together: that assumes an unmeasured gain transfer.
+inline bool CanShortenExposure(float luma, const SensorKnobs& knobs,
+                                const GainTuneConfig& cfg) {
+    long mn = 0, mx = 0, step = 0, cur = 0;
+    if (!knobs.exposureRange || !knobs.exposureGet || !knobs.exposureSet ||
+        !knobs.exposureRange(mn, mx, step) || !knobs.exposureGet(cur) ||
+        mn >= 0 || mn > mx || cur < mn || cur > mx || step <= 0 || step > 16 ||
+        cur <= cfg.preferredExposureValue ||
+        static_cast<long long>(cur) - step < std::max(mn, cfg.preferredExposureValue)) return false;
+    return luma > (cfg.minFaceLuma + cfg.settleTol) * std::exp2(static_cast<float>(step));
+}
+
 // Climb one knob toward the band ("up") or down from over-bright. Returns
 // steps applied and the final value via out params. A knob that moves luma
 // less than deadKnobRise for two consecutive steps is declared dead — the
@@ -298,8 +414,8 @@ inline int StepKnob(const KnobTrio& knob,
                     int* deadStepsOut = nullptr) {
     long mn = 0, mx = 0, st = 0;
     long cur = 0;
-    if (!knob.range(mn, mx, st)) return 0;
-    if (!knob.get(cur)) return 0;
+    if (!knob.range || !knob.get || !knob.set || !knob.range(mn, mx, st)) return 0;
+    if (!knob.get(cur) || mn > mx || cur < mn || cur > mx) return 0;
     // Ceil the boost span: floor-halving wedged the exposure knob at one
     // unit of headroom — (mx-cur)*0.5 floors to 0, limit==cur, and no step
     // is ever taken again on any later graph init (real logs: repeated
@@ -347,12 +463,9 @@ inline int StepKnob(const KnobTrio& knob,
         const bool predictGain = up && knob.adaptiveGain && gainResponse > 0.0f;
         const long delta = up ? (predictGain ? mx : limit) - cur : cur - limit;
         if (delta <= 0) break;
-        // Up: ceil of half the remaining span — exponential ratchet toward the
-        // top, one init at a time. Down on a fineDown knob (exposure): single
-        // granules, each settle-measured — exposure units are potent (about a
-        // doubling each) and a halved span from a mild over-bright crashes
-        // deep into the dark side and flip-flops across inits. Gain units are
-        // small and near-linear, so it halves its span both ways.
+        // Gain uses half-span or measured-response prediction. Exposure
+        // takes one granule in either direction to avoid unnecessary long
+        // exposure and over-bright/dark oscillation between graph inits.
         long move;
         if (predictGain) {
             // Secant estimate from this round's measured response. Cap the
@@ -363,7 +476,7 @@ inline int StepKnob(const KnobTrio& knob,
             const double bound = std::min(static_cast<double>(delta),
                                            2.0 * measuredMove);
             move = static_cast<long>(std::clamp(requested, 1.0, bound));
-        } else if (up || !knob.fineDown) {
+        } else if (!knob.fineDown) {
             move = (delta + 1) / 2;                        // ceil of half-span
             move = ((move + granule - 1) / granule) * granule;
             move = std::min(std::max(move, 1L), delta);    // clamp to limit
@@ -373,26 +486,19 @@ inline int StepKnob(const KnobTrio& knob,
         const long next = up ? cur + move : cur - move;
         if ((up && next <= cur) || (!up && next >= cur)) break;
         if (!knob.set(next)) break;
+        const long prevVal = cur;
         cur = next;
         ++steps;
         measurementValid = false;
         float measured = -1.0f;
-        bool alive = true;
-        float prev = -1.0f;
-        const auto settleStart = std::chrono::steady_clock::now();
-        for (int f = 0; f < cfg.settleFrames && alive; ++f) {
-            alive = !isCancelled() && measure(measured) &&
-                    std::isfinite(measured) && measured >= 0.0f;
-            if (!alive) break;
-            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - settleStart).count();
-            if (prev >= 0.0f && elapsedMs >= cfg.settleMs &&
-                std::fabs(measured - prev) <= cfg.settleTol) {
-                measurementValid = true;
-                break;  // past the actuator lag and settled on the new value
-            }
-            prev = measured;
-        }
+        const auto stepStart = std::chrono::steady_clock::now();
+        measurementValid = SettleFace(measure, isCancelled, cfg, measured, luma, up ? 1 : -1);
+        FACELOGIN_INFO(L"Tune step: %s %ld→%ld, face luma %.0f→%.0f — %s (%lld ms)",
+                       knob.name, prevVal, cur, luma, measured,
+                       measurementValid ? L"settled" : L"unconfirmed",
+                       static_cast<long long>(
+                           std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - stepStart).count()));
         // A sample-budget exit is not proof that the write has settled.
         // Do not persist it or stack another knob write on stale readings.
         if (!measurementValid) break;
@@ -420,8 +526,8 @@ inline int StepKnob(const KnobTrio& knob,
 
 } // namespace detail
 
-// Core entry: `firstLuma` is an already-measured face luma (either outside
-// [minFaceLuma, maxFaceLuma], or inside — in which case this is a no-op).
+// Core entry: firstLuma is an already-measured face luma. In-band scenes
+// are a no-op unless there is enough light to reclaim a slow exposure.
 // Returns the number of steps applied on any knob. Always logs one summary
 // line when action was attempted.
 inline int TuneFaceExposure(float firstLuma,
@@ -430,7 +536,8 @@ inline int TuneFaceExposure(float firstLuma,
                             const std::function<bool()>& isCancelled,
                             const GainTuneConfig& cfg = {}) {
     if (!std::isfinite(firstLuma) || firstLuma < 0.0f || isCancelled()) return 0;
-    if (firstLuma >= cfg.minFaceLuma && firstLuma <= cfg.maxFaceLuma) {
+    const bool shorten = detail::CanShortenExposure(firstLuma, knobs, cfg);
+    if (firstLuma >= cfg.minFaceLuma && firstLuma <= cfg.maxFaceLuma && !shorten) {
         // In-band: whatever the knobs hold right now is a certified combo —
         // refresh the persisted state so the next camera init can replay it
         // even after the driver forgets its manual controls.
@@ -459,34 +566,77 @@ inline int TuneFaceExposure(float firstLuma,
         return gainText + wcslen(gainText);
     };
 
-    // Marginal-dark: the deficit is smaller than one exposure granule's
-    // worth of sense — let the fine actuator (gain, no frame-time cost)
-    // try first. Skipped when the gain knob is unsupported, and only on
-    // the dark side: over-bright recovery is exposure's job regardless.
-    const bool gainFirst = up && cfg.gainFirstFraction > 0.0f &&
-                           firstLuma >= cfg.minFaceLuma * cfg.gainFirstFraction;
-    if (gainFirst && detail::KnobReady(knobs.gainRange, knobs.gainSet)) {
+    // AE can silently cancel gain. Freeze its current exposure (without
+    // lengthening it), then measure a settled face before trying gain.
+    bool manual = false;
+    const bool knownManual = knobs.exposureIsManual && knobs.exposureIsManual(manual) && manual;
+    bool gainFirst = up && knownManual;
+    if (up && !knownManual && knobs.exposureGet && knobs.exposureSet) {
+        long current = 0;
+        if (knobs.exposureGet(current) && !isCancelled() && knobs.exposureSet(current)) {
+            ++steps;
+            const float beforeTakeover = luma;
+            const auto takeoverStart = std::chrono::steady_clock::now();
+            measurementValid = detail::SettleFace(measure, isCancelled, cfg, luma);
+            FACELOGIN_INFO(L"AE takeover: exposure pinned at %ld, face luma %.0f→%.0f — "
+                           L"%s (%lld ms)",
+                           current, beforeTakeover, luma,
+                           measurementValid ? L"settled" : L"unconfirmed",
+                           static_cast<long long>(
+                               std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - takeoverStart).count()));
+            gainFirst = measurementValid;
+        } else {
+            measurementValid = false;
+            FACELOGIN_INFO(L"AE takeover unavailable — gain tuning skipped this round");
+        }
+    }
+    int gainSteps = 0;
+    if (measurementValid && gainFirst && detail::KnobReady(knobs.gainRange, knobs.gainSet)) {
         const detail::KnobTrio gain{
             knobs.gainRange, knobs.gainGet, knobs.gainSet,
-            cfg.maxGainBoostFraction, false, LONG_MAX, true};
+            cfg.maxGainBoostFraction, false, LONG_MAX, true, L"gain"};
         wchar_t* seg = gainSeg();
-        steps += detail::StepKnob(gain, true, luma, measure, isCancelled,
-                                  cfg, seg,
-                                  96 - static_cast<size_t>(seg - gainText),
-                                  measurementValid, &gainDeadSteps);
+        gainSteps = detail::StepKnob(gain, true, luma, measure, isCancelled,
+                                    cfg, seg, 96 - static_cast<size_t>(seg - gainText),
+                                    measurementValid, &gainDeadSteps);
+        steps += gainSteps;
     }
-    // Exposure next — photons beat amplification for genuine dark, and
-    // seizing the exposure axis removes the AE feedback that cancels gain
-    // adjustments. The climb stops at the config cap: past it each doubling
-    // halves the camera's frame rate and the pacing guard stops binding.
-    // Skipped when the gain-first pass already landed in band.
-    if (measurementValid && !(gainFirst && luma >= cfg.minFaceLuma) &&
+    long gainMin = 0, gainMax = 0, gainStep = 0, gainCurrent = 0;
+    const bool gainHasHeadroom = knobs.gainRange && knobs.gainGet && knobs.gainSet &&
+        knobs.gainRange(gainMin, gainMax, gainStep) && knobs.gainGet(gainCurrent) &&
+        gainCurrent < gainMax && gainDeadSteps < 2;
+    const bool gainBudgetPending = gainFirst && gainSteps >= cfg.maxSteps && gainHasHeadroom;
+    // Exposure uses SINGLE granules in both directions. A jump of several
+    // stops overshoots and commits a permanent frame-rate penalty. Gain has
+    // already had its chance to retain the shorter capture time.
+    if (measurementValid && !gainBudgetPending &&
+        (luma < cfg.minFaceLuma || luma > cfg.maxFaceLuma || shorten) &&
         detail::KnobReady(knobs.exposureRange, knobs.exposureSet)) {
         const detail::KnobTrio exposure{
             knobs.exposureRange, knobs.exposureGet, knobs.exposureSet,
-            cfg.maxExposureBoostFraction, true, cfg.exposureUpCapValue};
-        steps += detail::StepKnob(exposure, up, luma, measure, isCancelled,
+            cfg.maxExposureBoostFraction, true, cfg.exposureUpCapValue,
+            false, L"exposure"};
+        steps += detail::StepKnob(exposure, luma < cfg.minFaceLuma, luma, measure, isCancelled,
                                   cfg, expText, 96, measurementValid);
+    }
+    // An in-band face can still be using an unnecessarily slow exposure.
+    // Only reclaim a step with a predicted post-step luma > floor + margin.
+    // Verify each step, stop immediately if its response differs, and let
+    // the normal gain/fallback stages repair any measured underexposure.
+    for (int attempt = 0; measurementValid && attempt < cfg.maxSteps &&
+         detail::CanShortenExposure(luma, knobs, cfg); ++attempt) {
+        long cur = 0, mn = 0, mx = 0, granule = 0;
+        if (isCancelled()) { measurementValid = false; break; }
+        if (!knobs.exposureGet(cur) || !knobs.exposureRange(mn, mx, granule) ||
+            !knobs.exposureSet(cur - granule)) break;
+        ++steps;
+        const float before = luma;
+        measurementValid = detail::SettleFace(measure, isCancelled, cfg, luma, before, -1);
+        FACELOGIN_INFO(L"Short exposure preference: %ld→%ld, face %.0f→%.0f (%s)",
+                       cur, cur - granule, before, luma,
+                       measurementValid ? L"settled" : L"unconfirmed");
+        if (!measurementValid || before - luma < cfg.deadKnobRise) break;
     }
     // Gain is the fine actuator — and the designated lifter once exposure
     // caps out: amplification adds no frame time. Exposure is quantized in
@@ -500,14 +650,17 @@ inline int TuneFaceExposure(float firstLuma,
     // read face luma 178).
     const bool gainUp = luma < cfg.targetLumaLow;
     const bool gainDown = luma > cfg.targetLumaHigh;
-    if (measurementValid && (gainUp || gainDown) &&
+    if (measurementValid && (gainUp || gainDown) && gainDeadSteps < 2 &&
+        (!gainUp || gainSteps < cfg.maxSteps) &&
         detail::KnobReady(knobs.gainRange, knobs.gainSet)) {
         const detail::KnobTrio gain{
             knobs.gainRange, knobs.gainGet, knobs.gainSet,
-            cfg.maxGainBoostFraction, false, LONG_MAX, true};
+            cfg.maxGainBoostFraction, false, LONG_MAX, true, L"gain"};
         wchar_t* seg = gainSeg();
+        GainTuneConfig remaining = cfg;
+        if (gainUp) remaining.maxSteps -= gainSteps;
         steps += detail::StepKnob(gain, gainUp, luma, measure,
-                                  isCancelled, cfg, seg,
+                                  isCancelled, remaining, seg,
                                   96 - static_cast<size_t>(seg - gainText),
                                   measurementValid, &gainDeadSteps);
     }
@@ -516,7 +669,7 @@ inline int TuneFaceExposure(float firstLuma,
     // in-band can reach. Spend frame rate for photons: one uncapped
     // exposure pass. ~8 fps beats an underexposed face that misses the
     // identity threshold entirely.
-    bool gainExhausted = !detail::KnobReady(knobs.gainRange, knobs.gainSet);
+    bool gainExhausted = !knobs.gainGet || !detail::KnobReady(knobs.gainRange, knobs.gainSet);
     if (!gainExhausted) {
         long gmn = 0, gmx = 0, gstp = 0, gcur = 0;
         gainExhausted = gainDeadSteps >= 2 ||
@@ -530,7 +683,7 @@ inline int TuneFaceExposure(float firstLuma,
         if (expLen > 0 && expLen + 2 < 96) wcscpy_s(expText + expLen, 96 - expLen, L"; ");
         const detail::KnobTrio uncappedExposure{
             knobs.exposureRange, knobs.exposureGet, knobs.exposureSet,
-            cfg.maxExposureBoostFraction, true};
+            cfg.maxExposureBoostFraction, true, LONG_MAX, false, L"exposure"};
         // Direction is always "brighten": the trigger is luma below the
         // band floor, so an over-bright entry that overshot past it must
         // climb back — `up` would darken here.
@@ -542,7 +695,7 @@ inline int TuneFaceExposure(float firstLuma,
 
     FACELOGIN_INFO(L"Face exposure tune: face luma %.0f (%s) → exposure %s, gain %s → "
                    L"face luma now %.0f (target %.0f–%.0f, %s) — %lld ms",
-                   firstLuma, up ? L"dark" : L"over-bright", expText, gainText,
+                   firstLuma, up ? L"dark" : (shorten ? L"shorten" : L"over-bright"), expText, gainText,
                     luma, cfg.minFaceLuma, cfg.maxFaceLuma,
                     measurementValid ? L"settled" : L"unconfirmed",
                    static_cast<long long>(
@@ -576,9 +729,93 @@ inline int TuneFaceExposure(float firstLuma,
     }, isCancelled, cfg);
 }
 
+// Conservative white-out evidence: widespread clipping, including every
+// central tile. A bright window around a dark central face must not trigger
+// full-frame metering. This is a recovery heuristic, not an identity signal.
+inline bool IsSceneWhiteout(const FrameImage& frame) {
+    if (frame.nr() < 5 || frame.nc() < 5) return false;
+    int clippedTiles = 0;
+    for (int ty = 0; ty < 5; ++ty) {
+        for (int tx = 0; tx < 5; ++tx) {
+            int count = 0, clipped = 0;
+            for (long y = ty * frame.nr() / 5; y < (ty + 1) * frame.nr() / 5; y += 4) {
+                for (long x = tx * frame.nc() / 5; x < (tx + 1) * frame.nc() / 5; x += 4) {
+                    const auto& p = frame(y, x);
+                    ++count;
+                    if (0.299 * p.red + 0.587 * p.green + 0.114 * p.blue >= 245.0) ++clipped;
+                }
+            }
+            const bool saturated = count > 0 && clipped * 10 >= count * 7;
+            if (tx >= 1 && tx <= 3 && ty >= 1 && ty <= 3 && !saturated) return false;
+            if (saturated) ++clippedTiles;
+        }
+    }
+    return clippedTiles >= 20;
+}
+
+struct WhiteoutSample {
+    bool whiteout = false;
+    float faceLuma = -1.0f;
+};
+
+// Bounded no-face escape path. Each measurement must be a fresh frame.
+// Confirm the initial scene for a full actuator-lag window too: the host
+// may just have replayed manual controls. Never persist no-face settings.
+// recoveredLuma is valid only after a settled face observation, allowing
+// the caller to hand back to face-priority tuning without stacking writes.
+inline int RecoverSceneWhiteout(
+    const SensorKnobs& knobs,
+    const std::function<bool(WhiteoutSample&)>& measure,
+    const std::function<bool()>& isCancelled,
+    float& recoveredLuma,
+    const GainTuneConfig& cfg = {}) {
+    recoveredLuma = -1.0f;
+    if (!knobs.exposureRange || !knobs.exposureGet || !knobs.exposureSet) return 0;
+    int steps = 0;
+    while (true) {
+        const auto start = std::chrono::steady_clock::now();
+        WhiteoutSample prev;
+        bool havePrev = false, settled = false;
+        WhiteoutSample sample;
+        for (int f = 0; f < cfg.settleFrames; ++f) {
+            if (isCancelled() || !measure(sample)) return steps;
+            // No evidence at entry: leave ordinary empty/dark scenes alone.
+            if (steps == 0 && !sample.whiteout && sample.faceLuma < 0.0f) return 0;
+            const bool face = std::isfinite(sample.faceLuma) && sample.faceLuma >= 0.0f;
+            const bool prevFace = std::isfinite(prev.faceLuma) && prev.faceLuma >= 0.0f;
+            const bool agrees = havePrev && face == prevFace &&
+                (face ? std::fabs(sample.faceLuma - prev.faceLuma) <= cfg.settleTol
+                      : sample.whiteout == prev.whiteout);
+            if (agrees && std::chrono::steady_clock::now() - start >=
+                               std::chrono::milliseconds(cfg.settleMs)) {
+                settled = true;
+                break;
+            }
+            prev = sample;
+            havePrev = true;
+        }
+        if (!settled || isCancelled()) return steps;
+        if (sample.faceLuma >= 0.0f && std::isfinite(sample.faceLuma)) {
+            recoveredLuma = sample.faceLuma;
+            return steps;
+        }
+        if (!sample.whiteout || steps >= cfg.maxSteps) return steps;
+        long mn = 0, mx = 0, step = 0, cur = 0;
+        if (!knobs.exposureRange(mn, mx, step) || !knobs.exposureGet(cur) ||
+            mn > mx || cur <= mn || cur > mx || step <= 0) return steps;
+        const long next = static_cast<long>(std::max(static_cast<long long>(mn),
+            static_cast<long long>(cur) - step));
+        if (isCancelled() || !knobs.exposureSet(next)) return steps;
+        ++steps;
+        FACELOGIN_INFO(L"No-face whiteout recovery: exposure %ld→%ld (%d/%d)",
+                       cur, next, steps, cfg.maxSteps);
+    }
+}
+
 // Self-contained variant for hosts without a warmup-produced detection
 // (console preview): measures the trigger on a fresh distinct frame, then
-// delegates. Silent when no face is visible — an empty room is normal.
+// delegates. No-face white-out gets a bounded recovery; normal empty rooms
+// stay silent and retain their controls.
 inline int TuneFaceExposure(const SensorKnobs& knobs,
                             const std::function<bool(FrameImage&, unsigned long long&)>& grab,
                             OnnxDetector& detector,
@@ -589,6 +826,7 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
     unsigned long long lastSeq = 0;
     bool haveSeq = false;
     for (int attempt = 0; attempt < cfg.maxGrabAttempts; ++attempt) {
+        if (isCancelled()) return 0;
         FrameImage frame;
         unsigned long long seq = 0;
         if (grab(frame, seq) && (!haveSeq || seq != lastSeq)) {
@@ -596,10 +834,36 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
             lastSeq = seq;
             RotateFrame(frame, cameraRotation);
             const auto det = detector.DetectLargestFace(frame);
-            if (!det) continue;  // keep waiting for a face within the budget
+            if (!det) {
+                if (!IsSceneWhiteout(frame)) continue;
+                float recoveredLuma = -1.0f;
+                const int steps = RecoverSceneWhiteout(knobs, [&](WhiteoutSample& sample) {
+                    for (int retry = 0; retry < cfg.maxGrabAttempts; ++retry) {
+                        if (isCancelled()) return false;
+                        FrameImage fresh;
+                        unsigned long long freshSeq = 0;
+                        if (grab(fresh, freshSeq) && freshSeq > lastSeq) {
+                            lastSeq = freshSeq;
+                            RotateFrame(fresh, cameraRotation);
+                            const auto face = detector.DetectLargestFace(fresh);
+                            sample.faceLuma = face ? FaceBoxLuma(fresh, *face) : -1.0f;
+                            sample.whiteout = !face && IsSceneWhiteout(fresh);
+                            return true;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    return false;
+                }, isCancelled, recoveredLuma, cfg);
+                if (recoveredLuma >= 0.0f && !isCancelled()) {
+                    return steps + TuneFaceExposure(recoveredLuma, knobs, grab, detector,
+                                                    isCancelled, cameraRotation, cfg);
+                }
+                return steps;
+            }
             const float luma = FaceBoxLuma(frame, *det);
             if (luma < 0.0f) return 0;
-            if (luma >= cfg.minFaceLuma && luma <= cfg.maxFaceLuma) {
+            if (luma >= cfg.minFaceLuma && luma <= cfg.maxFaceLuma &&
+                !detail::CanShortenExposure(luma, knobs, cfg)) {
                 FACELOGIN_INFO(L"Face exposure tune: not needed (face luma %.0f)", luma);
                 if (!cfg.persistPath.empty()) SaveTuneKnobState(cfg.persistPath, knobs);
                 return 0;

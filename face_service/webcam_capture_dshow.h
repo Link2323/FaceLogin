@@ -111,15 +111,16 @@ public:
     bool GrabFrame(FrameImage& outFrame, unsigned long long* frameSequence = nullptr);
     // Sensor-gain controls for the face-priority exposure tune
     // (face_gain_tune.h). All three return false when the driver exposes no
-    // VideoProcAmp gain; SetGain forces the Manual flag.
+    // VideoProcAmp gain; setters default to Manual. Diagnostics may restore
+    // the original Auto mode explicitly after reversible response probes.
     bool GetGainRange(long* pMin, long* pMax, long* pStep);
-    bool GetGain(long* pValue);
-    bool SetGain(long value);
+    bool GetGain(long* pValue, bool* pManual = nullptr);
+    bool SetGain(long value, bool manual = true);
     // Exposure-time controls over IAMCameraControl — same contract as the
     // gain trio. UVC exposure is log2 seconds: larger = brighter.
     bool GetExposureRange(long* pMin, long* pMax, long* pStep);
-    bool GetExposure(long* pValue);
-    bool SetExposure(long value);
+    bool GetExposure(long* pValue, bool* pManual = nullptr);
+    bool SetExposure(long value, bool manual = true);
     void Pause();    // stop graph → camera LED off
     void Shutdown();
 

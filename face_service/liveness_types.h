@@ -57,6 +57,27 @@ struct LivenessTiming {
         }
     }
 
+    // Bracket a pre-binding exposure correction (auth_pipeline.cpp) with
+    // Suspend/Resume: sensor settling is capture preparation, not liveness
+    // evaluation, so the paused span is subtracted by shifting every timer
+    // origin forward. Without this, a bounded tune that starts before the
+    // first counted frame burns the 2.5 s empty-scene budget (and, once a
+    // face has been seen, the 2 s attack budget) while the loop is not even
+    // evaluating frames. The 8 s PAD window pauses with them.
+    void Suspend(TimePoint now) {
+        m_suspendedAt = now;
+        m_suspended = true;
+    }
+    void Resume(TimePoint now) {
+        if (!m_suspended) return;
+        m_suspended = false;
+        const auto shift = now - m_suspendedAt;
+        m_windowStart += shift;
+        m_noFaceStart += shift;
+        // Unread while !m_anyFaceSeen; shifting it anyway keeps one rule.
+        m_firstFaceSeenAt += shift;
+    }
+
     // Call after a frame with a detected face; must never fire on the frame
     // that first sees the face (that face still gets a PAD inference).
     bool ShouldFailPersistentAttack(TimePoint now) const {
@@ -81,6 +102,8 @@ private:
     bool m_anyFaceSeen = false;
     TimePoint m_firstFaceSeenAt{};
     int m_passCount = 0;
+    bool m_suspended = false;
+    TimePoint m_suspendedAt{};
 };
 
 } // namespace facelogin

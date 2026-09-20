@@ -207,6 +207,16 @@ AuthPipelineResult AuthPipeline::Run() {
         // only an actual tune invalidates the seed frame.
         GainTuneConfig tuneCfg;
         tuneCfg.persistPath = m_config.tuneStatePath;
+        if (!seed.valid && !m_callbacks.isCancelled()) {
+            FrameImage fresh;
+            unsigned long long freshSeq = 0;
+            if (m_callbacks.grabFrame(fresh, freshSeq)) {
+                RotateFrame(fresh, m_config.cameraRotation);
+                auto det = m_detector.DetectLargestFace(fresh);
+                seed = Prefetch{true, std::move(fresh), freshSeq, std::move(det),
+                                std::chrono::steady_clock::now()};
+            }
+        }
         // A just-applied replay write needs the driver's lag window (the
         // same ~0.5–1 s family as the tune settle floor) before readings
         // are trustworthy. Judging the trigger on the pre-settle reading
@@ -220,28 +230,73 @@ AuthPipelineResult AuthPipeline::Run() {
         if (replayWrote && seed.valid && seed.det) {
             const float lumaNow = FaceBoxLuma(seed.frame, *seed.det);
             if (lumaNow >= 0.0f &&
-                (lumaNow < tuneCfg.minFaceLuma || lumaNow > tuneCfg.maxFaceLuma)) {
+                (lumaNow < tuneCfg.minFaceLuma || lumaNow > tuneCfg.maxFaceLuma ||
+                 detail::CanShortenExposure(lumaNow, m_callbacks.sensorKnobs, tuneCfg))) {
                 const auto settleUntil =
                     replayAt + std::chrono::milliseconds(tuneCfg.settleMs);
                 FrameImage fresh;
                 unsigned long long freshSeq = 0;
+                unsigned long long lastObserved = seed.seq;
                 while (std::chrono::steady_clock::now() < settleUntil) {
                     if (m_callbacks.isCancelled()) {
                         result.cancelled = true;
                         return result;
                     }
                     if (m_callbacks.grabFrame(fresh, freshSeq)) {
-                        RotateFrame(fresh, m_config.cameraRotation);
+                        lastObserved = std::max(lastObserved, freshSeq);
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(15));
                 }
-                auto freshDet = m_detector.DetectLargestFace(fresh);
-                if (freshDet) {
-                    seed = Prefetch{true, std::move(fresh), freshSeq,
-                                    std::move(freshDet),
-                                    std::chrono::steady_clock::now()};
+                seed = Prefetch{};
+                for (int attempt = 0; attempt < tuneCfg.maxGrabAttempts; ++attempt) {
+                    if (m_callbacks.isCancelled()) {
+                        result.cancelled = true;
+                        return result;
+                    }
+                    if (m_callbacks.grabFrame(fresh, freshSeq) && freshSeq > lastObserved) {
+                        RotateFrame(fresh, m_config.cameraRotation);
+                        auto det = m_detector.DetectLargestFace(fresh);
+                        // A lost face must replace the old detection too, so
+                        // white-out recovery can run instead of using stale luma.
+                        seed = Prefetch{true, std::move(fresh), freshSeq, std::move(det),
+                                        std::chrono::steady_clock::now()};
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
+        }
+        // Post-mortem diagnostic (2026-09-19 17:45:46): a round that failed
+        // with face luma 18 / identity distance 0.989 left NO tune log at all
+        // because its trigger frame had no face to measure. One line here
+        // states the trigger decision and the knob state so "why was tuning
+        // skipped" is always answerable from the log alone.
+        {
+            long expValue = 0, gainValue = 0;
+            bool manual = false;
+            const bool haveExp = m_callbacks.sensorKnobs.exposureGet &&
+                m_callbacks.sensorKnobs.exposureGet(expValue);
+            const bool haveGain = m_callbacks.sensorKnobs.gainGet &&
+                m_callbacks.sensorKnobs.gainGet(gainValue);
+            const bool haveMode = m_callbacks.sensorKnobs.exposureIsManual &&
+                m_callbacks.sensorKnobs.exposureIsManual(manual);
+            float triggerLuma = -1.0f;
+            if (seed.valid && seed.det) triggerLuma = FaceBoxLuma(seed.frame, *seed.det);
+            wchar_t knobsText[96] = L"knobs n/a";
+            if (haveExp || haveGain) {
+                wchar_t expPart[48] = L"exposure n/a";
+                wchar_t gainPart[40] = L"gain n/a";
+                if (haveExp) {
+                    _snwprintf_s(expPart, _TRUNCATE, L"exposure %ld (%s)", expValue,
+                                 haveMode ? (manual ? L"manual" : L"auto") : L"mode n/a");
+                }
+                if (haveGain) _snwprintf_s(gainPart, _TRUNCATE, L"gain %ld", gainValue);
+                _snwprintf_s(knobsText, _TRUNCATE, L"%s, %s", expPart, gainPart);
+            }
+            FACELOGIN_INFO(L"Exposure tune trigger: %s, face luma %.0f — %s",
+                           seed.valid ? (seed.det ? L"face" : L"no face")
+                                      : L"no fresh frame",
+                           triggerLuma, knobsText);
         }
         if (seed.valid && seed.det) {
             const float faceLuma = FaceBoxLuma(seed.frame, *seed.det);
@@ -252,6 +307,13 @@ AuthPipelineResult AuthPipeline::Run() {
                     m_config.cameraRotation, tuneCfg);
                 if (tuneSteps > 0) seed = Prefetch{};
             }
+        } else if (seed.valid && IsSceneWhiteout(seed.frame)) {
+            // Recovery precedes all PAD/identity frames. Never reuse a seed
+            // after this path: controls or the camera stream may have moved.
+            TuneFaceExposure(m_callbacks.sensorKnobs, m_callbacks.grabFrame,
+                             m_detector, m_callbacks.isCancelled,
+                             m_config.cameraRotation, tuneCfg);
+            seed = Prefetch{};
         }
 
         m_callbacks.reportStatus(L"正在识别...");
@@ -299,6 +361,22 @@ AuthPipelineResult AuthPipeline::Run() {
         bool haveLastCounted = false;
         double minCountedGrabIntervalMs = 0.0;
         bool haveMinInterval = false;
+
+        // Pre-binding exposure correction budget (2026-09-19 17:45:46
+        // post-mortem): the pre-loop tune needs a face to measure, so a
+        // trigger frame without one (late walk-up, dark-face miss) or
+        // brightness that drifts after it left the loop matching a dark chip
+        // until the attack timer killed the round — identity distance 0.989
+        // at face luma 18. While NO frame has been counted yet, nothing
+        // contributes to PAD or identity evidence, so sensor writes are still
+        // safe; an out-of-band face luma earns one full tune pass (the gate
+        // lives just below, before the first binding attempt). Two passes
+        // bound the worst case; a face that stays out of band after them
+        // proceeds exactly like the legacy loop.
+        int lateTuneBudget = 2;
+        const bool sensorKnobsWired =
+            static_cast<bool>(m_callbacks.sensorKnobs.exposureSet) ||
+            static_cast<bool>(m_callbacks.sensorKnobs.gainSet);
 
         // Returns false on cancel or grab failure; the caller re-checks
         // isCancelled() to distinguish. Failed grabs keep the legacy 30 ms
@@ -386,6 +464,44 @@ AuthPipelineResult AuthPipeline::Run() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }
+
+            const FaceRect faceRect(static_cast<long>(cur.det->x1),
+                                    static_cast<long>(cur.det->y1),
+                                    static_cast<long>(cur.det->x2),
+                                    static_cast<long>(cur.det->y2));
+
+            // The correction gate sits BEFORE the first binding attempt and
+            // before the first counted frame: sensor parameters must never
+            // change once frames contribute to PAD/identity evidence. It also
+            // precedes OnFaceDetected, so a face that arrives dark does not
+            // arm the 2 s attack clock against the tune that is rescuing it.
+            if (totalChecked == 0 && lateTuneBudget > 0 && sensorKnobsWired) {
+                const float lateLuma = FaceRegionLuma(cur.frame, faceRect);
+                if (lateLuma >= 0.0f &&
+                    (lateLuma < tuneCfg.minFaceLuma || lateLuma > tuneCfg.maxFaceLuma)) {
+                    --lateTuneBudget;
+                    timing.Suspend(std::chrono::steady_clock::now());
+                    FACELOGIN_INFO(L"Late exposure correction: face luma %.0f out of band "
+                                   L"[%.0f–%.0f] before first counted frame — tuning "
+                                   L"(budget left %d)",
+                                   lateLuma, tuneCfg.minFaceLuma, tuneCfg.maxFaceLuma,
+                                   lateTuneBudget);
+                    // The triggering frame is discarded after the tune: the
+                    // knobs and the camera stream may both have moved. The
+                    // pacing anchor is untouched — no frame was counted yet.
+                    TuneFaceExposure(lateLuma, m_callbacks.sensorKnobs,
+                                     m_callbacks.grabFrame, m_detector,
+                                     m_callbacks.isCancelled, m_config.cameraRotation,
+                                     tuneCfg);
+                    timing.Resume(std::chrono::steady_clock::now());
+                    if (m_callbacks.isCancelled()) {
+                        result.cancelled = true;
+                        return result;
+                    }
+                    continue;
+                }
+            }
+
             const auto faceNow = std::chrono::steady_clock::now();
             timing.OnFaceDetected(faceNow);
 
@@ -401,10 +517,6 @@ AuthPipelineResult AuthPipeline::Run() {
                 break;
             }
 
-            const FaceRect faceRect(static_cast<long>(cur.det->x1),
-                                    static_cast<long>(cur.det->y1),
-                                    static_cast<long>(cur.det->x2),
-                                    static_cast<long>(cur.det->y2));
             // Default plan: anchor frames are the first bound frame (locks
             // the SID) and the last counted frame (tail anchor), with the
             // counted-3 consensus frame between them — bindings land on
