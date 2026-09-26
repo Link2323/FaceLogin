@@ -293,6 +293,9 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     };
     callbacks.sensorKnobs.exposureGet = [&camera](long& v) { return camera->GetExposure(&v); };
     callbacks.sensorKnobs.exposureSet = [&camera](long v) { return camera->SetExposure(v); };
+    callbacks.sensorKnobs.exposureSetAuto = [&camera](long v) {
+        return camera->SetExposure(v, false);
+    };
     callbacks.sensorKnobs.exposureIsManual = [&camera](bool& manual) {
         long value = 0;
         return camera->GetExposure(&value, &manual);

@@ -179,7 +179,7 @@ Startup prints harmless ONNX "Schema error: Trying to register schema..." noise.
 
 ### Exposure response measurement (development only)
 
-Build `ExposureResponseProbe` and `FaceGainTuneTest` explicitly. The probe enumerates camera indexes with `--list`; select the intended device with `--camera-index N` (it never silently chooses one). It opens the camera for about 30 seconds, records only distinct-frame brightness samples, and restores the original exposure/gain values **and automatic/manual modes** on normal and handled-error exits. Keep the scene and lighting still. Do not forcibly terminate it during writes; forced process termination cannot run restoration. It does not update `camera_tune.state` or save images.
+Build `ExposureResponseProbe` and `FaceGainTuneTest` explicitly. The probe enumerates camera indexes with `--list`; select the intended device with `--camera-index N` (it never silently chooses one). It opens the camera for about 30 seconds, records only distinct-frame brightness samples, and restores the original exposure/gain values **and automatic/manual modes** on normal and handled-error exits. `--compare-auto N` instead records 2.5 seconds of manual exposure and 5 seconds of AE on the selected device for direct brightness comparison, then restores the original controls. Keep the scene and lighting still. Do not forcibly terminate it during writes; forced process termination cannot run restoration. It does not update `camera_tune.state` or save images.
 
 ```powershell
 cmake --build build --config Release --target ExposureResponseProbe FaceGainTuneTest

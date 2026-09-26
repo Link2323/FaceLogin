@@ -23,9 +23,11 @@ namespace facelogin {
 // dark-domain identity distance +0.25..0.3; BLC and the recognizer-side
 // low-light stretch both measured ineffective on 2026-09-09).
 //
-// Keep a usable face at the shortest practical exposure: pin AE before
-// measuring gain response, try gain before lengthening exposure, and reclaim
-// a long exposure when one shorter step still has a conservative luma margin.
+// On cameras with working gain, keep a usable face at the shortest practical
+// exposure: pin AE before measuring gain response, try gain before lengthening
+// exposure, and reclaim a long exposure when one shorter step has margin.
+// Gainless cameras retain AE when the driver supports it; an integrated camera
+// measured brighter in AE than at its maximum manual exposure.
 // Gain response is measured, never assumed; dead/absent gain falls back to
 // photons. Detection and brightness are capture-quality evidence only:
 // identity and PAD still decide whether any frame can authenticate.
@@ -123,7 +125,32 @@ struct SensorKnobs {
     std::function<bool(long& valueOut)> gainGet;
     std::function<bool(long value)> gainSet;      // Manual flag
     std::function<bool(bool& manual)> exposureIsManual;
+    std::function<bool(long value)> exposureSetAuto;
 };
+
+// Some integrated cameras expose no gain and their manual exposure range is
+// too short to match the driver's AE/ISP result. Keep AE on those devices.
+// Return true when AE is active; changedOut marks an actual mode write so the
+// host can discard old frames and allow the camera to settle before judging.
+inline bool PreferAutoExposureWithoutGain(const SensorKnobs& knobs,
+                                           bool* changedOut = nullptr) {
+    if (changedOut) *changedOut = false;
+    if (!knobs.exposureSetAuto || !knobs.exposureGet || !knobs.exposureIsManual)
+        return false;
+    long mn = 0, mx = 0, st = 0, gain = 0;
+    const bool usableGain = knobs.gainRange && knobs.gainGet && knobs.gainSet &&
+        knobs.gainRange(mn, mx, st) && knobs.gainGet(gain) &&
+        mn <= mx && gain >= mn && gain <= mx && st > 0;
+    if (usableGain) return false;
+    bool manual = false;
+    if (!knobs.exposureIsManual(manual)) return false;
+    if (!manual) return true;
+    long exposure = 0;
+    if (!knobs.exposureGet(exposure) || !knobs.exposureSetAuto(exposure)) return false;
+    FACELOGIN_INFO(L"Exposure policy: gain unavailable — restored camera AE at %ld", exposure);
+    if (changedOut) *changedOut = true;
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Persisted last settled sensor combo (not necessarily in the target band)
@@ -182,6 +209,8 @@ inline bool SaveTuneKnobState(const std::wstring& path, const SensorKnobs& knobs
 // reading stacked a second write on top and mis-flagged gain as a dead
 // knob, 2026-09-13 21:59: one 4.3 s round landing over-bright).
 inline bool ApplyTuneKnobState(const SensorKnobs& knobs, const TuneKnobState& st) {
+    bool autoChanged = false;
+    if (PreferAutoExposureWithoutGain(knobs, &autoChanged)) return autoChanged;
     bool wrote = false;
     long mn = 0, mx = 0, stp = 0, cur = 0;
     if (st.hasExposure &&
@@ -390,6 +419,8 @@ inline bool SettleFace(const std::function<bool(float&)>& measure,
 // and halving exposure together: that assumes an unmeasured gain transfer.
 inline bool CanShortenExposure(float luma, const SensorKnobs& knobs,
                                 const GainTuneConfig& cfg) {
+    bool manual = true;
+    if (knobs.exposureIsManual && knobs.exposureIsManual(manual) && !manual) return false;
     long mn = 0, mx = 0, step = 0, cur = 0;
     if (!knobs.exposureRange || !knobs.exposureGet || !knobs.exposureSet ||
         !knobs.exposureRange(mn, mx, step) || !knobs.exposureGet(cur) ||
@@ -536,6 +567,8 @@ inline int TuneFaceExposure(float firstLuma,
                             const std::function<bool()>& isCancelled,
                             const GainTuneConfig& cfg = {}) {
     if (!std::isfinite(firstLuma) || firstLuma < 0.0f || isCancelled()) return 0;
+    bool autoChanged = false;
+    if (PreferAutoExposureWithoutGain(knobs, &autoChanged)) return autoChanged ? 1 : 0;
     const bool shorten = detail::CanShortenExposure(firstLuma, knobs, cfg);
     if (firstLuma >= cfg.minFaceLuma && firstLuma <= cfg.maxFaceLuma && !shorten) {
         // In-band: whatever the knobs hold right now is a certified combo —
@@ -669,13 +702,14 @@ inline int TuneFaceExposure(float firstLuma,
     // in-band can reach. Spend frame rate for photons: one uncapped
     // exposure pass. ~8 fps beats an underexposed face that misses the
     // identity threshold entirely.
-    bool gainExhausted = !knobs.gainGet || !detail::KnobReady(knobs.gainRange, knobs.gainSet);
-    if (!gainExhausted) {
-        long gmn = 0, gmx = 0, gstp = 0, gcur = 0;
-        gainExhausted = gainDeadSteps >= 2 ||
-            (knobs.gainRange(gmn, gmx, gstp) && knobs.gainGet(gcur) &&
-             gcur >= gmx);
-    }
+    long gmn = 0, gmx = 0, gstp = 0, gcur = 0;
+    // Hosts always provide callbacks, even when this camera does not expose
+    // VideoProcAmp_Gain. Failed range/get calls mean there is no usable gain
+    // headroom; do not strand a dark face at the exposure frame-rate cap.
+    const bool gainExhausted =
+        !knobs.gainGet || !detail::KnobReady(knobs.gainRange, knobs.gainSet) ||
+        !knobs.gainRange(gmn, gmx, gstp) || !knobs.gainGet(gcur) ||
+        gainDeadSteps >= 2 || gcur >= gmx;
     if (measurementValid && luma < cfg.minFaceLuma && gainExhausted &&
         detail::KnobReady(knobs.exposureRange, knobs.exposureSet)) {
         if (wcscmp(expText, L"n/a") == 0) expText[0] = L'\0';
@@ -822,6 +856,8 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
                             const std::function<bool()>& isCancelled,
                             int cameraRotation,
                             const GainTuneConfig& cfg = {}) {
+    bool autoChanged = false;
+    if (PreferAutoExposureWithoutGain(knobs, &autoChanged)) return autoChanged ? 1 : 0;
     if (!knobs.exposureSet && !knobs.gainSet) return 0;
     unsigned long long lastSeq = 0;
     bool haveSeq = false;

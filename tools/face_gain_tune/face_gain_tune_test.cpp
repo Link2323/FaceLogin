@@ -153,6 +153,75 @@ void TestDarkFallbackAndBrightRecovery() {
     Check(TuneFaceExposure(170.0f, knobs, brightMeasure, noCancel, cfg) == 1 && sensor.exposure < before,
           "persisted dark-room state still adjusts down when room becomes bright");
 }
+
+void TestUnavailableGainFallsBackToExposure() {
+    // The integrated camera exposes exposure but no VideoProcAmp_Gain. The
+    // host still installs gain callbacks, whose DirectShow calls return false.
+    for (bool missingRange : {true, false}) {
+        StateFile file;
+        Sensor sensor;
+        auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        if (missingRange)
+            knobs.gainRange = [](long&, long&, long&) { return false; };
+        else
+            knobs.gainGet = [](long&) { return false; };
+        const auto measure = [&](float& luma) {
+            luma = 20.0f * std::exp2(static_cast<float>(sensor.exposure + 4));
+            return true;
+        };
+        Check(TuneFaceExposure(20.0f, knobs, measure, noCancel, cfg) == 2 &&
+                  sensor.exposure == -2,
+              "unavailable gain lets dark face pass exposure cap");
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.exposure == -2 &&
+                  (missingRange || !saved.hasGain),
+              "settled exposure is saved when gain cannot be tuned");
+    }
+}
+
+void TestGainlessCameraPrefersAutoExposure() {
+    Sensor sensor;
+    auto knobs = sensor.Knobs();
+    knobs.gainRange = [](long&, long&, long&) { return false; };
+    bool manual = true;
+    int manualWrites = 0, autoWrites = 0;
+    knobs.exposureIsManual = [&](bool& out) { out = manual; return true; };
+    knobs.exposureSet = [&](long v) {
+        sensor.exposure = v; manual = true; ++manualWrites; return true;
+    };
+    knobs.exposureSetAuto = [&](long v) {
+        Check(v == sensor.exposure, "AE restore does not change exposure value");
+        manual = false; ++autoWrites; return true;
+    };
+    sensor.exposure = -3;
+    TuneKnobState stale;
+    stale.hasExposure = true;
+    stale.exposure = -4;
+    Check(ApplyTuneKnobState(knobs, stale) && !manual && autoWrites == 1 &&
+              manualWrites == 0 && sensor.exposure == -3,
+          "gainless camera restores AE instead of replaying stale manual exposure");
+    const auto measure = [&](float& luma) { luma = 36.0f; return true; };
+    Check(TuneFaceExposure(36.0f, knobs, measure, noCancel) == 0 &&
+              autoWrites == 1 && manualWrites == 0,
+          "face tuning leaves gainless camera in AE");
+    Check(!detail::CanShortenExposure(118.0f, knobs, GainTuneConfig{}),
+          "AE cannot trigger manual exposure shortening");
+
+    // A driver that rejects AE restoration retains the manual fallback.
+    manual = true;
+    sensor.exposure = -4;
+    knobs.exposureSetAuto = [](long) { return false; };
+    const auto manualMeasure = [&](float& luma) {
+        luma = 20.0f * std::exp2(static_cast<float>(sensor.exposure + 4));
+        return true;
+    };
+    auto cfg = GainTuneConfig{};
+    cfg.settleMs = 0;
+    Check(TuneFaceExposure(20.0f, knobs, manualMeasure, noCancel, cfg) == 2 &&
+              sensor.exposure == -2,
+          "failed AE restoration retains bounded manual exposure fallback");
+}
 } // namespace
 
 void TestWhiteoutEvidence() {
@@ -395,6 +464,8 @@ int main(int argc, char** argv) {
     TestMeasuredGainConvergesWithMargin();
     TestUnconfirmedProgressIsNotSaved();
     TestDarkFallbackAndBrightRecovery();
+    TestUnavailableGainFallsBackToExposure();
+    TestGainlessCameraPrefersAutoExposure();
     std::printf("FaceGainTuneTest: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

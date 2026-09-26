@@ -340,11 +340,14 @@ bool EnrollmentWizard::StartPreview() {
     // replayed state instead of the transition.
     const std::wstring tuneStatePath = m_dataDir + L"\\camera_tune.state";
     const auto replayAt = std::chrono::steady_clock::now();
+    SensorKnobs previewKnobs = BuildSensorKnobs();
     bool replayWrote = false;
+    const bool usingAutoExposure =
+        PreferAutoExposureWithoutGain(previewKnobs, &replayWrote);
     {
         TuneKnobState saved;
-        if (LoadTuneKnobState(tuneStatePath, saved)) {
-            replayWrote = ApplyTuneKnobState(BuildSensorKnobs(), saved);
+        if (!usingAutoExposure && LoadTuneKnobState(tuneStatePath, saved)) {
+            replayWrote = ApplyTuneKnobState(previewKnobs, saved);
         }
     }
 
@@ -510,6 +513,7 @@ SensorKnobs EnrollmentWizard::BuildSensorKnobs() {
     };
     knobs.exposureGet = [this](long& v) { return m_webcam->GetExposure(&v); };
     knobs.exposureSet = [this](long v) { return m_webcam->SetExposure(v); };
+    knobs.exposureSetAuto = [this](long v) { return m_webcam->SetExposure(v, false); };
     knobs.exposureIsManual = [this](bool& manual) {
         long value = 0;
         return m_webcam->GetExposure(&value, &manual);
@@ -531,6 +535,10 @@ void EnrollmentWizard::WatchPreviewExposure(const FrameImage& frame,
     if (now - m_lastExposureWatch < kExposureWatchInterval) return;
     m_lastExposureWatch = now;
     if (now - m_lastExposureTune < kExposureTuneCooldown) return;
+    if (PreferAutoExposureWithoutGain(BuildSensorKnobs())) {
+        m_pendingWatchLuma = -1.0f;
+        return;
+    }
     GainTuneConfig cfg;
     cfg.persistPath = m_dataDir + L"\\camera_tune.state";
     if (!det) {

@@ -123,7 +123,9 @@ AuthPipelineResult AuthPipeline::Run() {
         // re-written, so an intact driver pays nothing.
         bool replayWrote = false;
         const auto replayAt = std::chrono::steady_clock::now();
-        if (!m_config.tuneStatePath.empty()) {
+        const bool usingAutoExposure =
+            PreferAutoExposureWithoutGain(m_callbacks.sensorKnobs, &replayWrote);
+        if (!usingAutoExposure && !m_config.tuneStatePath.empty()) {
             TuneKnobState saved;
             if (LoadTuneKnobState(m_config.tuneStatePath, saved)) {
                 replayWrote = ApplyTuneKnobState(m_callbacks.sensorKnobs, saved);
@@ -374,9 +376,9 @@ AuthPipelineResult AuthPipeline::Run() {
         // bound the worst case; a face that stays out of band after them
         // proceeds exactly like the legacy loop.
         int lateTuneBudget = 2;
-        const bool sensorKnobsWired =
-            static_cast<bool>(m_callbacks.sensorKnobs.exposureSet) ||
-            static_cast<bool>(m_callbacks.sensorKnobs.gainSet);
+        const bool sensorKnobsWired = !usingAutoExposure &&
+            (static_cast<bool>(m_callbacks.sensorKnobs.exposureSet) ||
+             static_cast<bool>(m_callbacks.sensorKnobs.gainSet));
 
         // Returns false on cancel or grab failure; the caller re-checks
         // isCancelled() to distinguish. Failed grabs keep the legacy 30 ms

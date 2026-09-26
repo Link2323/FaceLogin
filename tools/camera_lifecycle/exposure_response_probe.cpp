@@ -36,8 +36,9 @@ int wmain(int argc, wchar_t** argv) {
             std::wcout << i << L": " << cameras[i].friendlyName << L"\n" << cameras[i].devicePath << L"\n";
         return 0;
     }
-    if (argc != 3 || std::wstring(argv[1]) != L"--camera-index") {
-        std::fprintf(stderr, "Usage: ExposureResponseProbe --list | --camera-index N\n");
+    const bool compareAuto = argc == 3 && std::wstring(argv[1]) == L"--compare-auto";
+    if (argc != 3 || (!compareAuto && std::wstring(argv[1]) != L"--camera-index")) {
+        std::fprintf(stderr, "Usage: ExposureResponseProbe --list | --camera-index N | --compare-auto N\n");
         return 2;
     }
     wchar_t* end = nullptr;
@@ -82,6 +83,13 @@ int wmain(int argc, wchar_t** argv) {
         }
         return samples >= 3;
     };
+    if (compareAuto) {
+        if (!camera.SetExposure(restore.exposure) || !sample("manual", 0, 2500) ||
+            !camera.SetExposure(restore.exposure, false) || !sample("auto", 0, 5000)) return 1;
+        const bool restored = restore.Restore();
+        std::fprintf(stderr, "Original controls restored: %s\n", restored ? "yes" : "NO");
+        return restored ? 0 : 1;
+    }
     if (!camera.SetExposure(restore.exposure) ||
         (restore.haveGain && !camera.SetGain(restore.gain)) || !sample("baseline", 0, 2500)) return 1;
     const long alternate = restore.exposure - estep >= emin ? restore.exposure - estep : restore.exposure + estep;
