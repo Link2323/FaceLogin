@@ -108,10 +108,11 @@ ProgramData 不是默认生产位置。
 - 本地开发规范：[`docs/design/development.md`](docs/design/development.md)
 - 运维与排障：[`docs/operations/operations.md`](docs/operations/operations.md)
 - 认证 worker 迁移、性能与资源验收：[`docs/auth-worker-migration-completion.md`](docs/auth-worker-migration-completion.md)
-- 迁移前性能优化实验 1–9：[`docs/performance-baseline.md`](docs/performance-baseline.md)
+- 迁移前性能实验与后续基线记录：[`docs/performance-baseline.md`](docs/performance-baseline.md)
 - 阈值标定：[`docs/threshold-calibration.md`](docs/threshold-calibration.md)
 - 多角度设计：[`docs/side-face-plan-v2.md`](docs/side-face-plan-v2.md)
-- 渐进学习：[`docs/progressive-learning.md`](docs/progressive-learning.md)
+- 渐进学习方案与 R50 阶段记录：[`docs/progressive-learning-v2.md`](docs/progressive-learning-v2.md)；早期探讨：[`docs/progressive-learning.md`](docs/progressive-learning.md)
+- SFace 试用状态：[`docs/sface-trial.md`](docs/sface-trial.md)
 - 待办：[`docs/todo.md`](docs/todo.md)
 
 ## 文档维护规则
