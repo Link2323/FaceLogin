@@ -57,13 +57,15 @@ a matching upstream notice snapshot; generation never downloads legal texts or
 models. Original texts are retained in English without translation.
 
 `stage_licenses.ps1` copies the canonical project license, notice bundle and
-`docs/model-licenses.md` into the installer payload and frontend public assets.
+[`MODEL_LICENSES.md`](MODEL_LICENSES.md) into the installer payload and frontend public assets.
 The frontend's `prebuild` hook embeds these documents in both full and slim
 Wails executables. They can be read in the installer before installation and
 are also deployed as text files beside the installed programs.
 
-Model usage restrictions and unresolved permissions remain in
+The user-facing model license summary is [`MODEL_LICENSES.md`](MODEL_LICENSES.md).
+Detailed model provenance and permission research remain in
 [`model-licenses.md`](../docs/model-licenses.md); supplying notices does not
-resolve them. Eigen's version-specific source link is in the notice bundle to
-make its MPL-covered source available to recipients. If Eigen is modified,
+resolve rights outside the licenses stated by the publishers. Eigen's
+version-specific source link is in the notice bundle to make its MPL-covered
+source available to recipients. If Eigen is modified,
 the corresponding modified sources must also be made available.

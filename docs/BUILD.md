@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 
 ### 许可文件
 
-根目录 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 和 [`model-licenses.md`](model-licenses.md) 是声明事实源。依赖升级后重新生成第三方声明；模型权重许可状态见模型许可文档，成功构建不代表获得了模型使用授权。`scripts/stage_licenses.ps1` 将声明复制到安装载荷和前端。
+根目录 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 和 [`third_party/MODEL_LICENSES.md`](../third_party/MODEL_LICENSES.md) 是随包许可说明的事实源。详细模型来源核查记录保留在 [`model-licenses.md`](model-licenses.md)。依赖升级后重新生成第三方声明；`scripts/stage_licenses.ps1` 将面向用户的许可说明复制到安装载荷和前端。
 
 ### 载荷压缩
 

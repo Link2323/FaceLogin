@@ -1,6 +1,6 @@
 # FaceLogin 模型来源与许可
 
-核对日期：2026-10-01。本文件随安装包以 `MODEL_LICENSES.md` 提供。
+核对日期：2026-10-01。本文件是源码树中的详细模型来源与许可核查记录；安装器展示的简明说明见 [`third_party/MODEL_LICENSES.md`](../third_party/MODEL_LICENSES.md)。
 
 项目根目录的 MIT 许可适用于 FaceLogin 自有代码；第三方代码和预训练权重遵守各自的许可。模型下载、哈希验证、ONNX 转换或 INT8 量化均不构成新的用途授权。本文件记录来源及目前可见的许可依据，不替权利方作出授权。
 
