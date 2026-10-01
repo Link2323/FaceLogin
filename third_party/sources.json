@@ -1,0 +1,44 @@
+[
+  {
+    "file": "libraries/onnxruntime/ThirdPartyNotices.txt",
+    "component": "onnxruntime",
+    "version": "1.23.2",
+    "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.23.2/ThirdPartyNotices.txt",
+    "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+  },
+  {
+    "file": "models/minifas/yakhyo-LICENSE.txt",
+    "component": "MiniFASNet ONNX exports",
+    "version": "aea85c1fa14e4d52a7910af75d59ef51e62a2267",
+    "url": "https://raw.githubusercontent.com/yakhyo/face-anti-spoofing/aea85c1fa14e4d52a7910af75d59ef51e62a2267/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  {
+    "file": "models/minifas/minivision-LICENSE.txt",
+    "component": "MiniFASNet upstream",
+    "version": "b6d5f04ad78778917853b25c778acef6d5626d15",
+    "url": "https://raw.githubusercontent.com/minivision-ai/Silent-Face-Anti-Spoofing/b6d5f04ad78778917853b25c778acef6d5626d15/LICENSE",
+    "sha256": "daf94bf1dc9cc5700fe5af2c7c0cbd1836e70d509ed78fd0bebef7432edee6fb"
+  },
+  {
+    "component": "DOCSAID SCRFD detector - related training-source license",
+    "file": "models/scrfd-10g/LICENSE.txt",
+    "revision": "b690d0b573f036cda224873e8997f03c9e5930ed",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "url": "https://raw.githubusercontent.com/DocsaidLab/FaceDetection/b690d0b573f036cda224873e8997f03c9e5930ed/LICENSE"
+  },
+  {
+    "component": "DOCSAID SCRFD detector - publisher model-license declaration",
+    "file": "models/scrfd-10g/model-card.md",
+    "revision": "eb0e349519cd951b2a9423dac45b39e8ce5a71b8",
+    "sha256": "4bcf87ecfbbb8e07a01b21415a970c8b53a5283bf6872b657040d3f45c9241f7",
+    "url": "https://huggingface.co/kunkunlin1221/face-detection_scrfd-10g-gnkps/raw/eb0e349519cd951b2a9423dac45b39e8ce5a71b8/README.md"
+  },
+  {
+    "component": "InsightFace pretrained recognizer - non-commercial research policy (not a product-use grant)",
+    "file": "models/w600k-r50/model-zoo.md",
+    "revision": "317d33497a4342351666a1dec69b7176eb67084e",
+    "sha256": "3334e8c7945819ee04002b260d2f2a755e8508768215ed6f778916cb3dfc5ccb",
+    "url": "https://raw.githubusercontent.com/deepinsight/insightface/317d33497a4342351666a1dec69b7176eb67084e/python-package/docs/model_zoo.md"
+  }
+]

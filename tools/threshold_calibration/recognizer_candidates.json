@@ -1,0 +1,22 @@
+{
+  "auraface": {
+    "filename": "auraface_v1.onnx",
+    "revision": "af6d057c9b0ec4071d4c49c80e3539258798b609",
+    "url": "https://huggingface.co/fal/AuraFace-v1/resolve/af6d057c9b0ec4071d4c49c80e3539258798b609/glintr100.onnx",
+    "sha256": "a7933ea5330113b01c9b60351d8f4c33003f145d8470ac5f0e52ee2effe25c60",
+    "bytes": 260694151,
+    "license": "Apache-2.0 (publisher declaration; training-data rights not independently verified)",
+    "license_url": "https://huggingface.co/fal/AuraFace-v1/blob/af6d057c9b0ec4071d4c49c80e3539258798b609/LICENSE.md",
+    "input": "Inspect ONNX graph: RGB float32 NCHW; upstream ArcFace loader uses raw 0..255 if Sub/Mul normalization is embedded, otherwise (pixel-127.5)/127.5"
+  },
+  "sface": {
+    "filename": "sface_2021dec.onnx",
+    "revision": "47534e27c9851bb1128ccc0102f1145e27f23f98",
+    "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+    "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+    "bytes": 38696353,
+    "license": "Apache-2.0 (model-directory declaration; training-data rights not independently verified)",
+    "license_url": "https://github.com/opencv/opencv_zoo/blob/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/LICENSE",
+    "input": "RGB float32 NCHW, raw pixel values 0..255 (OpenCV FaceRecognizerSF::feature)"
+  }
+}

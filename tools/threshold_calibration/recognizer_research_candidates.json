@@ -1,0 +1,22 @@
+{
+  "seeta_light": {
+    "filename": "seetaface6_light.onnx",
+    "revision": "3cefcf6896a2e7268add82ea89f720271a825157",
+    "url": "https://raw.githubusercontent.com/SeetaFace6Sharp/SeetaFace6Onnx/3cefcf6896a2e7268add82ea89f720271a825157/scripts/onnx/fp32/face_recognizer_light.onnx",
+    "sha256": "2c29eb8743ddf09ce5d887520161eab0655728224119c935a37d898693c80bb2",
+    "bytes": 4714634,
+    "license": "Upstream SeetaFace6Open BSD-2-Clause and explicit free commercial/personal use; community ONNX conversion, original SDK not benchmarked",
+    "license_url": "https://github.com/SeetaFace6Open/index/blob/master/LICENSE",
+    "publisher_statement": "https://github.com/SeetaFace6Open/index#联系我们",
+    "conversion_source": "https://github.com/SeetaFace6Sharp/SeetaFace6Onnx/tree/3cefcf6896a2e7268add82ea89f720271a825157",
+    "input": "BGR float32 NCHW 1x3x112x112, pixel/255; shared FaceLogin 5-point chips; 512D L2 normalization, no sqrt"
+  },
+  "seeta_light_original": {
+    "filename": "seetaface6_light_original.csta",
+    "revision": "3cefcf6896a2e7268add82ea89f720271a825157",
+    "url": "https://raw.githubusercontent.com/SeetaFace6Sharp/SeetaFace6Onnx/3cefcf6896a2e7268add82ea89f720271a825157/scripts/weights/face_recognizer_light.csta",
+    "sha256": "10816905fd8d7b8857b2750db137383bdf99b4afc6fc5dc1648d26252043d0c9",
+    "bytes": 4730388,
+    "role": "Original conversion input retained for provenance and possible native SDK verification; not an inference candidate"
+  }
+}

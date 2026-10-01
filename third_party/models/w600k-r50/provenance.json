@@ -1,0 +1,51 @@
+{
+  "checked_at": "2026-09-30",
+  "distributed_file": {
+    "path": "assets/models/w600k_r50.onnx",
+    "bytes": 43805153,
+    "sha256": "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185",
+    "installer_mirror_sha256_verified": true,
+    "modification": "FaceLogin static per-tensor QDQ INT8 quantization, using tools/threshold_calibration/quantize_r50.py"
+  },
+  "original_download": {
+    "repository": "https://huggingface.co/richarrrddd/w600k_r50_v1",
+    "revision": "6c1850698e6b40a2c24f353531545bca5c5864ff",
+    "file": "w600k_r50.onnx",
+    "bytes": 174383860,
+    "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+    "metadata_api": "https://huggingface.co/api/models/richarrrddd/w600k_r50_v1/revision/6c1850698e6b40a2c24f353531545bca5c5864ff?blobs=true",
+    "evidence": "Hugging Face LFS metadata reports this file size and SHA-256. The repository contains only .gitattributes and the model, with no model card or license file.",
+    "download_mirror": "https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/6c1850698e6b40a2c24f353531545bca5c5864ff/w600k_r50.onnx",
+    "mirror_head_checked": { "http_status": 200, "content_length": 174383860 },
+    "local_fp32_available_for_inspection": false,
+    "mirror_is_not_a_rights_grant": true
+  },
+  "upstream_policy": {
+    "publisher": "InsightFace / deepinsight",
+    "associated_model_family": "ResNet50@WebFace600K, used in buffalo_l and buffalo_m",
+    "family_association_basis": "FaceLogin's existing model preparation records, model filename and upstream Model Zoo family descriptions; no byte-for-byte comparison against an official model pack was performed in this check.",
+    "revision": "317d33497a4342351666a1dec69b7176eb67084e",
+    "policy_url": "https://github.com/deepinsight/insightface/blob/317d33497a4342351666a1dec69b7176eb67084e/python-package/docs/model_zoo.md#model-licenses",
+    "policy_snapshot": "model-zoo.md",
+    "policy_snapshot_sha256": "3334e8c7945819ee04002b260d2f2a755e8508768215ed6f778916cb3dfc5ccb",
+    "visible_weight_terms": "Non-commercial research purposes only; MIT applies to the upstream library code, not these pretrained weights.",
+    "licensing_contact": "recognition-oss-pack@insightface.ai",
+    "contact_source": "https://github.com/deepinsight/insightface/blob/317d33497a4342351666a1dec69b7176eb67084e/README.md#license",
+    "licensing_page": "https://www.insightface.ai/solutions/face-recognition-licensing"
+  },
+  "authorization": {
+    "status": "not_obtained",
+    "selected_route": "Keep the existing model and request written authorization from the rights holder.",
+    "request_draft": "authorization-request.md",
+    "request_sent": false,
+    "required_scope": [
+      "Offline Windows desktop login/unlock authentication, including ordinary non-research use",
+      "ONNX conversion and static QDQ INT8 derivative weights",
+      "Redistribution of the approved weights and derivatives in downloadable installers and installation onto recipients' computers",
+      "Permitted use by recipients of the freely distributed open-source application",
+      "Applicable attribution, license notices, deployment limits, duration and fees"
+    ],
+    "artifact_confirmation_required": "Ask InsightFace to identify whether the mirrored FP32 hash is covered, or provide the official artifact/hash to which its written grant applies.",
+    "completion_evidence": "A written grant or agreement identifying the licensee, approved artifact and derivative, authentication use, redistribution/end-user rights and any conditions. A contact address, sent inquiry, quote or technical compatibility check is not approval."
+  }
+}

@@ -21,6 +21,39 @@ const finishing = ref(false)
 // Uninstaller build (or full installer run with --uninstall): land on the
 // uninstall page; the slim build has no install capability at all.
 const hideTabs = ref(false)
+const licenseDialog = ref<HTMLDialogElement | null>(null)
+const licenseDocuments = [
+  { path: 'LICENSE.txt', label: '项目许可' },
+  { path: 'THIRD_PARTY_NOTICES.txt', label: '第三方声明' },
+  { path: 'MODEL_LICENSES.md', label: '模型许可' },
+]
+const licenseDocument = ref('LICENSE.txt')
+const licenseText = ref('')
+const licenseCache = new Map<string, string>()
+
+async function showLicenseDocument(path: string) {
+  licenseDocument.value = path
+  licenseText.value = '正在读取…'
+  try {
+    let text = licenseCache.get(path)
+    if (text === undefined) {
+      const response = await fetch(new URL(path, document.baseURI))
+      if (!response.ok) throw new Error(`读取失败 (${response.status})`)
+      text = await response.text()
+      licenseCache.set(path, text)
+    }
+    if (licenseDocument.value === path) licenseText.value = text
+  } catch (err: unknown) {
+    if (licenseDocument.value === path) {
+      licenseText.value = err instanceof Error ? err.message : '无法读取许可文件'
+    }
+  }
+}
+
+function openLicenses() {
+  licenseDialog.value?.showModal()
+  void showLicenseDocument(licenseDocument.value)
+}
 
 onMounted(async () => {
   try {
@@ -297,9 +330,25 @@ async function doUninstall() {
     </div>
 
     <!-- Footer -->
-    <div class="px-8 py-4 border-t border-gray-100">
+    <div class="px-8 py-4 border-t border-gray-100 flex items-center justify-between">
       <p class="text-xs text-gray-300">Windows 人脸识别登录</p>
+      <button class="text-xs text-gray-500 hover:text-gray-800" @click="openLicenses">许可说明</button>
     </div>
+    <dialog ref="licenseDialog" aria-labelledby="license-title"
+      class="m-auto w-[calc(100%-2rem)] max-w-3xl rounded-lg p-0 shadow-xl backdrop:bg-black/30">
+      <div class="flex max-h-[85vh] flex-col">
+        <div class="flex items-center justify-between border-b border-gray-100 px-5 py-4">
+          <h2 id="license-title" class="text-sm font-medium text-gray-900">许可说明</h2>
+          <button class="text-sm text-gray-500 hover:text-gray-800" @click="licenseDialog?.close()">关闭</button>
+        </div>
+        <div class="flex gap-4 border-b border-gray-100 px-5 pt-3">
+          <button v-for="doc in licenseDocuments" :key="doc.path"
+            :class="['pb-3 text-xs', licenseDocument === doc.path ? 'border-b-2 border-gray-900 text-gray-900' : 'text-gray-500']"
+            :aria-pressed="licenseDocument === doc.path" @click="showLicenseDocument(doc.path)">{{ doc.label }}</button>
+        </div>
+        <pre class="min-h-0 overflow-auto whitespace-pre-wrap break-words px-5 py-4 text-xs leading-relaxed text-gray-700 select-text">{{ licenseText }}</pre>
+      </div>
+    </dialog>
   </div>
 
 </template>

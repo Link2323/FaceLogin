@@ -38,7 +38,8 @@ $go = Find-Tool "go" "C:/Program Files/Go/bin/go.exe"
 $rootAllow = @(
     "FaceLoginService.exe", "FaceLoginCredentialProvider.dll", "FaceLoginConsole.exe",
     "uninstall.exe", "onnxruntime.dll", "libprotobuf.dll", "libprotobuf-lite.dll",
-    "re2.dll", "abseil_dll.dll"
+    "re2.dll", "abseil_dll.dll",
+    "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.md"
 )
 $modelAllow = @("det_10g_gnkps.onnx", "w600k_r50.onnx", "MiniFASNetV2.onnx", "MiniFASNetV1SE.onnx")
 
@@ -59,6 +60,15 @@ Step "1/6 C++ build (incremental)" {
 $faceRel = Join-Path $root "build/face_service/Release"
 $cpRel = Join-Path $root "build/credential_provider/Release"
 Step "2/6 stage binaries + slim uninstaller" {
+    # Restore the locked frontend packages before collecting their license
+    # texts, so stale node_modules cannot label the new bundle with old terms.
+    $frontend = Join-Path $inst "frontend"
+    Push-Location $frontend
+    try {
+        & npm ci --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed (exit $LASTEXITCODE)" }
+    } finally { Pop-Location }
+    & (Join-Path $PSScriptRoot "update_third_party_notices.ps1")
     # Provider DLL builds to credential_provider/Release; everything else to
     # face_service/Release — do NOT glob *.dll (that dir also holds build-tree
     # noise outside the runtime closure).
@@ -148,6 +158,10 @@ Step "6/6 wails build (full)" {
     } finally { Pop-Location }
     if ((Get-Item $setupExe).LastWriteTime -lt $scriptStart) {
         throw "FaceLoginSetup.exe is older than this script's start time - wails produced a stale no-op build"
+    }
+    # Preserve accompanying legal material when publishing the build directory.
+    foreach ($name in @("LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.md")) {
+        Copy-Item -LiteralPath (Join-Path $res $name) -Destination (Join-Path $inst "build/bin/$name") -Force
     }
 }
 

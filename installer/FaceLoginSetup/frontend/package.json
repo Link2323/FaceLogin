@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../../scripts/stage_licenses.ps1",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },

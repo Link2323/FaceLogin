@@ -191,7 +191,7 @@ wails build -clean -platform windows/amd64
 | `MiniFASNetV2.onnx` | 反欺诈活体检测（2.7× 裁剪） |
 | `MiniFASNetV1SE.onnx` | 反欺诈活体检测（4.0× 裁剪） |
 
-> 模型均经 INT8 量化优化（体积与速度兼得，精度无损），由 `scripts/download_models.ps1` 准备。
+> 检测与识别模型经本地 INT8 量化，双 MiniFAS 使用来源仓库的 ONNX 导出文件，由 `scripts/download_models.ps1` 准备。模型采用各自的许可；来源、处理和用途授权待解决项见 [模型许可记录](docs/model-licenses.md)。
 
 ---
 
@@ -208,6 +208,10 @@ wails build -clean -platform windows/amd64
 ## 开源协议
 
 [MIT License](LICENSE) © 2026 美国伐木工&EthanZer0
+
+MIT 适用于 FaceLogin 自有代码。第三方代码的许可与版权声明见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)；预训练模型遵守 [单独的模型许可](docs/model-licenses.md)。当前检测权重的发布者为 Kun-Hsiang Lin / DOCSAID，具体发布文件声明 Apache-2.0，来源证据已记录；InsightFace 识别权重的许可限于非商业研究，日常认证/产品分发授权尚待解决，不能将整套模型视为 MIT 授权。
+
+安装器和卸载器页脚提供“许可说明”，安装目录同时包含这三份声明文件。
 
 ---
 

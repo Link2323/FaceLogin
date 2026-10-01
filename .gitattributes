@@ -1,3 +1,10 @@
 # GitHub linguist overrides — force .h headers to be classified as C++
 # (linguist defaults .h to C, but all headers here are C++ with .cpp sources)
 *.h linguist-language=C++
+
+# License snapshot hashes refer to upstream bytes, including original EOLs.
+third_party/libraries/onnxruntime/*.txt -text
+third_party/models/*/*.txt -text
+third_party/models/*/model-card.md -text
+third_party/models/w600k-r50/model-zoo.md -text
+THIRD_PARTY_NOTICES.txt text eol=lf

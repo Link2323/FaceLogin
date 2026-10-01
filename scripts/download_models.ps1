@@ -23,8 +23,12 @@ $ErrorActionPreference = 'Stop'
 # normalizes it, then quantizes it in place.
 $detectorRaw = @{
     Name = 'det_10g_gnkps.onnx.raw-download'
-    Url = 'https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/main/scrfd_10g_gnkps_fp32.onnx'
+    # Publisher's Apache-2.0 declaration and provenance: docs/model-licenses.md.
+    # Pin the source revision as well as the original bytes; never infer weight
+    # terms from the SCRFD architecture name or from InsightFace's code license.
+    Url = 'https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/eb0e349519cd951b2a9423dac45b39e8ce5a71b8/scrfd_10g_gnkps_fp32.onnx'
     RawSize = 16273449
+    RawSha256 = '2112D066C1DCE6CC648670E69CF90561B9287BB1945153F3B461A487131255B9'
 }
 $detectorFp32 = @{
     Name = 'det_10g_gnkps.fp32.onnx'
@@ -43,14 +47,17 @@ $detectorInt8 = @{
 # This script downloads the pinned FP32 model, then quantizes it in place.
 $recognizerFp32 = @{
     Name = 'w600k_r50.fp32.onnx'
-    Url = 'https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/main/w600k_r50.onnx'
+    # Third-party mirror has no model card or separate rights grant. The pinned
+    # download identifies bytes; licensing remains pending with InsightFace.
+    # See third_party/models/w600k-r50/ for policy evidence and request draft.
+    Url = 'https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/6c1850698e6b40a2c24f353531545bca5c5864ff/w600k_r50.onnx'
     Size = 174383860
     Sha256 = '4C06341C33C2CA1F86781DAB0E829F88AD5B64BE9FBA56E56BC9EBDEFC619E43'
 }
 $recognizerInt8 = @{
     Name = 'w600k_r50.onnx'
     Size = 43805153
-    Sha256 = 'B9B2EA32AFAA88DFD226255F354EA241C3A744ABF75B3DBDC00C95F7F00E185'
+    Sha256 = 'B9B2EA32AFAA88DFD226255F354EA241C3A744ABF75B3DBDCF00C95F7F00E185'
 }
 
 function Test-PinnedFile {
@@ -108,8 +115,8 @@ else {
         Write-Host "[DOWNLOAD] raw SCRFD export" -ForegroundColor Yellow
         try {
             Download-File -Url $detectorRaw.Url -Destination $rawDetectorPath
-            if ((Get-Item -LiteralPath $rawDetectorPath).Length -ne $detectorRaw.RawSize) {
-                throw "Raw detector size is unexpected: $rawDetectorPath"
+            if (-not (Test-PinnedFile -Path $rawDetectorPath -ExpectedSize $detectorRaw.RawSize -ExpectedSha256 $detectorRaw.RawSha256)) {
+                throw "Raw detector did not match the pinned publisher artifact: $rawDetectorPath"
             }
 
             $normalizer = Join-Path $PSScriptRoot 'normalize_scrfd_export.py'

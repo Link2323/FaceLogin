@@ -1,3 +1,4 @@
 numpy>=1.24
 onnxruntime>=1.16
 opencv-python-headless>=4.8
+onnx>=1.16  # inspect candidate graph normalization before recognizer A/B

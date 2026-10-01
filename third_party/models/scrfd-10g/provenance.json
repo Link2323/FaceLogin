@@ -1,0 +1,79 @@
+{
+  "checked_at": "2026-09-30",
+  "distributed_file": "det_10g_gnkps.onnx",
+  "distributed_sha256": "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc",
+  "publisher": {
+    "name": "Kun-Hsiang Lin",
+    "account": "kunkunlin1221",
+    "profile": "https://huggingface.co/kunkunlin1221",
+    "linked_github": "https://github.com/kunkunlin1221"
+  },
+  "original_release": {
+    "repository": "kunkunlin1221/face-detection_scrfd-10g-gnkps",
+    "revision": "eb0e349519cd951b2a9423dac45b39e8ce5a71b8",
+    "file": "scrfd_10g_gnkps_fp32.onnx",
+    "size": 16273449,
+    "sha256": "2112d066c1dce6cc648670e69cf90561b9287bb1945153f3b461a487131255b9",
+    "metadata_api": "https://huggingface.co/api/models/kunkunlin1221/face-detection_scrfd-10g-gnkps/revision/eb0e349519cd951b2a9423dac45b39e8ce5a71b8?blobs=true",
+    "license_declaration": "apache-2.0",
+    "model_card_url": "https://huggingface.co/kunkunlin1221/face-detection_scrfd-10g-gnkps/raw/eb0e349519cd951b2a9423dac45b39e8ce5a71b8/README.md",
+    "model_card_snapshot": "model-card.md"
+  },
+  "direct_code_reference": {
+    "repository": "DocsaidLab/PyFace",
+    "revision": "96e85c050614d4d01297012ee535237378fe6b01",
+    "path": "pyface/components/face_detection/scrfd.py",
+    "url": "https://github.com/DocsaidLab/PyFace/blob/96e85c050614d4d01297012ee535237378fe6b01/pyface/components/face_detection/scrfd.py",
+    "observation": "SCRFD.repo_ids maps scrfd_10g_gnkps_fp32 to this exact Hugging Face repository and downloads the matching filename."
+  },
+  "related_training_implementation": {
+    "repository": "DocsaidLab/FaceDetection",
+    "revision": "b690d0b573f036cda224873e8997f03c9e5930ed",
+    "config_path": "config/640-scrfd-10g-gnkps.yaml",
+    "config_url": "https://github.com/DocsaidLab/FaceDetection/blob/b690d0b573f036cda224873e8997f03c9e5930ed/config/640-scrfd-10g-gnkps.yaml",
+    "source_license": "Apache-2.0",
+    "license_snapshot": "LICENSE.txt",
+    "initial_source_commit": "78892453f8944d8eb4d0afc006b30ec025642ec2",
+    "initial_source_commit_github_author": "kunkunlin1221",
+    "observations": [
+      "Configuration phase is from-scratch; training can explicitly load a checkpoint if supplied, so this label alone does not prove the release's entire training history.",
+      "Head hidden channels 80, GroupNorm groups 10, and exported box/score/lmk5pt outputs match the inspected local graph.",
+      "SCRFDHead module names, output stride multiplications and metadata convention match the inspected local graph.",
+      "Configuration names WIDERFace training/validation paths and a separate NIST evaluation path. This is evidence about configuration, not an independent training-data rights audit."
+    ]
+  },
+  "inspected_normalized_fp32": {
+    "path": "assets/models/det_10g_gnkps.fp32.onnx",
+    "size": 16272909,
+    "sha256": "c940f97765fdc4b872b4a1ea041248d3e3d550202b7639f9488be558a6c0acb0",
+    "producer": "pytorch",
+    "producer_version": "2.4.1",
+    "metadata_date": "2025-02-11 19:00:20",
+    "node_count": 206,
+    "initializer_count": 130
+  },
+  "comparison_with_other_same_name_release": {
+    "publisher": "SthPhoenix/InsightFace-REST",
+    "manifest_revision": "fb854d8029c880dc5a244595e491c1293c218bff",
+    "manifest_url": "https://github.com/SthPhoenix/InsightFace-REST/blob/fb854d8029c880dc5a244595e491c1293c218bff/models/models.json",
+    "google_drive_id": "14BuXR6L73w1mwKXHPIcZlc9LYaid4Evl",
+    "reference_size": 16930833,
+    "reference_sha256": "e919aaa20330e05c1e5e6c5fe8c77b4dfa0fe17d30b8f84fbc166e90c16ad687",
+    "reference_md5": "1d9b64bb0e6e18d4838872c9e7efd709",
+    "published_md5_matched": true,
+    "reference_producer_version": "1.8",
+    "reference_node_count": 236,
+    "reference_initializer_count": 139,
+    "method": "For every ONNX initializer with more than 16 elements, compare a multiset of (shape, dtype, SHA-256 of NumPy array bytes), disregarding initializer names. Reference downloaded only into memory; no reference model retained or deployed.",
+    "reference_compared_tensors": 117,
+    "local_compared_tensors": 108,
+    "exact_matching_tensors": 0,
+    "limit": "Shows distinct exports and no exact tensor matches under this comparison. Does not by itself prove independent training, exclude all derivation, or establish legal rights."
+  },
+  "conclusion": {
+    "license_basis": "Publisher's Apache-2.0 declaration attached to this exact model repository/revision, rather than borrowing a license from inference or training code.",
+    "training_attribution": "Evidence supports association with Kun-Hsiang Lin / DOCSAID's matching training/export implementation. This is an inference; original checkpoints and training logs were not supplied.",
+    "facelogin_changes": ["Remove output stride multiplications", "Regroup output order", "Static QDQ INT8 quantization"],
+    "remaining_limit": "No independent assurance of all training-data rights. InsightFace recognizer permission remains a separate unresolved issue."
+  }
+}

@@ -20,6 +20,8 @@
 
 `frontend/wailsjs/` 是生成绑定，不手工编辑。
 
+安装器页脚的“许可说明”从前端嵌入资源读取项目许可、第三方声明及模型许可记录，不依赖已安装目录；完整安装器和 slim 卸载器都可查看。`frontend/public/` 的三份文件由 `scripts/stage_licenses.ps1` 在 `npm prebuild` 时生成，事实源及生成流程见 BUILD。相同文本也提取到安装目录，并加入 slim 静态删除清单。
+
 ## 安装顺序
 
 `App.Install` 当前顺序：
@@ -74,6 +76,7 @@ zip 通过 `archive/zip` 的 `fs.FS` 视图读取，所有 `resources/...` 查�
 ```text
 <InstallPath>/                 # 同时是 DataPath
 ├── 三个产品二进制 + 五个 DLL
+├── LICENSE.txt / THIRD_PARTY_NOTICES.txt / MODEL_LICENSES.md
 ├── data/
 │   ├── config.json
 │   └── users.dat

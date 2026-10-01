@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"FaceLoginSetup/internal"
@@ -50,5 +53,24 @@ func TestPayloadZipExtractionChain(t *testing.T) {
 	}
 	if err := internal.ValidateInstalledModels(dest); err != nil {
 		t.Errorf("installed models failed SHA-256 after extraction: %v", err)
+	}
+	// The same complete legal texts must accompany the binaries and be readable
+	// after installation, rather than remaining only in the source repository.
+	for name, source := range map[string]string{
+		"LICENSE.txt":             "../../LICENSE",
+		"THIRD_PARTY_NOTICES.txt": "../../THIRD_PARTY_NOTICES.txt",
+		"MODEL_LICENSES.md":       "../../docs/model-licenses.md",
+	} {
+		want, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(dest, name))
+		if err != nil {
+			t.Fatalf("installed legal document %s missing: %v", name, err)
+		}
+		if len(got) == 0 || !bytes.Equal(got, want) {
+			t.Errorf("installed legal document %s does not match its canonical source", name)
+		}
 	}
 }

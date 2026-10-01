@@ -28,7 +28,9 @@
 | DataPath、日志、配置 | `common/data_path.*`、`face_service/FaceService.cpp`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp`、`enrollment_app/main.cpp`、`enrollment_app/EnrollmentWizard.cpp`、`installer/FaceLoginSetup/app.go`、`installer/FaceLoginSetup/internal/com.go`、`installer/FaceLoginSetup/internal/security.go` | 本文“路径与配置” | 三个 C++ 组件 + 安装器均检查 |
 | 安装、卸载、ACL、部署资源 | `installer/FaceLoginSetup/app.go`、`installer/FaceLoginSetup/internal/`、`installer/FaceLoginSetup/resources/` | [`installer.md`](docs/modules/installer.md)、[`docs/BUILD.md`](docs/BUILD.md) | 在 Setup 目录 `go test ./...` + 资源白名单 |
 | 安装器 Vue 前端 | `installer/FaceLoginSetup/frontend/src/` | [`installer.md`](docs/modules/installer.md) | 在 `frontend/` 运行 `npm run build` |
+| 第三方声明、模型许可、安装器许可查看 | `scripts/update_third_party_notices.ps1`、`scripts/stage_licenses.ps1`、`THIRD_PARTY_NOTICES.txt`、`docs/model-licenses.md`、`frontend/src/App.vue` | [`docs/BUILD.md`](docs/BUILD.md)、[`model-licenses.md`](docs/model-licenses.md) | 安装器 `go test ./...` + 前端构建；核对载荷/前端三份声明及 slim 卸载 |
 | 模型替换、量化、阈值 | `face_service/FaceService.cpp`、`installer/FaceLoginSetup/internal/extract.go`、`scripts/download_models.ps1`、`tools/threshold_calibration/` | [`face-service.md`](docs/modules/face-service.md)、[`threshold-calibration.md`](docs/threshold-calibration.md) | 标定 + hash/大小同步 + Go 测试 |
+| 识别模型离线 A/B、重新录入与量化 | `tools/threshold_calibration/compare_recognizers.py`、`refine_recognizer_comparison.py`、`recognizer*_candidates.json` | [工具说明](tools/threshold_calibration/README.md)、[初轮结果](docs/recognizer-comparison.md)、[补充结果](docs/recognizer-refined-evaluation.md) | Python 静态检查 + 对比工具测试 + 本地数据实跑；不改变生产模型 |
 
 ## 运行期架构
 
@@ -94,6 +96,10 @@ ProgramData 不是默认生产位置。
 ## 模型与部署入口
 
 模型已准备完成、普通开发不重新下载的规则只在 `AGENTS.md` 维护。模型角色、推理和阈值见 [`face-service.md`](docs/modules/face-service.md)。**安装载荷白名单只以 [`docs/BUILD.md`](docs/BUILD.md) 为准**；[`installer.md`](docs/modules/installer.md) 只解释安装生命周期和 `embed.FS` 风险。
+
+模型来源、转换记录、文件哈希及当前许可/授权待解决项见 [`model-licenses.md`](docs/model-licenses.md)。项目代码 MIT 许可不覆盖预训练权重。
+检测权重的发布者许可与 DOCSAID 训练实现证据统一位于 [`third_party/models/scrfd-10g/`](third_party/models/scrfd-10g/provenance.json)，活体模型许可位于 `third_party/models/minifas/`；下载脚本固定原始发布版本及 SHA-256，交付模型字节未因许可补录改变。
+识别权重的镜像版本、官方研究用途政策与未发送的授权申请位于 [`third_party/models/w600k-r50/`](third_party/models/w600k-r50/authorization-request.md)。当前选择保留模型并申请书面授权，尚未取得覆盖产品用途及再分发的授权；准备或发送申请不能改变该状态。
 
 ## 文档地图
 

@@ -74,6 +74,9 @@ var currentRootPayloadFiles = []string{
 	"libprotobuf.dll",
 	"onnxruntime.dll",
 	"re2.dll",
+	"LICENSE.txt",
+	"THIRD_PARTY_NOTICES.txt",
+	"MODEL_LICENSES.md",
 }
 
 // Files deployed by earlier releases but intentionally absent from the current
@@ -201,9 +204,10 @@ func ExtractResource(embeddedPath, destPath string) error {
 //	  FaceLoginService.exe
 //	  FaceLoginCredentialProvider.dll
 //	  FaceLoginConsole.exe
-//	  openblas.dll  (etc.)
+//	  five runtime DLLs
+//	  LICENSE.txt, THIRD_PARTY_NOTICES.txt, MODEL_LICENSES.md
 //	  models/
-//	    *.dat, *.onnx  (model files)
+//	    four production *.onnx models
 func ExtractAll(destDir string, progressFn func(step, total int, name string)) error {
 	// Create target directories
 	modelsDir := filepath.Join(destDir, "models")

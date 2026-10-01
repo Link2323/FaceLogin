@@ -124,9 +124,46 @@ python -c "import sys; sys.path.insert(0,'tools/threshold_calibration'); from pa
 
 ## 文件清单
 
+### R50 / AuraFace / SFace 离线对比
+
+`compare_recognizers.py` 固定同一份 SCRFD 检测与生产几何对齐结果，分别按模型原生预处理运行三个识别器。候选版本、哈希和发布方许可链接在 `recognizer_candidates.json`；下载器只写入忽略的 `data/recognizer_ab/models/`，不修改正式模型或安装器载荷。
+
+```powershell
+python tools/threshold_calibration/download_recognizer_candidates.py
+python tools/threshold_calibration/compare_recognizers.py
+python -m unittest discover -s tools/threshold_calibration -p test_compare_recognizers.py -v
+```
+
+默认复用本机 `data/lfw_full/`：固定种子选择 200 个至少四图的身份，每人最多八图；身份分成不重叠的标定组和测试组，在标定组选择目标经验 FMR 0.1% 的距离阈值，再报告独立测试组的 FMR/TAR。另复用 `data/lfw_subset/me/` 的 `front_`、`left_`、`right_` 自拍，三角度各一图注册，其余原图及半分辨率图作 probe（两种分辨率均排除注册原图）。可用 `--lfw` / `--local` / `--threads` 指定数据和线程数。
+
+`my_faces/occlusion_test/` 是允许检测失败的遮挡测试，不纳入这次正常人脸对比。`--local` 只读取指定目录的直接文件、只接受三个角度前缀，不递归扫描其他测试目录。
+
+### 重新录入、小账户库与 INT8 研究
+
+`refine_recognizer_comparison.py` 复用上一步的 `samples.json` / `chips.npz`，按标定/测试身份隔离比较每账户注册一张或三张的效果，以及 1/2/5 账户的匹配和 ratio 敏感性。另对测试 chip 做 32px 缩小回放和 Gaussian sigma=1.5 模糊，注册模板保持原图。合成降质不代表真实暗光或侧脸；重复抽取账户库的试验彼此相关。
+
+工具仅在忽略的缓存中生成 AuraFace QDQ INT8 研究权重：64 个标定身份各一张图、opset 13、Conv/Gemm per-channel、S8S8、MinMax。升级 opset 前后先核对 FP32 embedding，再量化；不使用本地自拍或测试身份标定量化范围。测量预处理＋推理＋归一化的 1/2/4/8 线程耗时。
+
+```powershell
+python tools/threshold_calibration/refine_recognizer_comparison.py
+# 可选：固定的社区 SeetaFace6 Light ONNX 转换，仅供共享对齐流程的适配研究
+python tools/threshold_calibration/download_recognizer_candidates.py --manifest tools/threshold_calibration/recognizer_research_candidates.json
+python tools/threshold_calibration/refine_recognizer_comparison.py --only-model seeta_light
+```
+
+SeetaFace 原始 CSTA 保留用于来源及原生 SDK 复核；推理只读取 ONNX。没有执行该 SDK 的原生对齐/识别，不能把适配测试当成其官方准确率。`--only-model` 合并本次结果到既有补充结果；修改源 chip 或身份列表后须完整重跑，并清除旧的 `refined_*.npz` 嵌入缓存，不能合并不同数据的结果。
+
+另读取已有 `my_faces/me` / `mother` 的 `WIN_*` 摄像头照片：按解码像素 SHA-256 去重，每人前三张注册、剩余图测试两账户匹配。它只补充短时间连拍结果，不读取照片攻击或遮挡目录，不代表跨日或实时摄像头验证。
+
+结果在 [`docs/recognizer-refined-evaluation.md`](../../docs/recognizer-refined-evaluation.md)。重跑只更新 `BEGIN/END GENERATED EVALUATION` 注释间的指标区，保留区外的许可核对、研究判断和原生验证记录。距离阈值、ratio 和 INT8 都是探索性结果；未切换生产、未打包、未进行摄像头/PAD/锁屏验收。
+
+公开汇总在 [`docs/recognizer-comparison.md`](../../docs/recognizer-comparison.md)，个体记录、失败项、chip、嵌入和 JSON 只留在忽略的 `data/recognizer_ab/`，供后续量化/换模复测。候选采用发布方 FP32，基线是生产 R50 INT8；速度不代表相同量化条件。阈值只用于探索，不是部署建议；本工具没有执行 PAD、多帧或锁屏认证。
+
 | 文件 | 作用 |
 |---|---|
 | `calibrate.py` | 标定主脚本，复刻 C++ 管线，生成距离分布报告 |
 | `download_dataset.py` | LFW 公开数据集子集下载器 |
 | `requirements.txt` | numpy / onnxruntime / opencv-python-headless |
+| `compare_recognizers.py` | R50/AuraFace/SFace 距离、独立标定/测试、角度与分辨率、耗时对比 |
+| `download_recognizer_candidates.py` / `recognizer_candidates.json` | 固定来源、大小、SHA-256 的离线候选下载 |
 | `data/` | 下载的数据集和缓存（gitignored） |

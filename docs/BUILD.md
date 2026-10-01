@@ -87,6 +87,11 @@ It chains everything below (CMake → slim uninstaller → resource sync → pay
 # 1. C++ build
 "$CMAKE" --build build --config Release
 
+# 1a. Restore frontend dependencies, collect actual dependency license texts,
+#     and stage the legal documents before either Wails build.
+npm --prefix installer/FaceLoginSetup/frontend ci
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update_third_party_notices.ps1
+
 # 2. Build the SLIM UNINSTALLER first (~11 MB, -tags slim, no embedded payload)
 #    and stage it into resources/ — the full build embeds it as payload:
 wails build -tags slim -platform windows/amd64 -ldflags "-s -w"
@@ -113,7 +118,15 @@ cd .. && wails build -clean -platform windows/amd64 -ldflags "-s -w"   # → bui
 
 Nothing in CMake copies DLLs or exes into `resources/` except: (a) `FaceLoginConsole.exe`, whose `RUNTIME_OUTPUT_DIRECTORY_RELEASE` is set directly to `resources/` (`enrollment_app/CMakeLists.txt:56`), and (b) the 4 ONNX models, copied by a `FaceLoginConsole` POST_BUILD command from `assets/models/`. **Everything else — `FaceLoginService.exe`, `FaceLoginCredentialProvider.dll`, all 5 runtime DLLs, and `uninstall.exe` — must be copied manually** (the uninstaller comes from the step-2 slim build). `resources/` is gitignored, so verify its contents before every Wails build.
 
-The root payload allow-list is exactly the three product binaries (`FaceLoginService.exe`, `FaceLoginCredentialProvider.dll`, `FaceLoginConsole.exe`), the slim `uninstall.exe` (staged from the `-tags slim` build; it is what the Add/Remove Programs entry launches), plus the five runtime DLLs listed below; `resources/models/` contains exactly the four production models. `PadCalibration.exe`, `EmbeddingTest.exe`, old DLLs, and other local leftovers are development artifacts and must not be shipped — anything left in `resources/` ends up inside `payload.zip` and ships.
+The root payload allow-list is exactly the three product binaries (`FaceLoginService.exe`, `FaceLoginCredentialProvider.dll`, `FaceLoginConsole.exe`), the slim `uninstall.exe` (staged from the `-tags slim` build; it is what the Add/Remove Programs entry launches), the five runtime DLLs listed below, and three legal documents: `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `MODEL_LICENSES.md`. `resources/models/` contains exactly the four production models. `PadCalibration.exe`, `EmbeddingTest.exe`, old DLLs, and other local leftovers are development artifacts and must not be shipped — anything left in `resources/` ends up inside `payload.zip` and ships.
+
+### Third-party notices and model permissions
+
+Canonical sources are root `LICENSE`, root `THIRD_PARTY_NOTICES.txt` and [`model-licenses.md`](model-licenses.md). `scripts/update_third_party_notices.ps1` reads the actual vcpkg install tree selected by `build/CMakeCache.txt`, Windows production Go dependency licenses (including nested package terms), the Go toolchain, WebView2 SDK, and restored frontend packages. It appends verified offline snapshots indexed by `third_party/sources.json`, grouped by component under `third_party/models/` and `third_party/libraries/`; a different ONNX Runtime version requires a matching upstream notice snapshot. Dependency upgrades require regenerated notices.
+
+`scripts/stage_licenses.ps1` copies these three documents to the resource root and `frontend/public/`. The frontend `prebuild` hook stages them before Vite embeds public assets, so the full installer and slim uninstaller both provide a **许可说明** viewer before installation. The one-command installer build restores locked npm packages, regenerates notices before building the slim executable, and also puts the three text files beside the final EXE in `build/bin/`. A manual build must regenerate notices **before** the slim build as well as before packing; distribute the legal sidecars along with the EXE.
+
+These documents are installed beside the programs and are covered by the slim removal manifest. `payload_zip_test.go` verifies extracted bytes match the canonical sources. Supplying notices does not resolve the model usage permissions recorded in `model-licenses.md`; a successful build is not a licensing clearance.
 
 ### Payload compression — `payload.zip`, never the bare directory
 
