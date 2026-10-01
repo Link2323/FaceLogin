@@ -57,12 +57,12 @@ a matching upstream notice snapshot; generation never downloads legal texts or
 models. Original texts are retained in English without translation.
 
 `stage_licenses.ps1` copies the canonical project license, notice bundle and
-[`MODEL_LICENSES.md`](MODEL_LICENSES.md) into the installer payload and frontend public assets.
+[`MODEL_LICENSES.txt`](MODEL_LICENSES.txt) into the installer payload and frontend public assets.
 The frontend's `prebuild` hook embeds these documents in both full and slim
 Wails executables. They can be read in the installer before installation and
 are also deployed as text files beside the installed programs.
 
-The user-facing model license summary is [`MODEL_LICENSES.md`](MODEL_LICENSES.md).
+The user-facing model license summary is [`MODEL_LICENSES.txt`](MODEL_LICENSES.txt).
 Detailed model provenance and permission research remain in
 [`model-licenses.md`](../docs/model-licenses.md); supplying notices does not
 resolve rights outside the licenses stated by the publishers. Eigen's

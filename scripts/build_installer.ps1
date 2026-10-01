@@ -39,7 +39,7 @@ $rootAllow = @(
     "FaceLoginService.exe", "FaceLoginCredentialProvider.dll", "FaceLoginConsole.exe",
     "uninstall.exe", "onnxruntime.dll", "libprotobuf.dll", "libprotobuf-lite.dll",
     "re2.dll", "abseil_dll.dll",
-    "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.md"
+    "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.txt"
 )
 $modelAllow = @("det_10g_gnkps.onnx", "face_recognition_sface_2021dec.onnx", "MiniFASNetV2.onnx", "MiniFASNetV1SE.onnx")
 
@@ -160,7 +160,7 @@ Step "6/6 wails build (full)" {
         throw "FaceLoginSetup.exe is older than this script's start time - wails produced a stale no-op build"
     }
     # Preserve accompanying legal material when publishing the build directory.
-    foreach ($name in @("LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.md")) {
+    foreach ($name in @("LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.txt")) {
         Copy-Item -LiteralPath (Join-Path $res $name) -Destination (Join-Path $inst "build/bin/$name") -Force
     }
 }

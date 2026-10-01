@@ -48,7 +48,7 @@ build/               → CMake 输出(Release 下的 5 个运行时 DLL 随安�
 - `PadCalibration.exe` / `EmbeddingTest.exe` 是 `tools/` 下的离线开发工具,不属于安装载荷;`embed.FS` 会嵌入资源目录中的所有文件,打包前要清除意外残留。
 - **VS 2026(MSVC 19.5x)构建已启用 `/MP` 文件级并行** —— 配合 `TrackFileAccess=false` + `ErrorReporting=None` 避免 cl.exe 卡死(2026-08-13 重验证:连续 clean rebuild 稳定,全量构建 39s → 8s)。加 `--parallel` 可再获项目级并行(→ 7.8s)。详见 `docs/BUILD.md`。
 - 不编辑 `installer/FaceLoginSetup/frontend/wailsjs/` 生成绑定;由 `wails build` / `wails dev` 重新生成。
-- 分发声明的事实源是根 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 与 `third_party/MODEL_LICENSES.md`；模型来源核查记录在 `docs/model-licenses.md`，离线许可及来源记录按组件放在 `third_party/models/` 与 `third_party/libraries/`，由 `third_party/sources.json` 统一索引。`update_third_party_notices.ps1` 按实际 CMake/vcpkg、生产 Go 和前端依赖生成声明，`stage_licenses.ps1` 复制面向用户的许可说明到载荷与前端。依赖升级须更新声明；检测权重已固定 Kun-Hsiang Lin / DOCSAID 发布版本及 Apache-2.0 声明，原始下载必须核验 SHA-256，不能仅凭 SCRFD 名称套用其他权重许可；识别权重已切为固定 OpenCV SFace 2021dec FP32，权重及许可快照见 `third_party/models/sface/`；旧 R50 申请仅作历史归档，不入包。当前为 SFace 试用构建，实际暗光/强光与锁屏验收未完成。
+- 分发声明的事实源是根 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 与 `third_party/MODEL_LICENSES.txt`；模型来源核查记录在 `docs/model-licenses.md`，离线许可及来源记录按组件放在 `third_party/models/` 与 `third_party/libraries/`，由 `third_party/sources.json` 统一索引。`update_third_party_notices.ps1` 按实际 CMake/vcpkg、生产 Go 和前端依赖生成声明，`stage_licenses.ps1` 复制面向用户的许可说明到载荷与前端。依赖升级须更新声明；检测权重已固定 Kun-Hsiang Lin / DOCSAID 发布版本及 Apache-2.0 声明，原始下载必须核验 SHA-256，不能仅凭 SCRFD 名称套用其他权重许可；识别权重已切为固定 OpenCV SFace 2021dec FP32，权重及许可快照见 `third_party/models/sface/`；旧 R50 申请仅作历史归档，不入包。当前为 SFace 试用构建，实际暗光/强光与锁屏验收未完成。
 
 ### standalone 与开发测试
 
@@ -102,7 +102,7 @@ ONNX 模型 (SCRFD gnkps + SFace + 双 MiniFAS)
 
 - **FaceLoginService.exe** —— Windows 服务(自动启动)。常驻父进程仅持有公开管道、`users.dat` 与密码解密；锁屏预加载的 `-auth-worker` 子进程持有 ONNX，认证请求后才打开 DirectShow 相机，完成一次认证即退出。禁止锁屏阶段预开摄像头。standalone 同样使用 DirectShow。
 - **FaceLoginCredentialProvider.dll** —— LogonUI 加载的 COM DLL,实现 `ICredentialProvider`/`ICredentialProviderCredential`。
-- **FaceLoginConsole.exe** —— WebView2 注册 GUI。`EnrollmentWizard` 经 COM `IDispatch` 暴露 **37 个方法**(dispId 1–37)。支持多角度采集;设置页渐进式学习开关在 SFace 试用期禁用,日志页含学习状态视图(经 `LEARNING_STATUS` 管道查询)。必须管理员运行。
+- **FaceLoginConsole.exe** —— WebView2 注册 GUI。`EnrollmentWizard` 经 COM `IDispatch` 暴露 **38 个方法**(dispId 1–38)。支持多角度采集;设置页渐进式学习开关在 SFace 试用期禁用,日志页含学习状态视图(经 `LEARNING_STATUS` 管道查询),页脚可查看随包许可声明。必须管理员运行。
 - **FaceLoginSetup.exe** —— 非常驻部署工具,不参与运行期管道通信。Go Wails v2 安装器通过 `embed.FS` 内嵌全部部署资源;安装/卸载流程见 [`docs/modules/installer.md`](docs/modules/installer.md),不要在本文件维护步骤数。
 
 ### 通用库(`common/`)

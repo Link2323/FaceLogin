@@ -231,7 +231,26 @@ body{
 
 /* ========== Footer ========== */
 .footer{width:100%;max-width:640px;padding:8px 0;flex-shrink:0;border-top:1px solid #f3f4f6}
-.footer p{font-size:11px;color:#d1d5db}
+.footer{display:flex;align-items:center;justify-content:space-between}
+.footer p,.footer button{font-size:11px;color:#9ca3af}
+.footer button{border:0;background:none;cursor:pointer;padding:2px 0}
+.footer button:hover{color:#374151}
+.license-modal{width:calc(100% - 2rem);max-width:48rem;height:85vh;display:flex;flex-direction:column;
+  background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 20px 25px -5px rgba(0,0,0,.1);
+  overflow:hidden}
+#license-overlay{background:rgba(0,0,0,.3)}
+.license-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;
+  border-bottom:1px solid #f3f4f6;flex-shrink:0}
+.license-head h2{font-size:14px;font-weight:500;color:#111827}
+.license-head button{border:0;background:none;padding:4px 0;font-size:12px;color:#6b7280;cursor:pointer}
+.license-head button:hover{color:#111827}
+.license-docs{display:flex;gap:16px;padding:12px 20px 0;border-bottom:1px solid #f3f4f6;flex-shrink:0}
+.license-docs button{border:0;border-bottom:2px solid transparent;background:none;padding:0 0 12px;
+  font-size:12px;color:#6b7280;cursor:pointer}
+.license-docs button.active{border-bottom-color:#111827;color:#111827}
+.license-content{flex:1;min-height:0;overflow:auto;padding:16px 20px;background:#fff;
+  white-space:pre-wrap;word-break:break-word;user-select:text;-webkit-user-select:text;
+  font:12px/1.625 "Cascadia Code","Consolas",monospace;color:#374151}
 </style>
 </head>
 <body>
@@ -272,7 +291,7 @@ body{
       <span id="cap-btn-text">开始采集</span>
     </button>
   </div>
-  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p></div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
 </div>
 
 <!-- ================================================================== -->
@@ -313,7 +332,7 @@ body{
       <button class="btn btn-secondary" id="btn-save-cancel" onclick="onPwdCancel()" style="flex:1">取消</button>
     </div>
   </div>
-  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p></div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
 </div>
 
 <!-- ================================================================== -->
@@ -343,7 +362,7 @@ body{
       <button class="btn btn-secondary" onclick="onClearAllFaces()">清空全部</button>
     </div>
   </div>
-  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p></div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
 </div>
 
 <!-- ================================================================== -->
@@ -376,7 +395,7 @@ body{
       <button class="btn btn-secondary" id="btn-append-cancel" onclick="onAppendCancel()" style="flex:1">取消</button>
     </div>
   </div>
-  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p></div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
 </div>
 
 <!-- ================================================================== -->
@@ -483,7 +502,7 @@ body{
     </div>
     </div>
   </div>
-  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p></div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
 </div>
 
 <!-- ================================================================== -->
@@ -576,8 +595,46 @@ body{
   </div>
 </div>
 
+<div class="cam-picker-overlay" id="license-overlay" role="dialog" aria-modal="true" aria-labelledby="license-title">
+  <div class="license-modal">
+    <div class="license-head">
+      <h2 id="license-title">许可声明</h2>
+      <button onclick="closeLicenseViewer()">关闭</button>
+    </div>
+    <div class="license-docs" role="tablist" aria-label="许可文件">
+      <button class="active" data-license="LICENSE.txt" onclick="showLicenseDocument(this)">项目许可</button>
+      <button data-license="THIRD_PARTY_NOTICES.txt" onclick="showLicenseDocument(this)">第三方声明</button>
+      <button data-license="MODEL_LICENSES.txt" onclick="showLicenseDocument(this)">模型许可</button>
+    </div>
+    <div class="license-content" id="license-content" tabindex="0">正在读取许可文件…</div>
+  </div>
+</div>
+
 <script>
 var H = window.chrome.webview.hostObjects.sync.host;
+
+function showLicenseDocument(button) {
+  document.querySelectorAll('.license-docs button').forEach(function(item) {
+    item.classList.toggle('active', item === button);
+  });
+  var content = document.getElementById('license-content');
+  content.textContent = '正在读取许可文件…';
+  try {
+    var text = H.GetLicenseDocument(button.dataset.license);
+    content.textContent = text;
+  } catch (e) {
+    content.textContent = '无法读取许可文件：' + (e && e.message ? e.message : String(e));
+  }
+}
+
+function openLicenseViewer() {
+  document.getElementById('license-overlay').classList.add('active');
+  showLicenseDocument(document.querySelector('.license-docs button.active'));
+}
+
+function closeLicenseViewer() {
+  document.getElementById('license-overlay').classList.remove('active');
+}
 var viewing = true, lastB64 = '', lastFacesJson = '', timer = 0, faceImg = new Image();
 var captureMultiAngle = false;  // set by onCapture, read by finishCapture / showAppendScreen
 // True while an angle sequence is in flight (CaptureFaceSamples started but
@@ -1326,6 +1383,10 @@ function onModalMid() {
     if (e.key === 'Escape' &&
         document.getElementById('modal-overlay').classList.contains('active')) {
       onModalCancel();
+    }
+    if (e.key === 'Escape' &&
+        document.getElementById('license-overlay').classList.contains('active')) {
+      closeLicenseViewer();
     }
   });
 })();

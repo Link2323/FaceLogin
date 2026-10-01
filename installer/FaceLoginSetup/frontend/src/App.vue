@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { GetDefaultPaths, Install, Uninstall, PickDirectory, IsInstalled, LaunchConsole, GetMode } from '../wailsjs/go/main/App'
 import { EventsOn, EventsOff, Quit } from '../wailsjs/runtime'
 
@@ -25,67 +25,11 @@ const licenseDialog = ref<HTMLDialogElement | null>(null)
 const licenseDocuments = [
   { path: 'LICENSE.txt', label: '项目许可' },
   { path: 'THIRD_PARTY_NOTICES.txt', label: '第三方声明' },
-  { path: 'MODEL_LICENSES.md', label: '模型许可' },
+  { path: 'MODEL_LICENSES.txt', label: '模型许可' },
 ]
 const licenseDocument = ref('LICENSE.txt')
 const licenseText = ref('')
 const licenseCache = new Map<string, string>()
-type LicenseBlock =
-  | { type: 'heading'; text: string }
-  | { type: 'paragraph'; text: string }
-  | { type: 'table'; headers: string[]; rows: string[][] }
-
-function splitTableRow(line: string): string[] {
-  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
-}
-
-function parseLicenseMarkdown(markdown: string): LicenseBlock[] {
-  const lines = markdown.replace(/\r\n?/g, '\n').split('\n')
-  const blocks: LicenseBlock[] = []
-  for (let i = 0; i < lines.length;) {
-    const line = lines[i].trim()
-    if (!line) { i++; continue }
-    const heading = line.match(/^#\s+(.+)$/)
-    if (heading) {
-      blocks.push({ type: 'heading', text: heading[1] })
-      i++
-      continue
-    }
-    if (line.includes('|') && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
-      const headers = splitTableRow(line)
-      i += 2
-      const rows: string[][] = []
-      while (i < lines.length && lines[i].trim().includes('|')) rows.push(splitTableRow(lines[i++]))
-      blocks.push({ type: 'table', headers, rows })
-      continue
-    }
-    const paragraph = [line]
-    i++
-    while (i < lines.length && lines[i].trim() && !/^#\s+/.test(lines[i].trim())) {
-      if (lines[i].includes('|') && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) break
-      paragraph.push(lines[i].trim())
-      i++
-    }
-    blocks.push({ type: 'paragraph', text: paragraph.join(' ') })
-  }
-  return blocks
-}
-
-const licenseBlocks = computed(() => parseLicenseMarkdown(licenseText.value))
-
-function plainMarkdownText(text: string): string {
-  return text.replace(/`([^`]+)`/g, '$1')
-}
-
-const modelLicenseText = computed(() => licenseBlocks.value.map(block => {
-  if (block.type === 'heading') return plainMarkdownText(block.text)
-  if (block.type === 'paragraph') return plainMarkdownText(block.text)
-  return block.rows.map(row => [
-    `模型：${row[0]}`,
-    `${block.headers[1]}：${row[1]}`,
-    `${block.headers[2]}：${row[2]}`,
-  ].join('\n')).join('\n\n')
-}).join('\n\n'))
 
 async function showLicenseDocument(path: string) {
   licenseDocument.value = path
@@ -403,7 +347,7 @@ async function doUninstall() {
             :aria-pressed="licenseDocument === doc.path" @click="showLicenseDocument(doc.path)">{{ doc.label }}</button>
         </div>
         <pre class="min-h-0 overflow-auto whitespace-pre-wrap break-words px-5 py-4 text-xs leading-relaxed text-gray-700 select-text"
-          aria-live="polite">{{ licenseDocument === 'MODEL_LICENSES.md' ? modelLicenseText : licenseText }}</pre>
+          aria-live="polite">{{ licenseText }}</pre>
       </div>
     </dialog>
   </div>

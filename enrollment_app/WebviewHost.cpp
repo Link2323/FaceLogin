@@ -5,6 +5,9 @@
 #include "version.h"
 #include <wtsapi32.h>
 #include <shlobj.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "wtsapi32.lib")
@@ -425,6 +428,7 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"CancelCapture") *ids = 35;
     else if (n == L"GetEnrollmentHint") *ids = 36;
     else if (n == L"GetLearningStatus") *ids = 37;
+    else if (n == L"GetLicenseDocument") *ids = 38;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -441,15 +445,35 @@ static std::wstring OptionalArg(DISPPARAMS* p, UINT argIdx) {
 static VARIANT MakeStr(const std::string& s) {
     VARIANT v; VariantInit(&v);
     if (!s.empty()) {
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+        if (wlen <= 0) {
+            v.vt = VT_BSTR;
+            v.bstrVal = SysAllocString(L"");
+            return v;
+        }
         v.vt = VT_BSTR;
-        v.bstrVal = SysAllocStringLen(nullptr, wlen - 1);
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, v.bstrVal, wlen);
+        v.bstrVal = SysAllocStringLen(nullptr, wlen);
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), v.bstrVal, wlen);
     } else { v.vt = VT_BSTR; v.bstrVal = SysAllocString(L""); }
     return v;
 }
 static VARIANT MakeBool(bool v) { VARIANT var; VariantInit(&var); var.vt = VT_BOOL; var.boolVal = v ? VARIANT_TRUE : VARIANT_FALSE; return var; }
 static VARIANT MakeInt(int v)  { VARIANT var; VariantInit(&var); var.vt = VT_I4; var.lVal = v; return var; }
+
+static std::string ReadLicenseDocument(const std::wstring& name) {
+    // Expose only the three canonical documents shipped beside the console.
+    // The allow-list also prevents path traversal through the WebView bridge.
+    if (name != L"LICENSE.txt" && name != L"THIRD_PARTY_NOTICES.txt" &&
+        name != L"MODEL_LICENSES.txt") return "Unsupported license document.";
+
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return "Unable to locate the console license files.";
+    const auto path = std::filesystem::path(exePath).parent_path() / name;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return "License document is unavailable. Reinstall FaceLogin or restore the license files beside FaceLoginConsole.exe.";
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
 
 STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS* p, VARIANT* res, EXCEPINFO*, UINT*) {
     if (!m_wizard) return E_FAIL;
@@ -542,6 +566,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 35: m_wizard->CancelCapture(); break;
         case 36: if (res) *res = MakeStr(m_wizard->GetEnrollmentHint()); break;
         case 37: if (res) *res = MakeStr(m_wizard->GetLearningStatus()); break;
+        case 38: if (res) *res = MakeStr(ReadLicenseDocument(OptionalArg(p, 0))); break;
         case 18: if (res) *res = MakeStr(m_wizard->GetUserSid()); break;
         case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
         case 20: if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces()); break;

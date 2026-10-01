@@ -24,7 +24,7 @@ cmake -B build -S . -G 'Visual Studio 18 2026' -DCMAKE_TOOLCHAIN_FILE='C:/vcpkg/
 cmake --build build --config Release --parallel
 ```
 
-按本机 Visual Studio 版本选择 generator。默认构建生成 Service、Credential Provider 和 Console；`tools/` 下诊断程序与测试目标需通过 `--target <target>` 显式构建。Console 和正式模型会直接复制到安装器资源目录。
+按本机 Visual Studio 版本选择 generator。默认构建生成 Service、Credential Provider 和 Console；`tools/` 下诊断程序与测试目标需通过 `--target <target>` 显式构建。Console、正式模型和 Console 内许可查看器所需文件会直接复制到安装器资源目录。
 
 主要输出：
 
@@ -71,7 +71,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 
 - `FaceLoginService.exe`、`FaceLoginCredentialProvider.dll`、`FaceLoginConsole.exe`、`uninstall.exe`
 - 五个运行时 DLL：`onnxruntime.dll`、`libprotobuf.dll`、`libprotobuf-lite.dll`、`re2.dll`、`abseil_dll.dll`
-- `LICENSE.txt`、`THIRD_PARTY_NOTICES.txt`、`MODEL_LICENSES.md`
+- `LICENSE.txt`、`THIRD_PARTY_NOTICES.txt`、`MODEL_LICENSES.txt`
 
 `resources/models/` 只放四个正式 ONNX 模型。离线工具、旧 DLL、临时文件和其他残留都不得打包。新增载荷文件时同步更新静态卸载清单与测试。
 
@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 
 ### 许可文件
 
-根目录 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 和 [`third_party/MODEL_LICENSES.md`](../third_party/MODEL_LICENSES.md) 是随包许可说明的事实源。详细模型来源核查记录保留在 [`model-licenses.md`](model-licenses.md)。依赖升级后重新生成第三方声明；`scripts/stage_licenses.ps1` 将面向用户的许可说明复制到安装载荷和前端。
+根目录 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 和 [`third_party/MODEL_LICENSES.txt`](../third_party/MODEL_LICENSES.txt) 是随包许可说明的事实源。详细模型来源核查记录保留在 [`model-licenses.md`](model-licenses.md)。依赖升级后重新生成第三方声明；`scripts/stage_licenses.ps1` 将许可文件复制到安装载荷和前端。注册 Console 页脚的“许可声明”入口从 Console 同目录读取这三份文件。
 
 ### 载荷压缩
 

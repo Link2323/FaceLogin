@@ -8,7 +8,7 @@ $setup = Join-Path $root 'installer/FaceLoginSetup'
 $copies = @(
     @{ source = 'LICENSE'; name = 'LICENSE.txt' },
     @{ source = 'THIRD_PARTY_NOTICES.txt'; name = 'THIRD_PARTY_NOTICES.txt' },
-    @{ source = 'third_party/MODEL_LICENSES.md'; name = 'MODEL_LICENSES.md' }
+    @{ source = 'third_party/MODEL_LICENSES.txt'; name = 'MODEL_LICENSES.txt' }
 )
 foreach ($copy in $copies) {
     $source = Join-Path $root $copy.source

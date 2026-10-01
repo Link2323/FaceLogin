@@ -73,6 +73,8 @@ set_target_properties(FaceLoginConsole PROPERTIES
 # installer's ignored packaging copies whenever the enrollment console builds;
 # exact go:embed patterns make an incomplete model set a hard build failure.
 add_custom_command(TARGET FaceLoginConsole POST_BUILD
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
+            "${CMAKE_SOURCE_DIR}/scripts/stage_licenses.ps1"
     COMMAND ${CMAKE_COMMAND} -E make_directory
             "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -87,5 +89,5 @@ add_custom_command(TARGET FaceLoginConsole POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/assets/models/MiniFASNetV1SE.onnx"
             "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/MiniFASNetV1SE.onnx"
-    COMMENT "Preparing canonical runtime models for installer"
+    COMMENT "Staging license documents and canonical runtime models"
 )

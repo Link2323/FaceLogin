@@ -59,7 +59,7 @@ func TestPayloadZipExtractionChain(t *testing.T) {
 	for name, source := range map[string]string{
 		"LICENSE.txt":             "../../LICENSE",
 		"THIRD_PARTY_NOTICES.txt": "../../THIRD_PARTY_NOTICES.txt",
-		"MODEL_LICENSES.md":       "../../third_party/MODEL_LICENSES.md",
+		"MODEL_LICENSES.txt":      "../../third_party/MODEL_LICENSES.txt",
 	} {
 		want, err := os.ReadFile(source)
 		if err != nil {
