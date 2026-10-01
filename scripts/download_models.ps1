@@ -40,24 +40,12 @@ $detectorInt8 = @{
     Size = 4257451
     Sha256 = '07B62718EB454EE1881465C12D0D0546F2E916E3BB549F142DC221729BF7F4DC'
 }
-# The release recognizer is a locally-quantized INT8 build (static QDQ,
-# per-tensor) of the pinned FP32 artifact — see
-# tools/threshold_calibration/quantize_r50.py for the experiment + calibration
-# that validated it (same-angle p50 0.665 -> 0.694, 1.68x on the dev CPU).
-# This script downloads the pinned FP32 model, then quantizes it in place.
-$recognizerFp32 = @{
-    Name = 'w600k_r50.fp32.onnx'
-    # Third-party mirror has no model card or separate rights grant. The pinned
-    # download identifies bytes; licensing remains pending with InsightFace.
-    # See third_party/models/w600k-r50/ for policy evidence and request draft.
-    Url = 'https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/6c1850698e6b40a2c24f353531545bca5c5864ff/w600k_r50.onnx'
-    Size = 174383860
-    Sha256 = '4C06341C33C2CA1F86781DAB0E829F88AD5B64BE9FBA56E56BC9EBDEFC619E43'
-}
-$recognizerInt8 = @{
-    Name = 'w600k_r50.onnx'
-    Size = 43805153
-    Sha256 = 'B9B2EA32AFAA88DFD226255F354EA241C3A744ABF75B3DBDCF00C95F7F00E185'
+# Pinned, unmodified OpenCV SFace FP32 export; normalization is inside ONNX.
+$recognizer = @{
+    Name = 'face_recognition_sface_2021dec.onnx'
+    Url = 'https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx'
+    Size = 38696353
+    Sha256 = '0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79'
 }
 
 function Test-PinnedFile {
@@ -152,36 +140,14 @@ else {
     Write-Host "[OK] $($detectorInt8.Name) quantized and verified." -ForegroundColor Green
 }
 
-$recognizerFp32Path = Join-Path $ModelsDir $recognizerFp32.Name
-$recognizerPath = Join-Path $ModelsDir $recognizerInt8.Name
-if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizerInt8.Size -ExpectedSha256 $recognizerInt8.Sha256) {
-    Write-Host "[SKIP] $($recognizerInt8.Name) is already the verified INT8 artifact." -ForegroundColor Green
-}
-else {
-    # 1. Fetch + pin the canonical FP32 model.
-    if (Test-PinnedFile -Path $recognizerFp32Path -ExpectedSize $recognizerFp32.Size -ExpectedSha256 $recognizerFp32.Sha256) {
-        Write-Host "[SKIP] $($recognizerFp32.Name) is already verified." -ForegroundColor Green
+$recognizerPath = Join-Path $ModelsDir $recognizer.Name
+if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256) {
+    Write-Host "[SKIP] $($recognizer.Name) is already verified." -ForegroundColor Green
+} else {
+    Download-File -Url $recognizer.Url -Destination $recognizerPath
+    if (-not (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256)) {
+        throw "SFace recognizer did not match the pinned OpenCV artifact."
     }
-    else {
-        Write-Host "[DOWNLOAD] $($recognizerFp32.Name)" -ForegroundColor Yellow
-        Download-File -Url $recognizerFp32.Url -Destination $recognizerFp32Path
-        if (-not (Test-PinnedFile -Path $recognizerFp32Path -ExpectedSize $recognizerFp32.Size -ExpectedSha256 $recognizerFp32.Sha256)) {
-            throw "Recognizer did not match the pinned artifact: $recognizerFp32Path"
-        }
-        Write-Host "[OK] $($recognizerFp32.Name) verified." -ForegroundColor Green
-    }
-
-    # 2. Quantize in place to the release INT8 artifact.
-    Write-Host "[QUANTIZE] $($recognizerFp32.Name) -> $($recognizerInt8.Name)" -ForegroundColor Yellow
-    $quantizer = Join-Path $PSScriptRoot '..\tools\threshold_calibration\quantize_r50.py'
-    & $PythonExe $quantizer --recognizer $recognizerFp32Path --output $recognizerPath --images $CalibImages --no-bench
-    if ($LASTEXITCODE -ne 0) {
-        throw "r50 quantization failed with exit code $LASTEXITCODE. Pass -CalibImages to point at a folder of real face photos (one subdir per person)."
-    }
-    if (-not (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizerInt8.Size -ExpectedSha256 $recognizerInt8.Sha256)) {
-        throw "Quantized recognizer did not match the pinned artifact: $recognizerPath"
-    }
-    Write-Host "[OK] $($recognizerInt8.Name) quantized and verified." -ForegroundColor Green
 }
 
 # The shared downloader pins and verifies both calibrated MiniFAS models.

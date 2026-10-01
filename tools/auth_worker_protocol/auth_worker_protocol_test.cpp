@@ -106,12 +106,17 @@ void TestMatchProbeValidation() {
     float yaw = 0.0f, pitch = 0.0f;
     Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding, 21.5f, -30.0f, 5.0f),
                            index, decoded, preNorm, yaw, pitch),
-          "valid normalized 512-D match probe decodes");
+          "valid normalized 128-D match probe decodes");
     Check(index == 2 && decoded == embedding && preNorm == 21.5f &&
               std::fabs(yaw - (-30.0f)) < 1e-4f &&
               std::fabs(pitch - 5.0f) < 1e-4f,
           "match probe round trip preserves index, embedding, pre-norm and pose");
 
+    auto oldR50 = std::vector<float>(512, 0.0f);
+    oldR50[0] = 1.0f;
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, oldR50, 21.5f, 0.0f, 0.0f),
+                           index, decoded, preNorm, yaw, pitch),
+          "complete old R50 probe cannot cross the SFace boundary");
     auto invalid = embedding;
     invalid[17] = std::numeric_limits<float>::quiet_NaN();
     Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f, 0.0f, 0.0f),
@@ -139,14 +144,14 @@ void TestMatchProbeValidation() {
 
     PayloadWriter shortWriter;
     shortWriter.WriteU32(0);
-    shortWriter.WriteFloatVector(std::vector<float>(511, 0.0f));
+    shortWriter.WriteFloatVector(std::vector<float>(127, 0.0f));
     Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded, preNorm, yaw, pitch),
-          "511-D match probe is rejected");
+          "127-D match probe is rejected");
     PayloadWriter longWriter;
     longWriter.WriteU32(0);
-    longWriter.WriteFloatVector(std::vector<float>(513, 0.0f));
+    longWriter.WriteFloatVector(std::vector<float>(129, 0.0f));
     Check(!DecodeMatchProbe(longWriter.Data(), index, decoded, preNorm, yaw, pitch),
-          "513-D match probe is rejected");
+          "129-D match probe is rejected");
     PayloadWriter noNormWriter;
     noNormWriter.WriteU32(0);
     noNormWriter.WriteFloatVector(embedding);

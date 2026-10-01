@@ -1,5 +1,7 @@
 # 认证 worker 私有 IPC 契约
 
+当前协议版本为 **8**：只接受 128 维 SFace 嵌入，旧 R50 worker 与父进程不能混用。
+
 本文是 `FaceLoginService.exe` 父服务与同一 EXE 的 `-auth-worker` 模式之间的线协议事实源。它不替代 Credential Provider 使用的公共命名管道；公共协议见 [`ipc.md`](ipc.md)。实现位于 `face_service/auth_worker_protocol.*`，父端状态机位于 `auth_worker_client.*`。
 
 ## 通道与安全边界
@@ -8,7 +10,7 @@
 - `CreateProcessW` 使用绝对 EXE 路径、完整引号、`CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT`。
 - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只允许继承两只 worker 管道句柄。父进程先把子进程加入带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job，再恢复主线程。
 - worker 必须以 LocalSystem 运行，并在取得有效继承句柄、完成 `HELLO → INIT → READY` 握手后才进入就绪态；任一条件不成立立即退出。
-- 通道只承载配置、状态文本、三条 512-D embedding 和判定结果。用户名、SID、密码、DPAPI 密文、`users.dat` 记录及完整 `AUTH_SUCCESS` 永不进入 worker 通道。
+- 通道只承载配置、状态文本、三条 128-D SFace embedding 和判定结果。用户名、SID、密码、DPAPI 密文、`users.dat` 记录及完整 `AUTH_SUCCESS` 永不进入 worker 通道。
 - worker 仍位于服务的 Session 0；该协议不授予它进入交互用户 Session 的能力。
 
 ## 固定头
@@ -18,7 +20,7 @@
 ```cpp
 struct MessageHeader {
     uint32_t magic;       // 0x4B574C46，即 "FLWK"
-    uint16_t version;     // 7
+    uint16_t version;     // 8
     uint16_t type;
     uint64_t requestId;
     uint32_t payloadSize;
@@ -72,14 +74,14 @@ v5 及之前的线上在该表 `cameraDevice` 之前还有一个 `uint32 lowLigh
 
 ```text
 uint32 bindingIndex       // 线上严格为 0 → 1 → 2；日志显示为 1/3 → 2/3 → 3/3
-uint32 embeddingCount     // 必须恰好 512
-float  embedding[512]
+uint32 embeddingCount     // 必须恰好 128
+float  embedding[128]
 float  preNorm            // 归一化前的识别器输出范数（质量信号，必须有限且 >0）
 float  yawDeg             // 帧姿态 yaw 估计（度，有限且 |v| ≤ 90）    ← v5
 float  pitchDeg           // 帧姿态 pitch 估计（同上）                 ← v5
 ```
 
-每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 供父端渐进学习的范数门使用（w600k_r50 量级 ≈20–25，嵌入本身以归一化形态传输、范数不可从向量恢复）；`yawDeg`/`pitchDeg` 由 worker 侧 `EstimateYawDeg`/`EstimatePitchDeg`（`face_align.h` 弱透视模型，与录入同源）从绑定帧关键点估计，供父端学习姿态锥门使用（`docs/progressive-learning-v2.md` §3）。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
+每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 保留归一化前范数（不可从归一化向量恢复），SFace 离线样本中位数约 12.77；当前渐进学习关闭，旧 R50 范数门不能用于 SFace。`yawDeg`/`pitchDeg` 由 worker 侧 `EstimateYawDeg`/`EstimatePitchDeg`（`face_align.h` 弱透视模型，与录入同源）从绑定帧关键点估计，供后续学习姿态锥门验证使用（`docs/progressive-learning-v2.md` §3）。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
 
 `AuthSucceeded` 的 `AuthTiming` 顺序固定为：
 
@@ -115,4 +117,4 @@ worker 每次最多处理一个 `StartAuth`。成功、失败或超时终态写�
 
 ## 验证入口
 
-`AuthWorkerProtocolTest` 覆盖消息往返、超长/截断、magic/version/type、配置边界、512 维、NaN/Inf/异常范数、binding 越序/重复/缺失和 request ID 不一致。`AuthWorkerLifecycleTest` 使用同一父端 supervisor 的 mock worker 覆盖启动失败、模型失败、崩溃、超时、断管、取消、100 次创建/认证/退出以及父进程退出时 Job 杀死子进程。
+`AuthWorkerProtocolTest` 覆盖消息往返、超长/截断、magic/version/type、配置边界、128 维 SFace、NaN/Inf/异常范数、binding 越序/重复/缺失和 request ID 不一致。`AuthWorkerLifecycleTest` 使用同一父端 supervisor 的 mock worker 覆盖启动失败、模型失败、崩溃、超时、断管、取消、100 次创建/认证/退出以及父进程退出时 Job 杀死子进程。

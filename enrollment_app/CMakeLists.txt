@@ -79,8 +79,8 @@ add_custom_command(TARGET FaceLoginConsole POST_BUILD
             "${CMAKE_SOURCE_DIR}/assets/models/det_10g_gnkps.onnx"
             "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/det_10g_gnkps.onnx"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/assets/models/w600k_r50.onnx"
-            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/w600k_r50.onnx"
+            "${CMAKE_SOURCE_DIR}/assets/models/face_recognition_sface_2021dec.onnx"
+            "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/face_recognition_sface_2021dec.onnx"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/assets/models/MiniFASNetV2.onnx"
             "${CMAKE_SOURCE_DIR}/installer/FaceLoginSetup/resources/models/MiniFASNetV2.onnx"

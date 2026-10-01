@@ -41,7 +41,7 @@ $rootAllow = @(
     "re2.dll", "abseil_dll.dll",
     "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.md"
 )
-$modelAllow = @("det_10g_gnkps.onnx", "w600k_r50.onnx", "MiniFASNetV2.onnx", "MiniFASNetV1SE.onnx")
+$modelAllow = @("det_10g_gnkps.onnx", "face_recognition_sface_2021dec.onnx", "MiniFASNetV2.onnx", "MiniFASNetV1SE.onnx")
 
 $total = [System.Diagnostics.Stopwatch]::StartNew()
 function Step([string]$Title, [scriptblock]$Body) {

@@ -1,6 +1,6 @@
-// One-off verification tool: confirm that the INT8-quantized w600k_r50
-// (QDQ static, per-tensor) loads and embeds identically in the PRODUCTION C++
-// onnxruntime (1.23.2) as measured in Python, and time it.
+// Verify the pinned SFace recognizer in the native C++ ONNX Runtime.
+// The current adapter accepts SFace only; historical R50/AuraFace need their old build.
+// Optional FACELOGIN_EMBEDDING_DUMP writes vectors to an ignored research file.
 //
 // Usage: EmbeddingTest <chip_dir> <model1> [model2 ...]
 //   chip_dir: 112x112 BMP chips named like the enrollment photos
@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <vector>
 
@@ -110,6 +111,14 @@ int main(int argc, char** argv) {
         return 2;
     }
     const fs::path chipDir = argv[1];
+    // Optional numerical cross-check output, owned by the caller's ignored
+    // evaluation directory. Embeddings are biometric data; never write logs.
+    std::ofstream dump;
+    if (const char* path = std::getenv("FACELOGIN_EMBEDDING_DUMP")) {
+        dump.open(path, std::ios::trunc);
+        if (!dump) return 1;
+        dump << std::setprecision(9);
+    }
 
     std::vector<facelogin::FrameImage> chips;
     std::vector<std::string> names;
@@ -155,8 +164,13 @@ int main(int argc, char** argv) {
             auto emb = rec.ComputeEmbedding(chips[i]);
             const auto t1 = std::chrono::steady_clock::now();
             if (emb.empty()) {
-                std::cerr << "[warn] empty embedding for " << names[i] << "\n";
-                continue;
+                std::cerr << "[FAIL] empty embedding for " << names[i] << "\n";
+                return 1;
+            }
+            if (dump.is_open()) {
+                dump << names[i];
+                for (float value : emb) dump << ',' << value;
+                dump << '\n';
             }
             embs.push_back(std::move(emb));
             times.push_back(

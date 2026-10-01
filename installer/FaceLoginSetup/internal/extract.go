@@ -41,10 +41,10 @@ var requiredModels = []requiredModel{
 		sha256:       "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc",
 	},
 	{
-		embeddedPath: "resources/models/w600k_r50.onnx",
-		fileName:     "w600k_r50.onnx",
-		size:         43805153,
-		sha256:       "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185",
+		embeddedPath: "resources/models/face_recognition_sface_2021dec.onnx",
+		fileName:     "face_recognition_sface_2021dec.onnx",
+		size:         38696353,
+		sha256:       "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
 	},
 	{
 		embeddedPath: "resources/models/MiniFASNetV2.onnx",
@@ -82,6 +82,7 @@ var currentRootPayloadFiles = []string{
 // Files deployed by earlier releases but intentionally absent from the current
 // manifest. Upgrade and uninstall remove only these exact legacy names.
 var legacyModelFiles = []string{
+	"w600k_r50.onnx",
 	"OULU_Protocol_2_model_0_0.onnx",
 }
 

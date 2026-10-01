@@ -1,17 +1,20 @@
 #pragma once
+#include "recognizer_profile.h"
 
 #include <string>
 
 namespace facelogin {
 
 struct AppConfig {
-    float          match_threshold        = 0.80f;       // 512-D calibrated; EmbeddingThresholdForDim clamps to [0.70, 1.00]
+    float          match_threshold        = kDefaultMatchThreshold; // SFace trial ceiling; not production calibration
     float          anti_spoof_threshold   = 0.28f;       // 50/50 MiniFAS fusion threshold; UI default on a 0.01 grid (calibration point 0.281)
     std::string    camera_device          = "";          // device symbolic link; empty = first camera
     // Camera rotation in degrees clockwise. Valid: 0, 90, 180, 270.
     // Use when the camera is physically mounted in a non-standard
     // orientation (e.g., vertical PC mount / sideways webcam).
     int            camera_rotation        = 0;
+    // SFace trial forces learning off until model-specific gates are validated.
+    // Dormant R50 learning parameters below are retained only for future research.
     // Template learning (docs/progressive-learning-v2.md). Two independent
     // channels: ema_learning = success-path EMA fine-tune of the matched
     // template after each successful auth; failure_learning = the deferred
@@ -19,8 +22,8 @@ struct AppConfig {
     // Both off = templates are strictly read-only. Renamed from
     // progressive_learning on 2026-09-04 (red line 7: independent switches;
     // the legacy key is still honored on read when the new one is absent).
-    bool           ema_learning           = true;
-    bool           failure_learning       = true;
+    bool           ema_learning           = false;
+    bool           failure_learning       = false;
     // Per-update blend factor. Clamped to [0.05, 0.15]; effective alpha
     // additionally decays as alpha/(1+n) with n = updates already accepted
     // today (drift guard against same-pose bursts).

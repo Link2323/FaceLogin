@@ -39,6 +39,21 @@
     "file": "models/w600k-r50/model-zoo.md",
     "revision": "317d33497a4342351666a1dec69b7176eb67084e",
     "sha256": "3334e8c7945819ee04002b260d2f2a755e8508768215ed6f778916cb3dfc5ccb",
-    "url": "https://raw.githubusercontent.com/deepinsight/insightface/317d33497a4342351666a1dec69b7176eb67084e/python-package/docs/model_zoo.md"
+    "url": "https://raw.githubusercontent.com/deepinsight/insightface/317d33497a4342351666a1dec69b7176eb67084e/python-package/docs/model_zoo.md",
+    "distributed": false
+  },
+  {
+    "component": "OpenCV SFace recognition weights - Apache-2.0",
+    "file": "models/sface/LICENSE.txt",
+    "revision": "47534e27c9851bb1128ccc0102f1145e27f23f98",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/LICENSE"
+  },
+  {
+    "component": "OpenCV SFace recognition weights - Apache-2.0",
+    "file": "models/sface/model-card.md",
+    "revision": "47534e27c9851bb1128ccc0102f1145e27f23f98",
+    "sha256": "e090e126f3fb5c0b0b2d84ee644b17e42a70b2e45a90616814970b811e91d063",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/README.md"
   }
 ]

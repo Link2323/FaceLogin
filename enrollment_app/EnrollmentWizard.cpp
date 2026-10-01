@@ -5,6 +5,8 @@
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
 #include "../common/frame_image.h"
+#include "../common/model_hashes.h"
+#include "../common/sha256_util.h"
 #include "../face_service/face_gain_tune.h"
 #include <comdef.h>
 #include <shlobj.h>
@@ -364,10 +366,11 @@ bool EnrollmentWizard::StartPreview() {
         return false;
     }
 
-    // Load InsightFace ONNX recognizer (the only recognizer).
+    // Load the pinned OpenCV SFace recognizer.
     m_onnxRecognizer = std::make_unique<OnnxRecognizer>();
-    std::wstring onnxPath = modelsDir + L"\\w600k_r50.onnx";
-    if (!m_onnxRecognizer->Initialize(onnxPath)) {
+    std::wstring onnxPath = modelsDir + L"\\face_recognition_sface_2021dec.onnx";
+    if (!VerifyModelIntegrity(onnxPath, model_hashes::kRecognizer, L"OpenCV SFace recognizer") ||
+        !m_onnxRecognizer->Initialize(onnxPath)) {
         FACELOGIN_ERROR(L"ONNX recognizer failed to load — enrollment unavailable");
         m_webcam->Shutdown();
         return false;
@@ -967,8 +970,8 @@ bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
                 break;
             }
 
-            // Compute the embedding with InsightFace ONNX (the only recognizer).
-            // Store the FULL 512-D embedding (no truncation). emb_norm is the
+            // Compute the embedding with the pinned SFace recognizer.
+            // Store the FULL 128-D SFace embedding (no truncation). emb_norm is the
             // pre-normalization L2 norm (quality signal, progressive-learning
             // phase 0 calibration).
             float embNorm = 0.0f;
@@ -1364,12 +1367,8 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
         // Embedding consistency check: verify all samples in this angle group
         // are from the same person. Compute average pairwise distance — if it
         // exceeds the cap, reject.
-        // Same-person distances are typically well below 0.80 (the ONNX
-        // boundary); different people exceed it.
-        //
-        // Same-person cap for 512-D ONNX: 0.80 (measured boundary, credential_store.h).
-        // EmbeddingThresholdForDim returns 0.80 for ≥256-D regardless of base;
-        // passing 0.80 explicitly avoids the misleading dlib-era 0.45 legacy value.
+        // SFace trial uses the bounded 1.00 consistency cap for each angle.
+        // It is independent of cross-angle registration and does not average poses.
         {
             double totalDist = 0.0;
             int pairs = 0;
@@ -1385,7 +1384,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
                 }
             }
             double avgPairDist = (pairs > 0) ? totalDist / pairs : 0.0;
-            float maxAllowed = EmbeddingThresholdForDim(0.80f, dim);
+            float maxAllowed = EmbeddingThresholdForDim(kDefaultMatchThreshold, dim);
             FACELOGIN_INFO(L"Enrollment consistency [%ls]: avg pairwise dist=%.4f (max=%.3f, %d pairs, %zu-D)",
                           g.label, avgPairDist, maxAllowed, pairs, dim);
             if (avgPairDist > maxAllowed) {
@@ -1404,8 +1403,13 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
             for (size_t k = 0; k < dim; k++) avgEmbedding[k] += emb[k];
         }
         for (float& v : avgEmbedding) v /= static_cast<float>(g.count);
+        double squaredNorm = 0.0;
+        for (float v : avgEmbedding) squaredNorm += static_cast<double>(v) * v;
+        const double averageNorm = std::sqrt(squaredNorm);
+        if (!std::isfinite(averageNorm) || averageNorm <= 1e-8) return false;
+        for (float& v : avgEmbedding) v = static_cast<float>(v / averageNorm);
 
-        // Full dimensionality — 512-D for ONNX. Never truncate.
+        // Full dimensionality — 128-D SFace for ONNX. Never truncate.
         std::vector<float> ef = std::move(avgEmbedding);
 
         // create-or-append (1.3.0): the same account may hold several faces.

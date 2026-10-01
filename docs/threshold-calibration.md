@@ -1,3 +1,5 @@
+> 2026-10-01：本文数值为 R50 历史标定。当前 SFace 试用采用距离上限 1.00、ratio=0.75，尚无生产 FAR 或真实明暗环境验收；见 [SFace 试用记录](sface-trial.md)。PAD 历史标定仍适用。
+
 # 人脸识别匹配阈值标定报告
 
 > 验证 `face_service/credential_store.h` 中 `EmbeddingThresholdForDim` 对 512-D 模型硬编码的 **0.80** 匹配阈值是否合理。所有距离均由 `tools/threshold_calibration/calibrate.py` 测得，计算口径与生产 C++ 认证管线完全一致：SCRFD 检测 → 5 点对齐 → w600k_r50 生成 512 维嵌入 → L2 归一化 → 欧氏距离。

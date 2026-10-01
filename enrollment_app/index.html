@@ -242,7 +242,7 @@ body{
 <div id="screen-cam" class="screen active">
   <div class="header">
     <h1>FaceLogin Console</h1>
-    <p>人脸识别登录系统 · 控制台</p>
+    <p>人脸识别登录系统 · SFace 试用版</p>
   </div>
   <div class="tabs">
     <span class="tab active" onclick="switchTab('cam')">录入</span>
@@ -281,7 +281,7 @@ body{
 <div id="screen-pwd" class="screen">
   <div class="header">
     <h1>FaceLogin Console</h1>
-    <p>人脸识别登录系统 · 控制台</p>
+    <p>人脸识别登录系统 · SFace 试用版</p>
   </div>
   <div class="tabs"><span class="tab active">录入</span></div>
   <div class="pwd-body">
@@ -322,7 +322,7 @@ body{
 <div id="screen-faces" class="screen">
   <div class="header">
     <h1>FaceLogin Console</h1>
-    <p>人脸识别登录系统 · 控制台</p>
+    <p>人脸识别登录系统 · SFace 试用版</p>
   </div>
   <div class="tabs">
     <span class="tab" onclick="switchTab('cam')">录入</span>
@@ -352,7 +352,7 @@ body{
 <div id="screen-append" class="screen">
   <div class="header">
     <h1>FaceLogin Console</h1>
-    <p>人脸识别登录系统 · 控制台</p>
+    <p>人脸识别登录系统 · SFace 试用版</p>
   </div>
   <div class="tabs"><span class="tab active">录入</span></div>
   <div class="pwd-body">
@@ -385,7 +385,7 @@ body{
 <div id="screen-settings" class="screen">
   <div class="header">
     <h1>FaceLogin Console</h1>
-    <p>人脸识别登录系统 · 控制台</p>
+    <p>人脸识别登录系统 · SFace 试用版</p>
   </div>
   <div class="tabs">
     <span class="tab" onclick="switchTab('cam')">录入</span>
@@ -435,9 +435,9 @@ body{
       <div class="field">
         <div class="label-row">
           <label>识别容差</label>
-          <span class="set-val" id="cfg-threshold-val">0.80</span>
+          <span class="set-val" id="cfg-threshold-val">1.00</span>
         </div>
-        <input type="range" id="cfg-threshold" min="0.70" max="1.00" value="0.80" step="0.01"
+        <input type="range" id="cfg-threshold" min="0.70" max="1.00" value="1.00" step="0.01"
                oninput="document.getElementById('cfg-threshold-val').textContent=parseFloat(this.value).toFixed(2)">
         <div class="slider-ends"><span>严（少误认）</span><span>松（少拒认）</span></div>
       </div>
@@ -457,11 +457,11 @@ body{
       <h3>渐进式学习 <span class="badge">实验性</span></h3>
       <div class="field">
         <label class="switch-row">
-          <input type="checkbox" id="cfg-learning" class="switch-input">
+          <input type="checkbox" id="cfg-learning" class="switch-input" disabled>
           <span class="switch-track"></span>
           <span>认证成功后自动微调人脸模板</span>
         </label>
-        <p class="dim">跟随发型、光线等外貌变化自动更新模板；若识别异常可先关闭排查。</p>
+        <p class="dim">SFace 的自动更新参数正在验证，试用期间暂时关闭。</p>
       </div>
 
       <div class="field">
@@ -469,7 +469,7 @@ body{
           <label>自动更新幅度</label>
           <span class="set-val" id="cfg-learn-gate-val">0.65</span>
         </div>
-        <input type="range" id="cfg-learn-gate" min="0.60" max="0.68" value="0.65" step="0.01"
+        <input type="range" id="cfg-learn-gate" disabled min="0.60" max="0.68" value="0.65" step="0.01"
                oninput="document.getElementById('cfg-learn-gate-val').textContent=parseFloat(this.value).toFixed(2)">
         <div class="slider-ends"><span>保守（更新少）</span><span>积极（更新多）</span></div>
       </div>
@@ -492,7 +492,7 @@ body{
 <div id="screen-logs" class="screen">
   <div class="header">
     <h1>FaceLogin Console</h1>
-    <p>人脸识别登录系统 · 控制台</p>
+    <p>人脸识别登录系统 · SFace 试用版</p>
   </div>
   <div class="tabs">
     <span class="tab" onclick="switchTab('cam')">录入</span>
@@ -927,7 +927,7 @@ function loadSettings() {
     // match_threshold is now honored in the calibrated band [0.70, 1.00]
     // (EmbeddingThresholdForDim clamps outside values). Slider maps directly
     // to the distance threshold; lower = stricter.
-    var matchThr = Number(cfg.match_threshold || 0.80);
+    var matchThr = Number(cfg.match_threshold || 1.00);
     matchThr = Math.max(0.70, Math.min(1.00, matchThr));   // clamp to slider range
     document.getElementById('cfg-threshold').value = matchThr;
     document.getElementById('cfg-threshold-val').textContent = matchThr.toFixed(2);
@@ -985,10 +985,10 @@ function onResetDefaults() {
   document.getElementById('cfg-rotation').value = '0';
   var camSel = document.getElementById('cfg-camera');
   if (camSel.querySelector('option[value=""]')) camSel.value = '';
-  document.getElementById('cfg-learning').checked = true;
+  document.getElementById('cfg-learning').checked = false;
   document.getElementById('cfg-fastunlock').checked = false;
-  document.getElementById('cfg-threshold').value = 0.80;
-  document.getElementById('cfg-threshold-val').textContent = '0.80';
+  document.getElementById('cfg-threshold').value = 1.00;
+  document.getElementById('cfg-threshold-val').textContent = '1.00';
   document.getElementById('cfg-antispoof-threshold').value = 0.28;
   document.getElementById('cfg-asthr-val').textContent = '0.28';
   document.getElementById('cfg-learn-gate').value = 0.65;

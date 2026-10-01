@@ -31,7 +31,7 @@ namespace facelogin {
 //
 // The face recognition pipeline:
 //   Webcam -> SCRFD detection (+5 keypoints) -> 5-point similarity alignment
-//   -> 512-D embedding -> Match against stored DB -> dual MiniFAS silent
+//   -> 128-D SFace embedding -> Match against stored DB -> dual MiniFAS silent
 //   anti-spoof check -> Send credentials
 
 class FaceService {

@@ -10,8 +10,8 @@
 
 namespace facelogin {
 
-// ONNX-based face recognition using InsightFace (w600k_mbf / w600k_r50).
-// Embedding dimension: 512 (auto-detected from the model output).
+// ONNX-based face recognition using the pinned OpenCV SFace model.
+// Embedding dimension: 128 (validated against the pinned model contract).
 class OnnxRecognizer {
 public:
     OnnxRecognizer() = default;
@@ -19,7 +19,7 @@ public:
 
     bool Initialize(const std::wstring& modelPath);
 
-    // Compute 512-D embedding from a face chip (already aligned, 112x112 RGB).
+    // Compute 128-D embedding from a face chip (already aligned, 112x112 RGB).
     // Returns empty vector on failure. When outPreNorm is non-null it receives
     // the embedding's L2 norm BEFORE normalization (unchanged on failure) — a
     // MagFace-style quality signal (higher norm = cleaner chip). The returned

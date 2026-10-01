@@ -5,47 +5,25 @@
 #include <optional>
 #include <cstdint>
 #include <cmath>
+#include "../common/recognizer_profile.h"
 
 namespace facelogin {
 
-// Map a base "strictness" threshold to the embedding dimensionality actually
-// in use.
-//
-// The system now uses InsightFace ONNX (512-D) embeddings exclusively (the dlib
-// recognizer was removed). L2-normalized embeddings have Euclidean distance
-// bounded by sqrt(2) ≈ 1.414 regardless of dimension, so sqrt(dim/128) scaling
-// is invalid.
-//
-// For 512-D ONNX, clamp the configured threshold into the calibrated safety
-// band [0.70, 1.00]. Data (see docs/threshold-calibration.md, measured with
-// tools/threshold_calibration):
-//   same-person (same camera, multi-angle enrollment): min 0.40, worst 0.78
-//   other-person (two real people, same camera):       min 1.25
-//   other-person (LFW 58 identities pairwise nearest): min 1.25
-// Lower bound 0.70 keeps same-person unlock reliable (worst same-condition
-// frame 0.78); upper bound 1.00 keeps a 0.25 margin below the closest
-// other-person distance measured, so no real stranger can match. The best/
-// second-best ratio check in FindBestMatch is an independent second defense
-// and is unaffected by this threshold. Config values outside the band
-// (including the legacy 0.30 dlib default) snap to 0.80 — the previously
-// hardcoded behavior — so old config.json needs no migration.
+// Only SFace embeddings belong to this build's metric space.
+// Trial range [0.70, 1.00], default 1.00; not a production FAR calibration.
 inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
-    if (dim >= 256) {
-        if (!std::isfinite(baseThreshold)) return 0.80f;
-        if (baseThreshold < 0.70f) return 0.80f;   // unsafe-tight → safe default
-        if (baseThreshold > 1.00f) return 1.00f;   // unsafe-loose → band ceiling
-        return baseThreshold;                       // in band: honor config
-    }
-    return baseThreshold;                     // dlib 128-D and unknown: caller base
+    if (dim != kRecognizerDimension) return 0.0f;
+    return NormalizeMatchThreshold(baseThreshold);
 }
 
 // Stores and retrieves encrypted user credentials and face embeddings.
 //
-// File format (DataPath\data\users.dat), version 5 (reads 4 and 5, writes 5):
+// File format (DataPath\data\users.dat), version 6 (SFace only; V4/V5 inactive):
 //   Header:
 //     Magic:  4 bytes ("FLOG")
-//     Version: 4 bytes (uint32, 4 or 5 on load, 5 on save)
+//     Version: 4 bytes (uint32, 6 only)
 //     Count:   4 bytes (uint32, number of records)
+//     Model tag: 4 bytes (uint32, kRecognizerModelTag = "SFC1")
 //   Records (Count times):
 //     Username length: 4 bytes (uint32, in wchar_t units)
 //     Username:        N*2 bytes (UTF-16LE)
@@ -64,8 +42,8 @@ inline float EmbeddingThresholdForDim(float baseThreshold, size_t dim) {
 //       Embedding:     D*4 bytes (D floats * 4 bytes)
 //       Nominal yaw:   4 bytes (float, degrees)            ← V5
 //       Nominal pitch: 4 bytes (float, degrees)            ← V5
-// V4 files load with nominal angles = kNominalAngleInvalid and upgrade to V5
-// on the next save. Full layout: docs/contracts/users-dat.md.
+// V4/V5 faces are never loaded or converted; every account must re-enroll.
+// Full layout: docs/contracts/users-dat.md.
 // The file is protected by ACLs (SYSTEM + Administrators only).
 // Passwords are encrypted with DPAPI CRYPTPROTECT_LOCAL_MACHINE.
 
@@ -100,7 +78,7 @@ inline constexpr float kNominalAngleInvalid = 1000.0f;
 struct FaceRecord {
     uint32_t           id = 0;
     std::wstring       label;              // display name; "脸N" if user left blank
-    std::vector<float> embedding;          // current production embedding is 512-D ONNX
+    std::vector<float> embedding;          // pinned SFace embedding is 128-D
     float              nominalYaw = kNominalAngleInvalid;
     float              nominalPitch = kNominalAngleInvalid;
 };
@@ -265,7 +243,7 @@ public:
         float distance;
     };
     // probeDim is the number of floats in probeEmbedding (128 for dlib,
-    // 512 for InsightFace ONNX). Only stored embeddings of the same
+    // 128 for OpenCV SFace). Only stored embeddings of the same
     // dimensionality are compared; others are skipped as non-comparable.
     // outBestDistance (optional) receives the closest account-level distance
     // even when the match is rejected (threshold or ratio gate) — callers use

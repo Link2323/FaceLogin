@@ -585,11 +585,11 @@ FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
         return {};
     }
 
-    // 2. InsightFace recognizer (the largest resident model).
+    // 2. Pinned SFace recognizer (the largest resident model).
     models->recognizer = std::make_unique<OnnxRecognizer>();
-    const std::wstring recognizerPath = m_modelsDir + L"\\w600k_r50.onnx";
+    const std::wstring recognizerPath = m_modelsDir + L"\\face_recognition_sface_2021dec.onnx";
     if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
-                              L"InsightFace w600k_r50 recognizer")) {
+                              L"OpenCV SFace recognizer")) {
         failureReason = ModelLoadFailure::RecognizerIntegrity;
         FACELOGIN_ERROR(L"ONNX recognizer integrity check failed — recognition unavailable");
         return {};

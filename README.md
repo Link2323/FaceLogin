@@ -22,7 +22,7 @@
 
 | 🎯 多角度识别 | 🔒 双重活体检测 | ⚡ ONNX 高性能 |
 |:---:|:---:|:---:|
-| 正面 + 左右 30° 三角度录入<br>**大范围侧脸/偏头稳定识别** | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + InsightFace<br>ONNX 全流程本地推理 |
+| 正面 + 左右 30° 三角度录入<br>**多角度人脸识别** | MiniFAS V2 + V1SE 融合<br>防照片/视频/面具攻击 | SCRFD 检测 + SFace<br>ONNX 全流程本地推理 |
 
 | Windows 原生锁屏集成 | 多账户支持 | 安全存储 |
 |:---:|:---:|:---:|
@@ -187,11 +187,11 @@ wails build -clean -platform windows/amd64
 | 文件 | 用途 |
 |---|---|
 | `det_10g_gnkps.onnx` | SCRFD 人脸检测 + 5 关键点（对齐用） |
-| `w600k_r50.onnx` | InsightFace ResNet50 512 维人脸嵌入 |
+| `face_recognition_sface_2021dec.onnx` | OpenCV SFace 128 维人脸嵌入（试用） |
 | `MiniFASNetV2.onnx` | 反欺诈活体检测（2.7× 裁剪） |
 | `MiniFASNetV1SE.onnx` | 反欺诈活体检测（4.0× 裁剪） |
 
-> 检测与识别模型经本地 INT8 量化，双 MiniFAS 使用来源仓库的 ONNX 导出文件，由 `scripts/download_models.ps1` 准备。模型采用各自的许可；来源、处理和用途授权待解决项见 [模型许可记录](docs/model-licenses.md)。
+> 检测模型经本地 INT8 量化，SFace 使用固定版本未修改的 FP32 权重，双 MiniFAS 使用来源仓库的 ONNX 导出文件，由 `scripts/download_models.ps1` 准备。本次 SFace 切换强制所有账户重新录入，暂时关闭渐进式学习，验收范围见 [试用说明](docs/sface-trial.md)。模型来源、处理和许可见 [模型许可记录](docs/model-licenses.md)。
 
 ---
 
@@ -209,7 +209,7 @@ wails build -clean -platform windows/amd64
 
 [MIT License](LICENSE) © 2026 美国伐木工&EthanZer0
 
-MIT 适用于 FaceLogin 自有代码。第三方代码的许可与版权声明见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)；预训练模型遵守 [单独的模型许可](docs/model-licenses.md)。当前检测权重的发布者为 Kun-Hsiang Lin / DOCSAID，具体发布文件声明 Apache-2.0，来源证据已记录；InsightFace 识别权重的许可限于非商业研究，日常认证/产品分发授权尚待解决，不能将整套模型视为 MIT 授权。
+MIT 适用于 FaceLogin 自有代码。第三方代码的许可与版权声明见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)；预训练模型遵守 [单独的模型许可](docs/model-licenses.md)。当前四个模型按各发布方的 Apache-2.0 声明分发；SFace 模型目录声明覆盖权重，无需另行申请个别授权。旧 R50 已退出安装载荷，其授权申请只作历史归档。
 
 安装器和卸载器页脚提供“许可说明”，安装目录同时包含这三份声明文件。
 

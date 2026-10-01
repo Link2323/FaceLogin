@@ -8766,128 +8766,286 @@ license: apache-2.0
 ---
 
 ================================================================
-InsightFace pretrained recognizer - non-commercial research policy (not a product-use grant) - upstream notice snapshot
-Source: https://raw.githubusercontent.com/deepinsight/insightface/317d33497a4342351666a1dec69b7176eb67084e/python-package/docs/model_zoo.md
+OpenCV SFace recognition weights - Apache-2.0 - upstream notice snapshot
+Source: https://raw.githubusercontent.com/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/LICENSE
 ================================================================
 
-# Model Zoo and model usage
 
-[Back to the Python library](../README.md)
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
 
-InsightFace loads ONNX models for face analysis and direct detection or
-recognition use. See the [runtime guide](runtime.md) for installation and
-execution provider selection.
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
-## Model licenses
+   1. Definitions.
 
-The InsightFace Python library code is released under the MIT License and
-can be used for academic and commercial purposes.
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
 
-**The pretrained models provided with this library are available for
-non-commercial research purposes only, including both automatically and
-manually downloaded models.** To use your own licensed models, see
-[Use your own licensed model](#use-your-own-licensed-model).
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
 
-## Raccoon model packages
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
 
-InsightFace 2.0 supports `raccoon_s` and `raccoon_l` through task-aware V2
-manifests that declare the model files and preprocessing. Use them with
-`FaceAnalysis(name="raccoon_s")` or `FaceAnalysis(name="raccoon_l")`.
-PrivateFrame requires one of these packages; its default and the default for
-new GUI configurations is `raccoon_s`. Ordinary `FaceAnalysis()` continues to
-use `buffalo_l` by default.
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
 
-Model packages are stored under `<root>/models/<name>/` (default root:
-`~/.insightface`). PrivateFrame can download a missing selected package on
-first use; see its [model setup guide](../insightface/app/privateframe/README.md).
-Liveness is a separate optional addon and must be enabled explicitly; see the
-[liveness guide](liveness.md) for installation and usage.
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
 
-## Legacy model packs
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
 
-The library also provides the following model packs. The name in **bold** is
-the default for ordinary `FaceAnalysis()`. **Auto** indicates whether the
-Python library can download the pack directly.
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
 
-After manually downloading a model pack ZIP, unzip it under
-`~/.insightface/models/` before running the program, so its model files are
-in `~/.insightface/models/<name>/`.
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
 
-| Name | Detection Model | Recognition Model | Alignment | Attributes | Model-Size | Link | Auto |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| antelopev2 | SCRFD-10GF | ResNet100@Glint360K | 2d106 & 3d68 | Gender&Age | 407MB | [Download](https://drive.google.com/file/d/18wEUfMNohBJ4K3Ly5wpTejPfDzp-8fI8/view?usp=sharing) | N |
-| **buffalo_l** | SCRFD-10GF | ResNet50@WebFace600K | 2d106 & 3d68 | Gender&Age | 326MB | [Download](https://drive.google.com/file/d/1qXsQJ8ZT42_xSmWIYy85IcidpiZudOCB/view?usp=sharing) | Y |
-| buffalo_m | SCRFD-2.5GF | ResNet50@WebFace600K | 2d106 & 3d68 | Gender&Age | 313MB | [Download](https://drive.google.com/file/d/1net68yNxF33NNV6WP7k56FS6V53tq-64/view?usp=sharing) | N |
-| buffalo_s | SCRFD-500MF | MBF@WebFace600K | 2d106 & 3d68 | Gender&Age | 159MB | [Download](https://drive.google.com/file/d/1pKIusApEfoHKDjeBTXYB3yOQ0EtTonNE/view?usp=sharing) | N |
-| buffalo_sc | SCRFD-500MF | MBF@WebFace600K | - | - | 16MB | [Download](https://drive.google.com/file/d/19I-MZdctYKmVf3nu5Da3HS6KH5LBfdzG/view?usp=sharing) | N |
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
 
-### Recognition accuracy
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
 
-| Name | MR-ALL | African | Caucasian | South Asian | East Asian | LFW | CFP-FP | AgeDB-30 | IJB-C(E4) |
-| :--- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| buffalo_l | 91.25 | 90.29 | 94.70 | 93.16 | 74.96 | 99.83 | 99.33 | 98.23 | 97.25 |
-| buffalo_s | 71.87 | 69.45 | 80.45 | 73.39 | 51.03 | 99.70 | 98.00 | 96.58 | 95.02 |
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
 
-`buffalo_m` has the same recognition accuracy as `buffalo_l`.
-`buffalo_sc` has the same recognition accuracy as `buffalo_s`.
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
 
-### Automatic downloads
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
 
-For `insightface>=0.3.3`, initializing `app = FaceAnalysis()` automatically
-downloads the default model package when it is missing. Automatic ModelZoo
-downloads use the dedicated
-[`model-zoo` release](https://github.com/deepinsight/insightface/releases/tag/model-zoo).
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
 
-### Legacy download command for 0.3.2
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
 
-For `insightface==0.3.2`, download the model package before using it:
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
 
-```bash
-insightface-cli model.download buffalo_l
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+================================================================
+OpenCV SFace recognition weights - Apache-2.0 - upstream notice snapshot
+Source: https://raw.githubusercontent.com/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/README.md
+================================================================
+
+# SFace
+
+SFace: Sigmoid-Constrained Hypersphere Loss for Robust Face Recognition
+
+Note:
+
+- SFace is contributed by [Yaoyao Zhong](https://github.com/zhongyy).
+- Model files encode MobileFaceNet instances trained on the SFace loss function, see the [SFace paper](https://arxiv.org/abs/2205.12010) for reference.
+- ONNX file conversions from [original code base](https://github.com/zhongyy/SFace) thanks to [Chengrui Wang](https://github.com/crywang).
+- (As of Sep 2021) Supporting 5-landmark warping for now, see below for details.
+- `face_recognition_sface_2021dec_int8bq.onnx` represents the block-quantized version in int8 precision and is generated using [block_quantize.py](../../tools/quantize/block_quantize.py) with `block_size=64`.
+
+Results of accuracy evaluation with [tools/eval](../../tools/eval).
+
+| Models      | Accuracy |
+| ----------- | -------- |
+| SFace       | 0.9940   |
+| SFace block | 0.9942   |
+| SFace quant | 0.9932   |
+
+\*: 'quant' stands for 'quantized'.
+\*\*: 'block' stands for 'blockwise quantized'.
+
+## Demo
+
+***NOTE***: This demo uses [../face_detection_yunet](../face_detection_yunet) as face detector, which supports 5-landmark detection for now (2021sep).
+
+Run the following command to try the demo:
+
+### Python
+```shell
+# recognize on images
+python demo.py --target /path/to/image1 --query /path/to/image2
+
+# get help regarding various parameters
+python demo.py --help
 ```
 
-## Use your own licensed model
+### C++
+Install latest OpenCV and CMake >= 3.24.0 to get started with:
 
-Create a new model directory under `~/.insightface/models/` and place your own
-compatible ONNX models there in place of the pretrained models provided by
-InsightFace. For example, models in
-`~/.insightface/models/your_model_zoo/` can be loaded with:
+```shell
+# A typical and default installation path of OpenCV is /usr/local
+cmake -B build -D OPENCV_INSTALLATION_PATH=/path/to/opencv/installation .
+cmake --build build
 
-```python
-from insightface.app import FaceAnalysis
-
-app = FaceAnalysis(name="your_model_zoo")
+# detect on camera input
+./build/demo -t=/path/to/target_face
+# detect on an image
+./build/demo -t=/path/to/target_face -q=/path/to/query_face -v
+# get help messages
+./build/demo -h
 ```
 
-## Call models
+### Example outputs
 
-The library supports ONNX models. Detection or recognition models trained
-with PyTorch, MXNet, or another framework must be converted to compatible ONNX
-models before loading them with InsightFace.
+![sface demo](./example_outputs/demo.jpg)
 
-### Call detection models
+Note: Left part of the image is the target identity, the right part is the query. Green boxes are the same identity, red boxes are different identities compared to the left.
 
-```python
-import insightface
-from insightface.app import FaceAnalysis
+## License
 
-# Method 1: use FaceAnalysis with only the detection module enabled.
-app = FaceAnalysis(allowed_modules=["detection"])
-app.prepare()  # ctx_id=0; Auto detection size: 128x128 + 640x640
+All files in this directory are licensed under [Apache 2.0 License](./LICENSE).
 
-# Method 2: load a detection model directly.
-detector = insightface.model_zoo.get_model("your_detection_model.onnx")
-detector.prepare(ctx_id=0)  # SCRFD defaults to Auto: 128x128 + 640x640
-```
+## Reference
 
-### Call recognition models
-
-```python
-import insightface
-
-handler = insightface.model_zoo.get_model("your_recognition_model.onnx")
-handler.prepare(ctx_id=0)
-```
+- https://ieeexplore.ieee.org/document/9318547
+- https://github.com/zhongyy/SFace
 
 ================================================================
 Microsoft WebView2 SDK 1.0.3124.44 - LICENSE.txt

@@ -1,6 +1,6 @@
 # `users.dat` 持久化契约
 
-本文定义 FaceLogin 凭据数据库 V5 契约。实现事实源是 [`face_service/credential_store.h`](../../face_service/credential_store.h) 和 [`face_service/credential_store.cpp`](../../face_service/credential_store.cpp)。不要根据本文单独重写解析器；修改格式时必须同步所有消费者。
+本文定义 FaceLogin 凭据数据库 V6 契约。实现事实源是 [`face_service/credential_store.h`](../../face_service/credential_store.h) 和 [`face_service/credential_store.cpp`](../../face_service/credential_store.cpp)。不要根据本文单独重写解析器；修改格式时必须同步所有消费者。
 
 ## 位置与安全属性
 
@@ -13,15 +13,16 @@
 
 不得记录密码、DPAPI 密文或完整认证消息。密码解密后每条退出路径都要清零。
 
-## V5 字节布局
+## V6 字节布局
 
 所有长度字段均为元素个数；只有密码长度是字节数。
 
 ```text
 [Header]
   magic:          uint32 = 0x474F4C46  // "FLOG"
-  version:        uint32 = 5           // 读路径另接受 4（升级读）
+  version:        uint32 = 6           // SFace only
   accountCount:   uint32
+  recognizerTag:  uint32 = 0x31434653  // "SFC1", pinned SFace 2021dec
 
 [Account] × accountCount
   usernameLen:    uint32
@@ -44,7 +45,7 @@
     nominalPitch: float                // V5：角度槽标称 pitch（度）     ← V5
 ```
 
-`nominalYaw`/`nominalPitch` 是录入时的**姿态目标**（`EnrollmentWizard` 的 `kAngleTargets`：正面 0/0、左转 +30/0、右转 −30/0），不是实测均值——固定目标保证三个角度槽的 ±25° 学习锥（[`docs/progressive-learning-v2.md`](../progressive-learning-v2.md) §3）互不重叠，即使用户转角不足。合法值域 ±90°；无效哨兵 `1000.0f` 表示"无角度信息"，V4 存量记录与未传角度的内存构造均携带它，序列化按原值往返（锥门对其放行）。
+`nominalYaw`/`nominalPitch` 是录入时的**姿态目标**（`EnrollmentWizard` 的 `kAngleTargets`：正面 0/0、左转 +30/0、右转 −30/0），不是实测均值——固定目标保证三个角度槽的 ±25° 学习锥（[`docs/progressive-learning-v2.md`](../progressive-learning-v2.md) §3）互不重叠，即使用户转角不足。合法值域 ±90°；无效哨兵 `1000.0f` 表示"无角度信息"，未传角度的内存构造携带它；V4 数据已停用，不会迁入新库，序列化按原值往返（锥门对其放行）。
 
 当前写入上限：
 
@@ -52,13 +53,13 @@
 - `kMaxFacesPerUser = 3`
 - `faceId >= 1`，账号内唯一
 - 新增脸复用最小空闲 ID
-- 当前正式 embedding 为 512 维
+- 当前 embedding 为 128 维 SFace
 
-读路径对 `faceCount` 接受 1..16，embedding 长度接受 64..4096。不要把读路径宽容度误认为新数据写入上限。
+读路径对 `faceCount` 接受 1..16，embedding 长度仅接受 128。不要把读路径宽容度误认为新数据写入上限。
 
 ## 版本策略
 
-读路径接受 V4 与 V5，写路径只写 V5。V4 文件按无标称角（哨兵）读入，下次保存即升级为 V5——存量安装无需重新录入。V3 及更早、V6 及更新一律拒绝（fail-closed）。Credential Provider 只读 header（magic/version/count）判断磁贴，接受 4 与 5。
+只读写 V6，且模型标识必须是 SFC1。遇到 V4/V5 时清空活动身份、记录需重新录入并返回空库成功；不读旧人脸、密码或迁移旧记录，文件在完成新录入保存前保持原样。其他版本、错误模型标识或损坏的 V6 返回失败。首次新录入保存会写入新的 V6 数据库，所有账户必须重新录入。Credential Provider 只接受完整 V6/SFC1 header。
 
 ## 账号与人脸操作语义
 
@@ -81,13 +82,13 @@
 5. 多账号时执行最佳/次佳比门控；单账号不执行 ratio 拒绝。
 6. 成功后才解密密码；使用后立即清零。
 
-512 维阈值由 `EmbeddingThresholdForDim` 再次收口。具体数值和标定依据见 [`docs/threshold-calibration.md`](../threshold-calibration.md) 与 [`docs/modules/face-service.md`](../modules/face-service.md)。
+128 维 SFace 试用阈值由 `EmbeddingThresholdForDim` 再次收口。具体数值和标定依据见 [`docs/threshold-calibration.md`](../threshold-calibration.md) 与 [`docs/modules/face-service.md`](../modules/face-service.md)。
 
 ## 消费者与兼容风险
 
 - `FaceLoginService`：完整加载、匹配、保存
 - `FaceLoginConsole`：注册、追加、删除、重命名、身份更新
-- Credential Provider：只读 header（接受 V4/V5）判断是否显示磁贴
+- Credential Provider：只读 header（仅接受 V6/SFC1）判断是否显示磁贴
 
 ## 修改检查表
 
@@ -99,4 +100,4 @@
 - 安装/升级/卸载是否保留或清除用户数据
 - 本文和 `DEVELOPMENT.md`
 
-验证至少覆盖：空数据库、不支持的版本拒绝、V4 升级读与 V5 标称角往返、多脸、密码 blob 长度、上限、截断/异常长度、删除最后一张脸、保存后重载、不同 embedding 维度，以及 DPAPI 解密失败。
+验证至少覆盖：空数据库、不支持的版本拒绝、V4/V5 停用、V6 模型标识和标称角往返、多脸、密码 blob 长度、上限、截断/异常长度、删除最后一张脸、保存后重载、不同 embedding 维度，以及 DPAPI 解密失败。

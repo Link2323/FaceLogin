@@ -2,6 +2,7 @@
 #include "FaceLoginCredential.h"
 #include "../common/logger.h"
 #include "../common/registry_util.h"
+#include "../face_service/credential_store.h"
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <fstream>
@@ -84,15 +85,17 @@ static DWORD ReadUserCountFromDatabase() {
         return 0;  // No database → no users
     }
 
-    // Read header: magic (4), version (4), count (4)
-    uint32_t magic = 0, version = 0, count = 0;
+    // V6 header: magic, version, count, SFace model tag (four uint32 values).
+    uint32_t magic = 0, version = 0, count = 0, modelTag = 0;
     file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
+    file.read(reinterpret_cast<char*>(&modelTag), sizeof(modelTag));
 
-    // V5 added per-face nominal pose angles; the header layout is unchanged,
-    // and the tile count logic is version-agnostic (users-dat.md).
-    if (magic != 0x474F4C46 || (version != 4 && version != 5)) {  // "FLOG"
+    // Old database versions cannot create an active face-login tile.
+    if (!file.good() || magic != 0x474F4C46 ||
+        version != facelogin::kCredentialDatabaseVersion ||
+        modelTag != facelogin::kRecognizerModelTag || count > facelogin::kMaxUsers) {
         return 0;  // Invalid database → treat as no users
     }
 

@@ -96,6 +96,7 @@ if (-not ($snapshots | Where-Object { $_.component -eq 'onnxruntime' -and $_.ver
     throw "Add a verified ONNX Runtime $ortVersion notice snapshot to third_party/sources.json."
 }
 foreach ($source in $snapshots) {
+    if ($source.distributed -eq $false) { continue }
     if ($source.component -eq 'onnxruntime' -and $source.version -ne $ortVersion) { continue }
     $path = Join-Path $thirdParty $source.file
     if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $source.sha256) {

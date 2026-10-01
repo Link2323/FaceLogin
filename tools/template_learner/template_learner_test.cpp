@@ -25,7 +25,7 @@ using facelogin::TemplateLearner;
 
 namespace {
 
-constexpr size_t kDim = 512;
+constexpr size_t kDim = 128;
 constexpr float kInvalidAngle = 1000.0f;  // kNominalAngleInvalid sentinel
 int g_failures = 0;
 

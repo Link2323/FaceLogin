@@ -1,0 +1,11 @@
+{
+  "model": "face_recognition_sface_2021dec.onnx",
+  "revision": "47534e27c9851bb1128ccc0102f1145e27f23f98",
+  "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+  "bytes": 38696353,
+  "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+  "input": "float32 RGB NCHW 1x3x112x112, raw 0..255",
+  "output": "float32 1x128; L2 normalized by FaceLogin",
+  "modifications": "None to ONNX weights; inference adapter and database changed",
+  "license": "Apache-2.0, all model-directory files per publisher README"
+}

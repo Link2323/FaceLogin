@@ -59,7 +59,7 @@
 - 安装包载荷白名单（唯一事实源）：[`docs/BUILD.md`](docs/BUILD.md)
 - 命名管道线格式：[`docs/contracts/ipc.md`](docs/contracts/ipc.md)
 - 父服务/认证 worker 私有线格式：[`docs/contracts/auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md)
-- `users.dat` V5(读 V4/V5,写 V5)：[`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)
+- `users.dat` V6(SFace/SFC1 only，V4/V5 停用重录)：[`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)
 
 <a id="sec-paths"></a>
 ## 路径与配置
@@ -99,7 +99,7 @@ ProgramData 不是默认生产位置。
 
 模型来源、转换记录、文件哈希及当前许可/授权待解决项见 [`model-licenses.md`](docs/model-licenses.md)。项目代码 MIT 许可不覆盖预训练权重。
 检测权重的发布者许可与 DOCSAID 训练实现证据统一位于 [`third_party/models/scrfd-10g/`](third_party/models/scrfd-10g/provenance.json)，活体模型许可位于 `third_party/models/minifas/`；下载脚本固定原始发布版本及 SHA-256，交付模型字节未因许可补录改变。
-识别权重的镜像版本、官方研究用途政策与未发送的授权申请位于 [`third_party/models/w600k-r50/`](third_party/models/w600k-r50/authorization-request.md)。当前选择保留模型并申请书面授权，尚未取得覆盖产品用途及再分发的授权；准备或发送申请不能改变该状态。
+当前识别为固定 OpenCV SFace 2021dec（128 维、未修改 FP32）；来源/许可在 `third_party/models/sface/`，新库 V6 强制重录，学习暂关闭，试用准备与验收见 `docs/sface-trial.md`。旧 R50 授权申请归档，不入包。
 
 ## 文档地图
 

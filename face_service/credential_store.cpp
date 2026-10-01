@@ -8,9 +8,9 @@
 namespace facelogin {
 
 static constexpr uint32_t FILE_MAGIC = 0x474F4C46; // "FLOG" in little-endian
-static constexpr uint32_t FILE_VERSION = 5;        // written; reads accept 4/5
+static constexpr uint32_t FILE_VERSION = kCredentialDatabaseVersion;
 
-// Helpers for V4/V5 serialization
+// Helpers for V6 serialization
 namespace {
 
 // Default label for a face: L"脸N" where N = face id.
@@ -56,12 +56,24 @@ bool CredentialStore::LoadDatabase() {
     file.read(reinterpret_cast<char*>(&version), sizeof(version));
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
 
+    if (!file.good()) return false;
+
     if (magic != FILE_MAGIC) {
         FACELOGIN_ERROR(L"Invalid database file (bad magic: 0x%08X)", magic);
         return false;
     }
-    if (version != 4 && version != 5) {
+    if (version == 4 || version == 5) {
+        FACELOGIN_WARN(L"R50 database v%u is inactive: re-enroll all users with SFace", version);
+        return true; // Empty active database; old bytes remain until new enrollment saves.
+    }
+    if (version != FILE_VERSION) {
         FACELOGIN_ERROR(L"Unsupported database version: %u", version);
+        return false;
+    }
+    uint32_t modelTag = 0;
+    file.read(reinterpret_cast<char*>(&modelTag), sizeof(modelTag));
+    if (!file.good() || modelTag != kRecognizerModelTag) {
+        FACELOGIN_ERROR(L"Database recognizer mismatch: re-enrollment required");
         return false;
     }
     if (count > kMaxUsers) {
@@ -155,13 +167,15 @@ bool CredentialStore::LoadDatabase() {
             }
             uint32_t embLen = 0;
             file.read(reinterpret_cast<char*>(&embLen), sizeof(embLen));
-            if (embLen < 64 || embLen > 4096) {
+            if (embLen != kRecognizerDimension) {
                 FACELOGIN_ERROR(L"Invalid embedding length: %u", embLen);
                 return false;
             }
             face.embedding.resize(embLen);
             file.read(reinterpret_cast<char*>(face.embedding.data()),
                       embLen * sizeof(float));
+            if (!std::all_of(face.embedding.begin(), face.embedding.end(),
+                             [](float v) { return std::isfinite(v); })) return false;
             // V5 appends the slot's nominal pose angles; V4 records keep the
             // invalid sentinel until re-enrollment. The sentinel itself is a
             // legal stored value (legacy records round-trip it), so only
@@ -195,6 +209,12 @@ bool CredentialStore::LoadDatabase() {
 }
 
 bool CredentialStore::SaveDatabase() {
+    // Validate before opening with truncation. Never persist mixed model spaces.
+    for (const auto& user : m_users) {
+        for (const auto& face : user.faces) {
+            if (face.embedding.size() != kRecognizerDimension) return false;
+        }
+    }
     std::wstring dataDir = GetDataDir() + L"\\data";
     CreateDirectoryW(dataDir.c_str(), nullptr);
     if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != 0) {
@@ -221,6 +241,8 @@ bool CredentialStore::SaveDatabase() {
     file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     file.write(reinterpret_cast<const char*>(&version), sizeof(version));
     file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    const uint32_t modelTag = kRecognizerModelTag;
+    file.write(reinterpret_cast<const char*>(&modelTag), sizeof(modelTag));
 
     for (const auto& rec : m_users) {
         if (rec.faces.empty()) continue;  // defensive: never persist 0-face account
@@ -316,6 +338,10 @@ bool CredentialStore::AddFace(const std::wstring& username,
                               uint32_t* outFaceId,
                               float nominalYaw,
                               float nominalPitch) {
+    if (embedding.size() != kRecognizerDimension) {
+        FACELOGIN_ERROR(L"AddFace: SFace 128-D enrollment required");
+        return false;
+    }
     size_t idx = FindUserIndex(sid, upn, username);
 
     if (idx < m_users.size()) {
@@ -538,8 +564,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
 
         for (const auto& face : faces) {
             // Skip stored embeddings that don't match the probe's dimensionality.
-            // dlib (128-D) and InsightFace ONNX (512-D) embeddings live in
-            // different metric spaces — comparing them would be meaningless.
+            // R50 and SFace have different dimensions and metric spaces.
             if (face.embedding.size() != probeDim) continue;
 
             float sum = 0.0f;
@@ -576,7 +601,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     }
 
     // No account with a comparable-dimensionality embedding.
-    // (e.g. dlib 128-D probe against an ONNX 512-D enrollment — a config/data
+    // (e.g. a R50 probe against a SFace enrollment — a config/data
     // mismatch. DEBUG level: fires on every frame and would spam the log.)
     if (bestIdx >= m_users.size()) {
         FACELOGIN_DEBUG(L"FindBestIdentity: no stored %zu-D embedding (accounts=%zu)",
@@ -588,11 +613,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     // callers can log how far off a failed probe was.
     if (outBestDistance) *outBestDistance = bestDist;
 
-    // The base threshold comes from config (default 0.80). For 512-D ONNX,
-    // EmbeddingThresholdForDim honors it inside the calibrated band [0.70,
-    // 1.00] and clamps outside values to that band — see credential_store.h.
-    // For 128-D dlib it returns the base unchanged.
-    // (DEBUG level: this runs on every frame and would spam the log.)
+    // Clamp SFace trial distances again at the authentication boundary.
     float effThreshold = EmbeddingThresholdForDim(threshold, probeDim);
     if (effThreshold != threshold) {
         FACELOGIN_DEBUG(L"FindBestIdentity: dim=%zu → threshold %.3f scaled to %.3f",

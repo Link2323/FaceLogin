@@ -1,3 +1,5 @@
+> 2026-10-01：当前构建切换至 SFace 试用（输入 raw RGB 0..255、128 维、V6 数据库、worker v8），强制重录、学习暂关闭。匹配阈值 1.00 尚非生产安全标定，R50 性能历史不能当成 SFace 基线。见 [试用验收](../sface-trial.md)。
+
 # 人脸认证服务
 
 本文解释 `face_service/` 的跨文件行为和修改边界。实现入口是 [`face_service/FaceService.cpp`](../../face_service/FaceService.cpp)；Credential Provider 公共协议、worker 私有协议与持久化分别见 [`IPC 契约`](../contracts/ipc.md)、[`auth-worker IPC 契约`](../contracts/auth-worker-ipc.md) 和 [`users.dat 契约`](../contracts/users-dat.md)。
@@ -34,7 +36,7 @@ ServiceMain / RunStandalone
       └─ WaitForClient → ReadMessage → 分派请求 → Disconnect
 ```
 
-父服务不在 `Initialize` 中打开摄像头，也不持有 ONNX Session。worker 在锁屏时只加载模型和运行库，并在 READY 前对四个会话各跑一次 dummy 推理预热（把 ORT 首跑懒初始化移出认证关键路径，见 [`performance-baseline.md`](../performance-baseline.md) 实验 8）；`AUTH_REQUEST` 到达后才允许枚举并激活摄像头，认证成功、失败、超时或通信异常后都退出。不存在提前打开摄像头的配置开关。父进程通过私有继承匿名管道取得最多三条 512-D embedding 并在本地匹配 SID；`users.dat`、DPAPI 密码和 `AUTH_SUCCESS` 构造始终留在父进程。
+父服务不在 `Initialize` 中打开摄像头，也不持有 ONNX Session。worker 在锁屏时只加载模型和运行库，并在 READY 前对四个会话各跑一次 dummy 推理预热（把 ORT 首跑懒初始化移出认证关键路径，见 [`performance-baseline.md`](../performance-baseline.md) 实验 8）；`AUTH_REQUEST` 到达后才允许枚举并激活摄像头，认证成功、失败、超时或通信异常后都退出。不存在提前打开摄像头的配置开关。父进程通过私有继承匿名管道取得最多三条 128-D SFace embedding 并在本地匹配 SID；`users.dat`、DPAPI 密码和 `AUTH_SUCCESS` 构造始终留在父进程。
 
 四个 ONNX 会话也不在已解锁桌面常驻：锁屏事件先异步预加载 worker；认证请求只在事件延迟或丢失时等待其启动。一次 worker 只处理一个请求，失败/超时会在锁屏期间后台补建，成功则等待下一次 `AUTH_REQUEST`；Windows `SESSION_UNLOCK` / `LOGON` 关闭未使用 worker。父进程用模型使用租约避免在认证控制通道未完成时并发终止 worker。模型始终按完整包发布，任一完整性校验或初始化失败都不允许部分认证。
 
@@ -87,14 +89,14 @@ ServiceMain / RunStandalone
 | 类 | 正式模型 | 输入/输出 | 角色 |
 |---|---|---|---|
 | `OnnxDetector` | `det_10g_gnkps.onnx` | 512×512 → bbox + 5 点 | SCRFD 检测 |
-| `OnnxRecognizer` | `w600k_r50.onnx` | 112×112 → 512-D L2 embedding | 身份识别 |
+| `OnnxRecognizer` | `face_recognition_sface_2021dec.onnx` | 112×112 → 128-D SFace L2 embedding | 身份识别 |
 | `OnnxAntiSpoof` | `MiniFASNetV2.onnx` + `MiniFASNetV1SE.onnx` | 2.7×/4.0× crop → 融合分数 | 静默 PAD |
 
 SCRFD 5 点经 [`face_align.h`](../../face_service/face_align.h) 做相似变换和偏航角估计。不存在 dlib 检测器、68 点模型或当前 128-D 识别器。
 
 生产 worker 与 standalone 都在构造 ONNX Session 前校验四个模型的 SHA-256，C++ 常量集中在 `common/model_hashes.h`；安装器还会在提取前后独立校验同一组模型。模型已在当前工作区准备完成，普通构建不要重新下载或量化。
 
-模型生命周期状态为 `Unloaded → Loading → Ready/Failed`，其中 `Ready` 表示私有 worker 的 Hello/Init/Ready 握手已经完成。`HandlerEx` 只提交加载/释放请求，构造/关闭由长期生命周期线程完成；`AUTH_REQUEST` 是锁屏通知之外的加载兜底。`CONFIG_RELOAD` 在桌面已解锁时只更新下一次 worker 的配置；锁屏时会以配置代次替换 worker，确认新 worker 已就绪后才回复成功。`service.log` 记录父进程资源和成功终态计时，`auth_worker.log` 记录 worker 的模型加载、预热选择、相机/PAD 过程以及失败终态；成功路径不在 worker 内同步写终态日志。身份不匹配的失败轮会补齐诊断字段：父进程 WARN 附"closest identity distance=…, threshold=…"(该轮最近身份距离，`FindBestIdentity` 出参收集)，worker 的 unknown-face 快速失败与成功终态行附"width=… px, face luma=…"(首次身份 miss / 末次绑定帧的人脸宽与亮度)，用于区分"差一点过阈值"与"完全不是本人"、以及光照域差问题。`CameraLifecycleTest` 用 DirectShow 的 inproc/child 模式确认驱动与隔离边界；`AuthWorkerProtocolTest` 验证私有协议与畸形输入；`AuthWorkerLifecycleTest` 覆盖 supervisor 故障、Job 清理和 100 次模拟认证退出；`CredentialStoreTest` 覆盖 identity-only 匹配、最终单次解密、V4/V5 读取与标称角往返。
+模型生命周期状态为 `Unloaded → Loading → Ready/Failed`，其中 `Ready` 表示私有 worker 的 Hello/Init/Ready 握手已经完成。`HandlerEx` 只提交加载/释放请求，构造/关闭由长期生命周期线程完成；`AUTH_REQUEST` 是锁屏通知之外的加载兜底。`CONFIG_RELOAD` 在桌面已解锁时只更新下一次 worker 的配置；锁屏时会以配置代次替换 worker，确认新 worker 已就绪后才回复成功。`service.log` 记录父进程资源和成功终态计时，`auth_worker.log` 记录 worker 的模型加载、预热选择、相机/PAD 过程以及失败终态；成功路径不在 worker 内同步写终态日志。身份不匹配的失败轮会补齐诊断字段：父进程 WARN 附"closest identity distance=…, threshold=…"(该轮最近身份距离，`FindBestIdentity` 出参收集)，worker 的 unknown-face 快速失败与成功终态行附"width=… px, face luma=…"(首次身份 miss / 末次绑定帧的人脸宽与亮度)，用于区分"差一点过阈值"与"完全不是本人"、以及光照域差问题。`CameraLifecycleTest` 用 DirectShow 的 inproc/child 模式确认驱动与隔离边界；`AuthWorkerProtocolTest` 验证私有协议与畸形输入；`AuthWorkerLifecycleTest` 覆盖 supervisor 故障、Job 清理和 100 次模拟认证退出；`CredentialStoreTest` 覆盖 identity-only 匹配、最终单次解密、V4/V5 停用、V6/SFC1 模型标识与标称角往返。
 
 ## 当前认证常量
 
@@ -102,8 +104,8 @@ SCRFD 5 点经 [`face_align.h`](../../face_service/face_align.h) 做相似变换
 
 | 参数 | 当前值 | 事实源 |
 |---|---:|---|
-| 512-D 匹配默认阈值 | 0.80 | `AppConfig::match_threshold` |
-| 匹配安全带 | [0.70, 1.00]，越界回退 0.80 | `EmbeddingThresholdForDim` / config normalize |
+| 128-D SFace 匹配试用默认阈值 | 1.00 | `AppConfig::match_threshold` |
+| 匹配安全带 | [0.70, 1.00]，低于下限/非有限回退 1.00，高于上限钳为 1.00 | `EmbeddingThresholdForDim` / config normalize |
 | best/second-best 拒绝比 | `>= 0.75` | `CredentialStore::FindMatch` |
 | 双 MiniFAS 权重 | 0.5 / 0.5 | `OnnxAntiSpoof` |
 | PAD 阈值 | 0.28（UI 可调 0.15–0.50，标定点 0.281） | `AppConfig::anti_spoof_threshold` |

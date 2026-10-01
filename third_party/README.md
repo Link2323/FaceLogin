@@ -1,3 +1,5 @@
+> 当前识别权重已切换为 OpenCV SFace，许可与固定来源在 `models/sface/`。`models/w600k-r50/` 为历史材料，索引标记 distributed=false，不再打入声明或模型载荷。
+
 # Third-party notice sources
 
 Files are grouped by component so each model's license and provenance can be

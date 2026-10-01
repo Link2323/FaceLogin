@@ -1,3 +1,5 @@
+> 2026-10-01：本次输出为 SFace 试用安装包，包含 128 维 SFace 权重，数据库 V6 强制重录、学习暂关闭。四个正式模型不再包含 R50；真实摄像头/锁屏及明暗环境验收见 [试用记录](sface-trial.md)。
+
 # Build Guide
 
 Compilation reference for FaceLogin. AGENTS.md keeps a one-line pointer to this file; open this when you actually need to build. All commands verified working 2026-08-13 via a clean end-to-end rebuild and installer repack.
@@ -170,9 +172,9 @@ cp installer/FaceLoginSetup/resources/models/*.onnx "$dest/models/"
 # data/config.json is created with defaults if absent
 ```
 
-Dev default config: `{ "match_threshold": 0.80, "anti_spoof_threshold": 0.28 }`. DirectShow is the only camera implementation. Worker preload is model/runtime-only; no configuration may open the camera before `AUTH_REQUEST`.
+Dev default config: `{ "recognizer_model": "opencv-sface-2021dec", "match_threshold": 1.00, "anti_spoof_threshold": 0.28, "ema_learning": false, "failure_learning": false }`. DirectShow is the only camera implementation. Worker preload is model/runtime-only; no configuration may open the camera before `AUTH_REQUEST`.
 
-> `anti_spoof_threshold` (0.28 default; UI-adjustable 0.15–0.50 in 0.01 steps, calibration point 0.281) is the 50/50 dual-MiniFAS fusion threshold (`common/config_util.h`). `match_threshold` (0.80) is the 512-D Euclidean cutoff; `EmbeddingThresholdForDim` clamps it to [0.70, 1.00] (out-of-band snaps to 0.80). The 15-second auth timeout is a hardcoded constant (`FaceService::m_authTimeoutSeconds`).
+> `anti_spoof_threshold` (0.28 default; UI-adjustable 0.15–0.50 in 0.01 steps, calibration point 0.281) is the 50/50 dual-MiniFAS fusion threshold (`common/config_util.h`). `match_threshold` defaults to 1.00 for 128-D SFace, within the trial range [0.70, 1.00]; non-finite/below-minimum values reset to 1.00 and above-maximum values clamp to 1.00. This is not production FAR calibration; see `sface-trial.md`. The 15-second auth timeout is a hardcoded constant (`FaceService::m_authTimeoutSeconds`).
 
 **Run:** `scripts\start_standalone.bat` (stops service, registers DLL, starts in `-standalone` foreground mode), or directly `build\face_service\Release\FaceLoginService.exe -standalone`. Three modes: SCM service (default), `-install`, `-uninstall`, `-standalone`.
 

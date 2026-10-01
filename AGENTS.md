@@ -48,7 +48,7 @@ build/               → CMake 输出(Release 下的 5 个运行时 DLL 随安�
 - `PadCalibration.exe` / `EmbeddingTest.exe` 是 `tools/` 下的离线开发工具,不属于安装载荷;`embed.FS` 会嵌入资源目录中的所有文件,打包前要清除意外残留。
 - **VS 2026(MSVC 19.5x)构建已启用 `/MP` 文件级并行** —— 配合 `TrackFileAccess=false` + `ErrorReporting=None` 避免 cl.exe 卡死(2026-08-13 重验证:连续 clean rebuild 稳定,全量构建 39s → 8s)。加 `--parallel` 可再获项目级并行(→ 7.8s)。详见 `docs/BUILD.md`。
 - 不编辑 `installer/FaceLoginSetup/frontend/wailsjs/` 生成绑定;由 `wails build` / `wails dev` 重新生成。
-- 分发声明的事实源是根 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 与 `docs/model-licenses.md`；离线许可及来源记录按组件放在 `third_party/models/` 与 `third_party/libraries/`，由 `third_party/sources.json` 统一索引。`update_third_party_notices.ps1` 按实际 CMake/vcpkg、生产 Go 和前端依赖生成声明，`stage_licenses.ps1` 复制到载荷与前端。依赖升级须更新声明；检测权重已固定 Kun-Hsiang Lin / DOCSAID 发布版本及 Apache-2.0 声明，原始下载必须核验 SHA-256，不能仅凭 SCRFD 名称套用其他权重许可；识别权重镜像也已固定版本，当前选择保留模型并申请书面授权，材料位于 `third_party/models/w600k-r50/`。识别权重用途授权尚未取得，不能因申请材料或声明补齐而标为已授权。
+- 分发声明的事实源是根 `LICENSE`、`THIRD_PARTY_NOTICES.txt` 与 `docs/model-licenses.md`；离线许可及来源记录按组件放在 `third_party/models/` 与 `third_party/libraries/`，由 `third_party/sources.json` 统一索引。`update_third_party_notices.ps1` 按实际 CMake/vcpkg、生产 Go 和前端依赖生成声明，`stage_licenses.ps1` 复制到载荷与前端。依赖升级须更新声明；检测权重已固定 Kun-Hsiang Lin / DOCSAID 发布版本及 Apache-2.0 声明，原始下载必须核验 SHA-256，不能仅凭 SCRFD 名称套用其他权重许可；识别权重已切为固定 OpenCV SFace 2021dec FP32，权重及许可快照见 `third_party/models/sface/`；旧 R50 申请仅作历史归档，不入包。当前为 SFace 试用构建，实际暗光/强光与锁屏验收未完成。
 
 ### standalone 与开发测试
 
@@ -67,13 +67,13 @@ v1.6 共 4 个正式 ONNX 模型,当前工作区已准备完成。普通构建/�
 | 文件 | 大小 | 角色 |
 |---|---|---|
 | `det_10g_gnkps.onnx` | ~4.3 MB | SCRFD 检测 + 5 关键点(INT8,输入 512×512) |
-| `w600k_r50.onnx` | ~44 MB | InsightFace IResNet-50,512 维嵌入(INT8 QDQ) |
+| `face_recognition_sface_2021dec.onnx` | ~38.7 MB | OpenCV SFace,128 维嵌入(FP32，RGB 0..255) |
 | `MiniFASNetV2.onnx` | ~1.7 MB | 反欺诈(2.7× 裁剪) |
 | `MiniFASNetV1SE.onnx` | ~1.7 MB | 反欺诈(4.0× 裁剪) |
 
 **dlib 已移除。** vcpkg manifest 仅依赖 onnxruntime;`common/frame_image.h` 复刻原 dlib 流水线,PAD 分数与 0.281 阈值不变;SCRFD 5 关键点驱动对齐(`face_service/face_align.h`)。
 
-识别替代模型仅做离线评估时，使用 `tools/threshold_calibration/compare_recognizers.py`；重新录入、小账户库和量化研究用 `refine_recognizer_comparison.py`。候选权重与个体缓存留在该工具已忽略的 `data/recognizer_ab/`，不得复制到安装器载荷。固定来源及哈希见 `recognizer_candidates.json` / `recognizer_research_candidates.json`，方法和结果见 `docs/recognizer-comparison.md` / `docs/recognizer-refined-evaluation.md`；探索性阈值不能直接用于生产。
+除已晋升为运行模型的 SFace 外，识别替代模型仅做离线评估时，使用 `tools/threshold_calibration/compare_recognizers.py`；重新录入、小账户库和量化研究用 `refine_recognizer_comparison.py`。其他候选权重与个体缓存留在该工具已忽略的 `data/recognizer_ab/`，不得复制到安装器载荷。固定来源及哈希见 `recognizer_candidates.json` / `recognizer_research_candidates.json`，方法和结果见 `docs/recognizer-comparison.md` / `docs/recognizer-refined-evaluation.md`；探索性阈值不能直接用于生产。
 
 ## 架构
 
@@ -91,18 +91,18 @@ FaceLoginCredentialProvider.dll         EnrollmentWizard
     |  STATUS, AUTH_SUCCESS, AUTH_ACK)      |  CONFIG_RELOAD, LEARNING_STATUS,
     |                                       |  CONTROL_ACK;日志直接读文件)
     v                                      v
-FaceLoginService.exe（常驻父进程） <----> 凭据存储 (users.dat V5)
+FaceLoginService.exe（常驻父进程） <----> 凭据存储 (users.dat V6)
     | (私有继承管道；仅 embedding/状态)       | (DPAPI 加密)
     v
 FaceLoginService.exe -auth-worker（一次认证即退出） config.json (热重载)
     | (Session 0；DirectShow)
     v
-ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
+ONNX 模型 (SCRFD gnkps + SFace + 双 MiniFAS)
 ```
 
 - **FaceLoginService.exe** —— Windows 服务(自动启动)。常驻父进程仅持有公开管道、`users.dat` 与密码解密；锁屏预加载的 `-auth-worker` 子进程持有 ONNX，认证请求后才打开 DirectShow 相机，完成一次认证即退出。禁止锁屏阶段预开摄像头。standalone 同样使用 DirectShow。
 - **FaceLoginCredentialProvider.dll** —— LogonUI 加载的 COM DLL,实现 `ICredentialProvider`/`ICredentialProviderCredential`。
-- **FaceLoginConsole.exe** —— WebView2 注册 GUI。`EnrollmentWizard` 经 COM `IDispatch` 暴露 **37 个方法**(dispId 1–37)。支持多角度采集;设置页含渐进式学习实验性开关,日志页含学习状态视图(经 `LEARNING_STATUS` 管道查询)。必须管理员运行。
+- **FaceLoginConsole.exe** —— WebView2 注册 GUI。`EnrollmentWizard` 经 COM `IDispatch` 暴露 **37 个方法**(dispId 1–37)。支持多角度采集;设置页渐进式学习开关在 SFace 试用期禁用,日志页含学习状态视图(经 `LEARNING_STATUS` 管道查询)。必须管理员运行。
 - **FaceLoginSetup.exe** —— 非常驻部署工具,不参与运行期管道通信。Go Wails v2 安装器通过 `embed.FS` 内嵌全部部署资源;安装/卸载流程见 [`docs/modules/installer.md`](docs/modules/installer.md),不要在本文件维护步骤数。
 
 ### 通用库(`common/`)
@@ -126,11 +126,13 @@ ONNX 模型 (SCRFD gnkps + r50 + 双 MiniFAS)
 
 **活体检测(强制,fail-closed)** —— 双 MiniFAS 50/50 融合,阈值 `anti_spoof_threshold`(标定值见 `docs/threshold-calibration.md`)。无活体模型服务拒绝启动;任何模型错误返回关闭判定；活体检测不是可配置功能。
 
-**性能** —— 慢机活体循环双峰的根因已定位并修复(worker 在 AUTH_START 解除 EcoQoS 电源限流,commit `40d018e`;历史"CPU 频率是主要决定变量"的结论即源于此,频率探针证据见 baseline §14)。相机枚举+图骨架已移入锁屏预载期(`0709653`),设备激活仍只在 AUTH_START 后。现行基线:开发机 E2E ~800ms、慢机 ~950–1090ms。除非有新的可复现实验数据,不要做逐机参数调优。迁移前的性能实验、嵌入次数与被否决方案见 [`docs/performance-baseline.md`](docs/performance-baseline.md)；worker 架构、正式 A/B 和资源验收见 [`docs/auth-worker-migration-completion.md`](docs/auth-worker-migration-completion.md)。服务强制校验 recognizer SHA-256(值见代码)。
+**性能** —— 慢机活体循环双峰的根因已定位并修复(worker 在 AUTH_START 解除 EcoQoS 电源限流,commit `40d018e`;历史"CPU 频率是主要决定变量"的结论即源于此,频率探针证据见 baseline §14)。相机枚举+图骨架已移入锁屏预载期(`0709653`),设备激活仍只在 AUTH_START 后。R50 历史基线（尚非 SFace 验收）:开发机 E2E ~800ms、慢机 ~950–1090ms。除非有新的可复现实验数据,不要做逐机参数调优。迁移前的性能实验、嵌入次数与被否决方案见 [`docs/performance-baseline.md`](docs/performance-baseline.md)；worker 架构、正式 A/B 和资源验收见 [`docs/auth-worker-migration-completion.md`](docs/auth-worker-migration-completion.md)。服务强制校验 recognizer SHA-256(值见代码)。
 
-### 凭据存储 V5
+### 凭据存储 V6
 
-读入 V4/V5、写入 V5 多人脸格式(V5 每脸追加 nominalYaw/nominalPitch 标称角,供学习姿态锥门;V4 存量角为无效哨兵=锥门开启)。当前 embedding 统一 512 维；dlib 已彻底移除,**不要去找 dlib 残留代码**。多角度每角度独立存储,绝不平均。完整字节布局见 [`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)。
+只读写 SFace V6（header 带 SFC1 模型标识），embedding 固定 128 维。旧 V4/V5 返回空活动库并要求每个账户重新录入，不迁移人脸/密码，首次新录入保存才覆盖旧文件。其他版本/模型标识及损坏 V6 fail closed。多角度每角度独立存储，不跨角度平均。字节布局见 `docs/contracts/users-dat.md`。
+
+SFace 试用匹配默认 1.00、上限 1.00，ratio=0.75、PAD 保持强制；该阈值不代表生产 FAR 标定。渐进式学习强制关闭（包含旧 config 的 true），待 SFace 学习门标定；原 R50 范数门不能沿用。配置增加 `recognizer_model=opencv-sface-2021dec`，旧配置只保留相机/PAD等设置，识别阈值重置。试用验证见 `docs/sface-trial.md`。
 
 ### 关键标识符
 

@@ -1,6 +1,7 @@
 #include "onnx_models.h"
 #include "face_align.h"
 #include "../common/logger.h"
+#include "../common/recognizer_profile.h"
 #include <fstream>
 #include <algorithm>
 #include <array>
@@ -68,6 +69,7 @@ static Ort::Env& ProcessMiniFasOrtEnv() {
 OnnxRecognizer::~OnnxRecognizer() = default;
 
 bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
+    m_initialized = false;
     try {
         Ort::SessionOptions opts;
         opts.DisablePerSessionThreads();
@@ -78,6 +80,24 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
 
         m_memoryInfo = std::make_unique<Ort::MemoryInfo>(
             Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
+
+        if (m_session->GetInputCount() != 1 || m_session->GetOutputCount() != 1)
+            return false;
+        const auto inputType = m_session->GetInputTypeInfo(0);
+        const auto outputType = m_session->GetOutputTypeInfo(0);
+        const auto inputInfo = inputType.GetTensorTypeAndShapeInfo();
+        const auto outputInfo = outputType.GetTensorTypeAndShapeInfo();
+        const auto inputShape = inputInfo.GetShape();
+        const auto outputShape = outputInfo.GetShape();
+        if (inputInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            inputShape.size() != 4 || inputShape[0] != 1 || inputShape[1] != 3 ||
+            inputShape[2] != 112 || inputShape[3] != 112 ||
+            outputInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            outputShape.size() != 2 || outputShape[0] != 1 ||
+            outputShape[1] != static_cast<int64_t>(kRecognizerDimension)) {
+            FACELOGIN_ERROR(L"SFace tensor contract mismatch (expected float 1x3x112x112 -> 1x128)");
+            return false;
+        }
 
         // Cache input/output names
         Ort::AllocatorWithDefaultOptions alloc;
@@ -94,24 +114,23 @@ bool OnnxRecognizer::Initialize(const std::wstring& modelPath) {
 
 std::vector<float> OnnxRecognizer::ComputeEmbedding(
     const FrameImage& faceChip, float* outPreNorm) {
-    if (!m_initialized) return {};
+    if (outPreNorm) *outPreNorm = 0.0f;
+    if (!m_initialized || faceChip.size() == 0) return {};
 
     try {
-        // InsightFace buffalo_s expects 112x112 RGB, normalized to [-1, 1]
-        // First resize to 112x112
+        // SFace expects raw RGB float pixels; normalization is inside ONNX.
         FrameImage resized(112, 112);
         ResizeBilinear(faceChip, resized);
 
-        // Convert to NCHW float tensor: [1, 3, 112, 112] normalized to [-1, 1]
+        // Convert to NCHW float tensor: [1, 3, 112, 112], values 0..255.
         std::vector<float> input(1 * 3 * 112 * 112);
-        const float scale = 1.0f / 127.5f;
         for (int y = 0; y < 112; y++) {
             for (int x = 0; x < 112; x++) {
                 const auto& p = resized(y, x);
                 int base = y * 112 + x;
-                input[0 * 112 * 112 + base] = static_cast<float>(p.red)   * scale - 1.0f;
-                input[1 * 112 * 112 + base] = static_cast<float>(p.green) * scale - 1.0f;
-                input[2 * 112 * 112 + base] = static_cast<float>(p.blue)  * scale - 1.0f;
+                input[0 * 112 * 112 + base] = static_cast<float>(p.red);
+                input[1 * 112 * 112 + base] = static_cast<float>(p.green);
+                input[2 * 112 * 112 + base] = static_cast<float>(p.blue);
             }
         }
 
@@ -126,16 +145,22 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
                                        inputNames, &inputTensor, 1,
                                        outputNames, 1);
 
+        if (outputs.size() != 1 || !outputs[0].IsTensor()) return {};
         float* data = outputs[0].GetTensorMutableData<float>();
         auto info = outputs[0].GetTensorTypeAndShapeInfo();
         size_t dim = info.GetElementCount();
+        if (dim != kRecognizerDimension || !data) return {};
 
         std::vector<float> embedding(data, data + dim);
 
         // L2 normalize
         float norm = 0.0f;
-        for (float v : embedding) norm += v * v;
+        for (float v : embedding) {
+            if (!std::isfinite(v)) return {};
+            norm += v * v;
+        }
         norm = std::sqrt(norm);
+        if (!std::isfinite(norm) || norm <= 1e-8f) return {};
         if (outPreNorm) *outPreNorm = norm;
         if (norm > 1e-8f) {
             for (float& v : embedding) v /= norm;

@@ -77,9 +77,9 @@ std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
     models->detector = std::make_unique<OnnxDetector>();
     if (!models->detector->Initialize(detectorPath)) return {};
 
-    const std::wstring recognizerPath = modelsDir + L"\\w600k_r50.onnx";
+    const std::wstring recognizerPath = modelsDir + L"\\face_recognition_sface_2021dec.onnx";
     if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
-                              L"InsightFace w600k_r50 recognizer")) {
+                              L"OpenCV SFace recognizer")) {
         failure = ModelLoadFailure::RecognizerIntegrity;
         return {};
     }
