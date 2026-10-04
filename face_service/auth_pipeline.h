@@ -39,6 +39,10 @@ struct AuthPipelineCallbacks {
     // Sensor exposure/gain controls for the face-priority exposure tune
     // (face_gain_tune.h). Empty functions = unsupported knob → skipped.
     SensorKnobs sensorKnobs;
+    // Optional diagnostic-only snapshot: a single driver read returns both
+    // exposure value and mode. False means neither output is valid. Hosts
+    // without it keep the separate SensorKnobs reads. Never used for tuning.
+    std::function<bool(long& valueOut, bool& manualOut)> readExposureState;
     std::function<void(const std::wstring&)> reportStatus;
 
     // Called for each identity-binding frame (counted frames 1/3/5 in the

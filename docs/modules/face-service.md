@@ -10,6 +10,16 @@
 
 worker 预载诊断在 `auth_worker.log` 输出当前 Session 与显式电源限流标志、三个模型组各自的 SHA-256 校验/初始化耗时，以及模型加预热、相机图骨架和总预载耗时。电源标志不等于实际 CPU 频率，也不足以排除自动调度限制；桌面探针不能替代锁屏 Session 0 测量。桌面加载实验见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
+认证流水线的曝光诊断在本轮退出时汇总输出：`Exposure phase timing` 拆分预热结束后的检测收集、失效 seed 重抓、参数重放后的稳定等待、触发诊断、调节入口和状态交付；`trigger_query` 单列诊断查询耗时，`query_before_seed_wait` 表示查询是否安排在检测收集前。此时 `seed_wait` 只计查询之后的剩余等待，`trigger` 不再包含提前执行的查询。`Exposure sensor timing` 按重放、重放稳定检查、触发诊断、调节及认证循环分组，记录每类传感器回调的调用次数、失败次数、累计及最大耗时。计时覆盖宿主回调全程（包括 DirectShow QI/Get/GetRange/Release），不是单个驱动内部操作；不记录画面、向量或凭据。分项和调用耗时有包含关系，不能重复相加。
+
+worker 的纯诊断快照通过一次 `GetExposure` 同时读取曝光值和模式；宿主未提供合并回调时使用原来的独立读取。未发生参数重放写入且有待收集检测时，在相机原 COM 线程上先读取诊断参数，与已有异步 SCRFD 重叠；发生重放写入时，仍在稳定等待/重测之后读取。快照仅用于日志，不供调节器作控制判断；调节器继续读取当前模式，曝光诊断本身不改变检测帧选择、新鲜度检查、计帧间隔与认证规则。阶段对照与故障路径检查见 [`sface-performance.md`](../work/completed/sface-performance.md)。
+
+预热循环先判断当前样本是否打开稳定门，再决定是否启动当前帧检测。在自动曝光、无控制重放写入的稳定窗口内，若已有来自紧邻上一预热样本的已完成人脸检测，年龄不超过 400 ms，且旧帧与当前帧在旧人脸框内的亮度均处于 50–120、差不超过 10，则复用已有 seed；其余情况保留原来的最新或待完成检测流程。亮度检查先按配置旋转当前帧，后续过期丢弃、控制写入后失效、身份绑定、PAD 和 60 ms pacing 仍执行。异步检测 future 在输入帧释放之前收敛，包括取消退出路径。
+
+`Exposure phase timing` 的 `seed_reused` 标识上述已完成结果复用分支，`seed_seq` 和 `seed_age` 记录预热门后、过期丢弃和曝光调节之前的 seed 选择；不代表该帧最终已计入认证。实现和试用包记录见 [种子调度试用](../work/completed/sface-performance.md#ready-seed-trial)。
+
+种子调度试用包安装后的 7 次已 ready 的 Session 0 请求全部由 Windows 确认成功，6 次走新增复用分支，全部选择第一帧且 seed 剩余等待为 0 ms；pipeline 中位数 430.3 ms，CP 请求到 Windows ReportResult 为 619 ms。与前批 7 次比较不是受控 A/B，完整差值不能全部归因于调度，首轮相机初始化慢尾仍在。逐轮和限制见 [安装后记录](../work/completed/sface-performance.md#ready-seed-installed)。
+
 ONNX Runtime 的 Warning/Error 通过自定义 Env 日志回调写入宿主的项目日志，使用原有分级刷盘；回调不向 ORT 的 C 接口抛出异常。保留默认 Warning 级别及原有模型加载顺序，避免无控制台 Session 0 中默认 `std::wclog` 输出让 SFace 初始化多付约 1 秒。性能对照与输出一致性证据见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
 ```text
@@ -42,6 +52,10 @@ AUTH_REQUEST → worker 打开相机并认证 → 父进程匹配 SID、构造�
 SFace 正式运行导出已移除 174 个 initializer graph inputs，保留权重、节点和真正的图像输入；因此不再产生这组 ORT WARN。运行哈希由 `common/model_hashes.h` 固定，与原始上游哈希不同；来源及转换记录见 `third_party/models/sface/provenance.json`。已有 V6/SFC1 人脸库保持兼容，本次不改识别阈值或要求重录。原生输出与旧库对照、初始化/推理取舍见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
 所有运行期相机路径使用 DirectShow。锁屏预载只枚举设备并准备图骨架，不激活设备；设备仅在认证请求或用户启动预览后激活。worker 在 MTA，Enrollment 预览在 UI STA；DirectShow COM 初始化和释放必须留在同一线程。改动相机生命周期时要覆盖 Session 0 与桌面预览。
+
+图骨架可预载设备无关的软件 AVI Decompressor。激活后，已读取的当前输入类型为 YUY2 时优先直接连接 capture → AVI Decompressor → RGB24 SampleGrabber；转换器不可用、输入为其他类型或直接连接失败时，删除可选滤镜并使用原 Intelligent Connect。直接连接失败须先断开两段连接的双方；清理失败则初始化失败，不在残留连接上重试，也不切换设备。`DirectShow webcam initialized` 日志用 `(AVI direct)` 或 `(Intelligent Connect)` 标识实际路径。预载不绑定设备、不连接相机引脚或启动采集。
+
+`Auth pipeline first valid frame ... after camera ready` 的实际计时起点是 `AuthPipeline::Run` 内的 `pipelineStart`，终点是首次成功 `grabFrame` 返回；它包含前置传感器准备、轮询和 RGB 拷贝，不直接测量 `Run()` 返回到流线程首回调。当前 warmup 仍用 10 ms 轮询。桌面首帧复审发现事件取帧候选，用户放弃其约 5–6 ms 收益；MF 桌面首样本成绩不足以推翻其历史完整 Session 0 回归，继续保留 DirectShow，见 [首帧复审](../work/completed/sface-performance.md#first-frame-review)。后续桌面调查发现预载同一软件转换器并直接连接可使初始化约省 21–23 ms；用户同意试用后已实施上述兼容回退，并确认安装后的 4 次 Session 0 锁屏均使用直接连接且成功。其初始化中位数 164.2 ms，完整解锁 648.5 ms；与早先小批次比较不是受控 A/B，长期收益仍待验证，见 [试用实现及锁屏记录](../work/completed/sface-performance.md#camera-direct-trial)。
 
 | 模型 | 输入/输出 | 用途 |
 |---|---|---|

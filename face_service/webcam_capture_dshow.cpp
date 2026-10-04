@@ -380,6 +380,79 @@ bool WebcamCaptureDS::BuildSkeleton() {
         return false;
     }
 
+    // Software only: no capture filter, device binding or connected pins.
+    // Failure is optional; Initialize can still use Intelligent Connect.
+    hr = CoCreateInstance(CLSID_AVIDec, nullptr, CLSCTX_INPROC_SERVER,
+                          IID_PPV_ARGS(&m_pDecoder));
+    if (SUCCEEDED(hr)) {
+        hr = m_pGraph->AddFilter(m_pDecoder, L"AVI Decompressor");
+        if (FAILED(hr)) {
+            m_pDecoder->Release();
+            m_pDecoder = nullptr;
+        }
+    }
+    if (FAILED(hr)) {
+        FACELOGIN_DEBUG(L"DS: optional AVI Decompressor unavailable: 0x%08X", hr);
+    }
+
+    return true;
+}
+
+bool WebcamCaptureDS::ConnectCapture(IPin* pCaptureOut, IPin* pGrabberIn,
+                                      bool preferDecoder) {
+    m_directDecoder = false;
+    if (m_pDecoder) {
+        IPin* pDecoderIn = nullptr;
+        IPin* pDecoderOut = nullptr;
+        HRESULT directHr = VFW_E_TYPE_NOT_ACCEPTED;
+        if (preferDecoder &&
+            GetPin(m_pDecoder, PINDIR_INPUT, &pDecoderIn) &&
+            GetPin(m_pDecoder, PINDIR_OUTPUT, &pDecoderOut)) {
+            directHr = m_pGraph->ConnectDirect(pCaptureOut, pDecoderIn, nullptr);
+            if (SUCCEEDED(directHr)) {
+                directHr = m_pGraph->ConnectDirect(pDecoderOut, pGrabberIn, nullptr);
+            }
+            if (SUCCEEDED(directHr)) {
+                m_directDecoder = true;
+                pDecoderIn->Release();
+                pDecoderOut->Release();
+                return true;
+            }
+        }
+
+        // Both ends must be disconnected, including the successful first
+        // leg when the second fails. Never retry with a partially wired graph.
+        bool disconnected = true;
+        for (IPin* pin : {pCaptureOut, pDecoderIn, pDecoderOut, pGrabberIn}) {
+            if (pin) {
+                const HRESULT hr = m_pGraph->Disconnect(pin);
+                if (FAILED(hr)) {
+                    FACELOGIN_ERROR(L"DS decoder rollback Disconnect failed: 0x%08X", hr);
+                    disconnected = false;
+                }
+            }
+        }
+        if (pDecoderIn) pDecoderIn->Release();
+        if (pDecoderOut) pDecoderOut->Release();
+        const HRESULT removeHr = m_pGraph->RemoveFilter(m_pDecoder);
+        if (FAILED(removeHr)) {
+            FACELOGIN_ERROR(L"DS decoder rollback RemoveFilter failed: 0x%08X", removeHr);
+            return false;
+        }
+        m_pDecoder->Release();
+        m_pDecoder = nullptr;
+        if (!disconnected) return false;
+        if (preferDecoder) {
+            FACELOGIN_DEBUG(L"DS: direct AVI connection unavailable: 0x%08X; "
+                            L"using Intelligent Connect", directHr);
+        }
+    }
+
+    const HRESULT hr = m_pGraph->Connect(pCaptureOut, pGrabberIn);
+    if (FAILED(hr)) {
+        FACELOGIN_ERROR(L"DS Connect(capture→grabber) failed: 0x%08X", hr);
+        return false;
+    }
     return true;
 }
 
@@ -387,6 +460,7 @@ bool WebcamCaptureDS::BuildSkeleton() {
 // manually connect  Capture → SampleGrabber → Null Renderer,  and query
 // IMediaControl. Data only flows once the caller Run()s the graph.
 bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height) {
+    bool preferDecoder = false;
     HRESULT hr = m_pGraph->AddFilter(pCapture, L"Video Capture");
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS AddFilter(capture) failed: 0x%08X", hr);
@@ -403,6 +477,9 @@ bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height
                 AM_MEDIA_TYPE* pmt = nullptr;
                 hr = pConfig->GetFormat(&pmt);
                 if (SUCCEEDED(hr) && pmt) {
+                    // Limit the shortcut to the native format measured in
+                    // the A/B. RGB/MJPEG and unknown formats keep legacy wiring.
+                    preferDecoder = pmt->subtype == MEDIASUBTYPE_YUY2;
                     if (pmt->formattype == FORMAT_VideoInfo) {
                         auto* pVih = (VIDEOINFOHEADER*)pmt->pbFormat;
                         pVih->bmiHeader.biWidth  = width;
@@ -462,10 +539,9 @@ bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height
         }
 
         // Connect capture → grabber
-        hr = m_pGraph->Connect(pCaptureOut, pGrabberIn);
+        const bool connected = ConnectCapture(pCaptureOut, pGrabberIn, preferDecoder);
         pCaptureOut->Release();
-        if (FAILED(hr)) {
-            FACELOGIN_ERROR(L"DS Connect(capture→grabber) failed: 0x%08X", hr);
+        if (!connected) {
             pGrabberIn->Release();
             pGrabberOut->Release();
             pNullIn->Release();
@@ -528,10 +604,12 @@ void WebcamCaptureDS::DiscardPreload() {
     if (m_pGrabber) { m_pGrabber->Release(); m_pGrabber = nullptr; }
     if (m_pNullRenderer) { m_pNullRenderer->Release(); m_pNullRenderer = nullptr; }
     if (m_pCapture) { m_pCapture->Release(); m_pCapture = nullptr; }
+    if (m_pDecoder) { m_pDecoder->Release(); m_pDecoder = nullptr; }
     if (m_pGraph) { m_pGraph->Release(); m_pGraph = nullptr; }
     if (m_pMoniker) { m_pMoniker->Release(); m_pMoniker = nullptr; }
     m_preloadDevicePath.clear();
     m_preloadValid = false;
+    m_directDecoder = false;
 }
 
 bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
@@ -597,9 +675,10 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
     }
 
     m_initialized = true;
-    FACELOGIN_INFO(L"DirectShow webcam initialized: %dx%d RGB24%s",
+    FACELOGIN_INFO(L"DirectShow webcam initialized: %dx%d RGB24%s%s",
                    m_width, m_height,
-                   m_preloadValid ? L" (preloaded skeleton)" : L"");
+                   m_preloadValid ? L" (preloaded skeleton)" : L"",
+                   m_directDecoder ? L" (AVI direct)" : L" (Intelligent Connect)");
     return true;
 }
 
@@ -763,6 +842,10 @@ void WebcamCaptureDS::Shutdown() {
         m_pCapture->Release();
         m_pCapture = nullptr;
     }
+    if (m_pDecoder) {
+        m_pDecoder->Release();
+        m_pDecoder = nullptr;
+    }
     if (m_pGraph) {
         m_pGraph->Release();
         m_pGraph = nullptr;
@@ -773,6 +856,7 @@ void WebcamCaptureDS::Shutdown() {
     }
     m_preloadDevicePath.clear();
     m_preloadValid = false;
+    m_directDecoder = false;
 
     ShutdownCOM();
 

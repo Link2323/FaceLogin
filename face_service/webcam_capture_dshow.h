@@ -2,7 +2,8 @@
 
 // DirectShow webcam capture — used by every FaceLogin camera path.
 //
-// Filter graph:  [Capture] -> [SampleGrabber (RGB24)] -> [Null Renderer]
+// Filter graph: [Capture] -> [optional converter] -> [SampleGrabber (RGB24)]
+//               -> [Null Renderer]
 // ISampleGrabberCB::BufferCB copies frames into a shared buffer protected
 // by a CRITICAL_SECTION.  GrabFrame() copies out.
 
@@ -94,7 +95,8 @@ public:
                     const std::wstring& devicePath = L"");
     // Preload the device-independent halves of a later Initialize():
     // registry-level device enumeration (resolving the target moniker) and
-    // the graph skeleton (FilterGraph + SampleGrabber + Null Renderer).
+    // the graph skeleton (FilterGraph + SampleGrabber + Null Renderer, with
+    // an optional software AVI Decompressor for YUY2 capture).
     // Nothing here ACTIVATES the capture device — BindToObject, pin
     // connection and Run stay in Initialize(), so the camera LED stays off
     // while the desktop is locked. Initialize() consumes the preload when
@@ -161,6 +163,7 @@ private:
     // format, connects the pins and queries IMediaControl.
     bool BuildSkeleton();
     bool AttachCapture(IBaseFilter* pCapture, int width, int height);
+    bool ConnectCapture(IPin* pCaptureOut, IPin* pGrabberIn, bool preferDecoder);
     // Release every COM interface and the held moniker. Keeps the thread's
     // COM reference; callers that own their COM init pair it separately.
     void DiscardPreload();
@@ -170,9 +173,11 @@ private:
     IBaseFilter*     m_pCapture      = nullptr;
     ISampleGrabber*  m_pGrabber      = nullptr;
     IBaseFilter*     m_pNullRenderer = nullptr;
+    IBaseFilter*     m_pDecoder      = nullptr;
     IMoniker*        m_pMoniker      = nullptr;
     std::wstring     m_preloadDevicePath;
     bool             m_preloadValid  = false;
+    bool             m_directDecoder = false;
 
     GrabberCB m_callback;
 
