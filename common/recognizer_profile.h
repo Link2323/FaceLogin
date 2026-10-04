@@ -6,7 +6,8 @@
 
 namespace facelogin {
 
-// This build uses only the pinned OpenCV SFace 2021dec FP32 recognizer.
+// Pinned OpenCV SFace 2021dec FP32, with initializer graph inputs removed.
+// Weight values/nodes and the 128-D metric space are preserved.
 inline constexpr size_t kRecognizerDimension = 128;
 inline constexpr uint32_t kCredentialDatabaseVersion = 6;
 inline constexpr uint32_t kRecognizerModelTag = 0x31434653; // "SFC1"

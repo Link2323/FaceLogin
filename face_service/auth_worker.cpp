@@ -69,33 +69,59 @@ std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
     auto models = std::make_unique<WorkerModels>();
     failure = ModelLoadFailure::Load;
 
+    // Aggregate once after loading: per-call logging can distort short stages.
+    // Keep integrity checks and session construction in their established order.
+    const auto loadStart = std::chrono::steady_clock::now();
+    double detectorHashMs = 0.0, detectorInitMs = 0.0;
+    double recognizerHashMs = 0.0, recognizerInitMs = 0.0;
+    double padHashMs = 0.0, padInitMs = 0.0;
+    const auto measure = [](double& elapsedMs, auto&& operation) {
+        const auto start = std::chrono::steady_clock::now();
+        const bool ok = operation();
+        elapsedMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        return ok;
+    };
+
     const std::wstring detectorPath = modelsDir + L"\\det_10g_gnkps.onnx";
-    if (!VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector")) {
+    if (!measure(detectorHashMs, [&] {
+            return VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector");
+        })) {
         failure = ModelLoadFailure::DetectorIntegrity;
         return {};
     }
     models->detector = std::make_unique<OnnxDetector>();
-    if (!models->detector->Initialize(detectorPath)) return {};
+    if (!measure(detectorInitMs, [&] { return models->detector->Initialize(detectorPath); })) return {};
 
     const std::wstring recognizerPath = modelsDir + L"\\face_recognition_sface_2021dec.onnx";
-    if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
-                              L"OpenCV SFace recognizer")) {
+    if (!measure(recognizerHashMs, [&] {
+            return VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
+                                        L"OpenCV SFace recognizer");
+        })) {
         failure = ModelLoadFailure::RecognizerIntegrity;
         return {};
     }
     models->recognizer = std::make_unique<OnnxRecognizer>();
-    if (!models->recognizer->Initialize(recognizerPath)) return {};
+    if (!measure(recognizerInitMs, [&] { return models->recognizer->Initialize(recognizerPath); })) return {};
 
     const std::wstring v2Path = modelsDir + L"\\MiniFASNetV2.onnx";
     const std::wstring v1SePath = modelsDir + L"\\MiniFASNetV1SE.onnx";
-    if (!VerifyModelIntegrity(v2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") ||
-        !VerifyModelIntegrity(v1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)")) {
+    if (!measure(padHashMs, [&] {
+            return VerifyModelIntegrity(v2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") &&
+                   VerifyModelIntegrity(v1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)");
+        })) {
         failure = ModelLoadFailure::PadIntegrity;
         return {};
     }
     models->antiSpoof = std::make_unique<OnnxAntiSpoof>();
-    if (!models->antiSpoof->Initialize(v2Path, v1SePath)) return {};
+    if (!measure(padInitMs, [&] { return models->antiSpoof->Initialize(v2Path, v1SePath); })) return {};
     failure = ModelLoadFailure::None;
+    FACELOGIN_INFO(L"Auth worker model load: detector_hash=%.1f ms, detector_init=%.1f ms, "
+                   L"recognizer_hash=%.1f ms, recognizer_init=%.1f ms, "
+                   L"pad_hash=%.1f ms, pad_init=%.1f ms, total=%.1f ms",
+                   detectorHashMs, detectorInitMs, recognizerHashMs, recognizerInitMs,
+                   padHashMs, padInitMs, std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - loadStart).count());
     return models;
 }
 
@@ -172,6 +198,18 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     FACELOGIN_INFO(L"=== Authentication worker starting (pid=%lu, DirectShow) ===",
                    GetCurrentProcessId());
 
+    const auto preloadStart = std::chrono::steady_clock::now();
+    DWORD preloadSessionId = 0;
+    const bool haveSessionId = ProcessIdToSessionId(GetCurrentProcessId(), &preloadSessionId) != FALSE;
+    PROCESS_POWER_THROTTLING_STATE preloadPower{};
+    preloadPower.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    const bool havePowerState = GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                                                     &preloadPower, sizeof(preloadPower)) != FALSE;
+    FACELOGIN_INFO(L"Auth worker preload policy: session=%lu (known=%d), "
+                   L"power_control=0x%lx, power_state=0x%lx (known=%d)",
+                   preloadSessionId, haveSessionId, preloadPower.ControlMask,
+                   preloadPower.StateMask, havePowerState);
+
     ModelLoadFailure modelFailure = ModelLoadFailure::Load;
     auto models = LoadModels(dataDir + L"\\models", config, modelFailure);
     if (!models || !models->detector || !models->recognizer || !models->antiSpoof) {
@@ -181,6 +219,7 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     // Pay ORT's first-run cost (arena/thread-pool/per-shape planning) during
     // preload, not on the first authenticated frame.
     WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);
+    const auto warmupDoneAt = std::chrono::steady_clock::now();
 
     // Camera preload during lock-screen idle: registry-level device
     // enumeration + graph skeleton (device-independent filters). The device
@@ -191,6 +230,12 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     if (!camera->Preload(config.cameraDevice)) {
         FACELOGIN_WARN(L"Camera preload failed — full initialization at AUTH_START");
     }
+    const auto skeletonDoneAt = std::chrono::steady_clock::now();
+    FACELOGIN_INFO(L"Auth worker preload timing: models_and_warmup=%.1f ms, "
+                   L"camera_skeleton=%.1f ms, total=%.1f ms",
+                   std::chrono::duration<double, std::milli>(warmupDoneAt - preloadStart).count(),
+                   std::chrono::duration<double, std::milli>(skeletonDoneAt - warmupDoneAt).count(),
+                   std::chrono::duration<double, std::milli>(skeletonDoneAt - preloadStart).count());
     bool cameraReady = false;
     const auto initializeCamera = [&camera, &cameraReady, &config]() {
         if (cameraReady) return true;

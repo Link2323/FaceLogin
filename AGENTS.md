@@ -62,6 +62,8 @@ build/               → CMake 输出(Release 下的 5 个运行时 DLL 随安�
 
 ### 模型文件
 
+SFace 运行文件自 2026-10-04 起使用固定上游 FP32 的规范化导出：只从 `graph.input` 移除 174 个重复权重输入，权重/节点保持原样。上游和运行文件哈希不同；`scripts/normalize_sface_export.py` 生成暂存文件，下载器校验后晋升，完整哈希与转换记录见 `third_party/models/sface/provenance.json`。不得将原始上游导出直接覆盖运行模型。已对照生产推理及旧库匹配，保留 V6/SFC1 和现有录入，无需因本次规范化重新录入。
+
 v1.6 共 4 个正式 ONNX 模型,当前工作区已准备完成。普通构建/打包直接复用 `assets/models/` 与 `installer/FaceLoginSetup/resources/models/` 中已有文件,**不要重复下载或重新量化**。仅在新克隆缺模型、SHA-256 校验失败或任务明确要求升级模型时,才运行 `powershell -File scripts\download_models.ps1`;构建注册 app 时会把同 SHA-256 的正式模型复制到安装器资源镜像。两处不是独立来源:`assets/models/` 是准备/转换工作区,安装器目录是待打包镜像。用途与部署约束见 [DEVELOPMENT.md 模型索引](DEVELOPMENT.md#sec-models),推理细节见 [`docs/modules/face-service.md`](docs/modules/face-service.md):
 
 | 文件 | 大小 | 角色 |

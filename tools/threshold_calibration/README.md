@@ -140,6 +140,16 @@ python -m unittest discover -s tools/threshold_calibration -p test_compare_recog
 
 ### 重新录入、小账户库与 INT8 研究
 
+SFace initializer 输入清理由 `scripts/normalize_sface_export.py` 生成；2026-10-04 原生 ORT 1.23.2 对照通过后已采用为正式导出。脚本只接受固定上游哈希，移除 `graph.input` 中重复列出的权重，拒绝覆盖文件或直接写入正式模型/安装载荷目录，并验证衍生哈希。权重和节点保持原样，ORT 可启用额外图优化；数值差异、现有库兼容与初始化/推理取舍见 [`docs/sface-performance.md`](../../docs/sface-performance.md)。普通构建直接复用现有正式文件；缺模型时由 `scripts/download_models.ps1` 验证上游、生成暂存文件并晋升。手工离线重现可使用已下载的**原始上游**研究文件和含 `onnx` 的 Python 环境：
+
+```powershell
+& D:/anaconda/python.exe scripts/normalize_sface_export.py `
+    tools/threshold_calibration/data/recognizer_ab/models/sface_2021dec.onnx `
+    tools/threshold_calibration/data/recognizer_ab/models/sface_2021dec_constant_inputs.onnx
+```
+
+以上命令从仓库根目录执行；候选已存在时会拒绝覆盖。
+
 `refine_recognizer_comparison.py` 复用上一步的 `samples.json` / `chips.npz`，按标定/测试身份隔离比较每账户注册一张或三张的效果，以及 1/2/5 账户的匹配和 ratio 敏感性。另对测试 chip 做 32px 缩小回放和 Gaussian sigma=1.5 模糊，注册模板保持原图。合成降质不代表真实暗光或侧脸；重复抽取账户库的试验彼此相关。
 
 工具仅在忽略的缓存中生成 AuraFace QDQ INT8 研究权重：64 个标定身份各一张图、opset 13、Conv/Gemm per-channel、S8S8、MinMax。升级 opset 前后先核对 FP32 embedding，再量化；不使用本地自拍或测试身份标定量化范围。测量预处理＋推理＋归一化的 1/2/4/8 线程耗时。

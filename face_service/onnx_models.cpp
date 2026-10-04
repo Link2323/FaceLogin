@@ -39,12 +39,33 @@ static int OnnxThreadCount() {
 // an 8-thread pool for every detector/recognizer session, and the Windows thread
 // handles remained after teardown (~17 handles per lock cycle in production).
 // Keep the pools process-long and unload only sessions/model weights.
+static void ORT_API_CALL LogOrtMessage(void*, OrtLoggingLevel severity,
+                                       const char* category, const char*,
+                                       const char* codeLocation, const char* message) noexcept {
+    LogLevel level = LogLevel::Debug;
+    if (severity >= ORT_LOGGING_LEVEL_ERROR) level = LogLevel::Error;
+    else if (severity == ORT_LOGGING_LEVEL_WARNING) level = LogLevel::Warning;
+    else if (severity == ORT_LOGGING_LEVEL_INFO) level = LogLevel::Info;
+    try {
+        // ORT's default Windows sink writes to wclog. With no console in
+        // Session 0, SFace's 174 initializer warnings cost about one second.
+        // Preserve diagnostics through the existing buffered project logger;
+        // never let a C++ exception escape the runtime's C callback boundary.
+        Logger::Instance().Log(level, L"ORT [%hs] %hs: %hs",
+                               category ? category : "",
+                               codeLocation ? codeLocation : "",
+                               message ? message : "");
+    } catch (...) {
+        if (message) OutputDebugStringA(message);
+    }
+}
+
 static std::unique_ptr<Ort::Env> CreateProcessOrtEnv(int intraOpThreads,
                                                       const char* logId) {
     Ort::ThreadingOptions threadingOptions;
     threadingOptions.SetGlobalIntraOpNumThreads(intraOpThreads);
     threadingOptions.SetGlobalInterOpNumThreads(1);
-    return std::make_unique<Ort::Env>(threadingOptions,
+    return std::make_unique<Ort::Env>(threadingOptions, LogOrtMessage, nullptr,
                                       ORT_LOGGING_LEVEL_WARNING, logId);
 }
 
@@ -53,10 +74,10 @@ static Ort::Env& ProcessOrtEnv() {
     return *env;
 }
 
-// MiniFAS was calibrated with one intra-op thread per model. It runs two
-// sessions concurrently on their caller threads, so use a separate one-thread
-// global pool rather than letting both small graphs contend for the 8-thread
-// detector/recognizer pool.
+// Preserve the existing environment request order. ORT 1.23.2 reuses the
+// first native OrtEnv, so this later one-thread request does not establish
+// an independent pool. Initializing MiniFAS first would also change the
+// detector/recognizer pool; see docs/sface-performance.md.
 static Ort::Env& ProcessMiniFasOrtEnv() {
     static auto env = CreateProcessOrtEnv(1, "FaceLoginMiniFAS");
     return *env;

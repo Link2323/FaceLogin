@@ -99,7 +99,7 @@ ProgramData 不是默认生产位置。
 
 模型来源、转换记录、文件哈希及许可核查见 [`model-licenses.md`](docs/model-licenses.md)；安装器展示的简明许可说明见 [`third_party/MODEL_LICENSES.txt`](third_party/MODEL_LICENSES.txt)。项目代码 MIT 许可不覆盖预训练权重。
 检测权重的发布者许可与 DOCSAID 训练实现证据统一位于 [`third_party/models/scrfd-10g/`](third_party/models/scrfd-10g/provenance.json)，活体模型许可位于 `third_party/models/minifas/`；下载脚本固定原始发布版本及 SHA-256，交付模型字节未因许可补录改变。
-当前识别为固定 OpenCV SFace 2021dec（128 维、未修改 FP32）；来源/许可在 `third_party/models/sface/`，新库 V6 强制重录，学习暂关闭，试用准备与验收见 `docs/sface-trial.md`。旧 R50 授权申请归档，不入包。
+当前识别为固定 OpenCV SFace 2021dec（128 维、FP32 权重/节点不变，导出已移除 174 个 initializer graph inputs）；来源、上游/运行哈希及转换记录在 `third_party/models/sface/`，转换入口 `scripts/normalize_sface_export.py`。R50 旧库切换至 V6 时须重录；本次导出规范化兼容已有 V6/SFC1，无需重录。学习暂关闭，试用准备与验收见 `docs/sface-trial.md`。旧 R50 授权申请归档，不入包。
 
 ## 文档地图
 

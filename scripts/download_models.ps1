@@ -40,12 +40,15 @@ $detectorInt8 = @{
     Size = 4257451
     Sha256 = '07B62718EB454EE1881465C12D0D0546F2E916E3BB549F142DC221729BF7F4DC'
 }
-# Pinned, unmodified OpenCV SFace FP32 export; normalization is inside ONNX.
+# Pinned OpenCV SFace FP32 export; remove initializer graph inputs only.
+# Pixel normalization remains inside ONNX; weights/nodes are unchanged.
 $recognizer = @{
     Name = 'face_recognition_sface_2021dec.onnx'
     Url = 'https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx'
-    Size = 38696353
-    Sha256 = '0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79'
+    RawSize = 38696353
+    RawSha256 = '0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79'
+    Size = 38688787
+    Sha256 = 'AE6A6AC44D2BDC87924E75FB23D8212430DD24F037F5E035C21DEFF99AFC8B61'
 }
 
 function Test-PinnedFile {
@@ -144,9 +147,31 @@ $recognizerPath = Join-Path $ModelsDir $recognizer.Name
 if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256) {
     Write-Host "[SKIP] $($recognizer.Name) is already verified." -ForegroundColor Green
 } else {
-    Download-File -Url $recognizer.Url -Destination $recognizerPath
-    if (-not (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256)) {
-        throw "SFace recognizer did not match the pinned OpenCV artifact."
+    # Stage away from production directories; install only the fully checked
+    # derivative. Reuse a verified original already on disk without download.
+    $recognizerStage = Join-Path ([System.IO.Path]::GetTempPath()) ("FaceLogin-SFace-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $recognizerStage | Out-Null
+    $rawRecognizerPath = Join-Path $recognizerStage 'upstream.onnx'
+    $normalizedRecognizerPath = Join-Path $recognizerStage 'normalized.onnx'
+    try {
+        if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.RawSize -ExpectedSha256 $recognizer.RawSha256) {
+            Copy-Item -LiteralPath $recognizerPath -Destination $rawRecognizerPath
+        } else {
+            Download-File -Url $recognizer.Url -Destination $rawRecognizerPath
+        }
+        if (-not (Test-PinnedFile -Path $rawRecognizerPath -ExpectedSize $recognizer.RawSize -ExpectedSha256 $recognizer.RawSha256)) {
+            throw 'Raw SFace recognizer did not match the pinned OpenCV artifact.'
+        }
+        $normalizer = Join-Path $PSScriptRoot 'normalize_sface_export.py'
+        & $PythonExe $normalizer $rawRecognizerPath $normalizedRecognizerPath
+        if ($LASTEXITCODE -ne 0) { throw "SFace normalization failed with exit code $LASTEXITCODE." }
+        if (-not (Test-PinnedFile -Path $normalizedRecognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256)) {
+            throw 'Normalized SFace recognizer did not match the pinned runtime artifact.'
+        }
+        Move-Item -LiteralPath $normalizedRecognizerPath -Destination $recognizerPath -Force
+    } finally {
+        Remove-Item -LiteralPath $rawRecognizerPath,$normalizedRecognizerPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $recognizerStage -Force -ErrorAction SilentlyContinue
     }
 }
 

@@ -8,7 +8,7 @@ FaceLogin 使用以下预训练模型进行人脸检测、人脸识别和活体�
 
 模型：OpenCV SFace 2021dec
 用途：人脸特征提取
-来源与说明：OpenCV Zoo 固定版本权重，FaceLogin 使用未修改的 FP32 模型。
+来源与说明：OpenCV Zoo 固定版本 FP32 权重；FaceLogin 从模型输入列表移除重复列出的 174 个权重项，权重与计算节点保持原样。
 
 模型：MiniFASNetV2
 用途：活体检测

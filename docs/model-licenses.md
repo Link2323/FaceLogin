@@ -1,12 +1,12 @@
 # FaceLogin 模型来源与许可
 
-核对日期：2026-10-01。本文件是源码树中的详细模型来源与许可核查记录；安装器展示的简明说明见 [`third_party/MODEL_LICENSES.txt`](../third_party/MODEL_LICENSES.txt)。
+许可核对日期：2026-10-01；SFace 导出规范化记录更新：2026-10-04。本文件是源码树中的详细模型来源与许可核查记录；安装器展示的简明说明见 [`third_party/MODEL_LICENSES.txt`](../third_party/MODEL_LICENSES.txt)。
 
 项目根目录的 MIT 许可适用于 FaceLogin 自有代码；第三方代码和预训练权重遵守各自的许可。模型下载、哈希验证、ONNX 转换或 INT8 量化均不构成新的用途授权。本文件记录来源及目前可见的许可依据，不替权利方作出授权。
 
 ## 当前授权状态
 
-- **`face_recognition_sface_2021dec.onnx`：OpenCV 模型目录声明全部文件为 Apache-2.0。** 当前试用构建使用固定版本未修改的 FP32 权重，128 维。许可全文、模型目录说明和权重来源位于 `third_party/models/sface/`；按发布方条款保留声明，无需另行申请个别授权。训练数据权利未独立核验。R50 权重已退出安装载荷，其授权申请只作历史归档。
+- **`face_recognition_sface_2021dec.onnx`：OpenCV 模型目录声明全部文件为 Apache-2.0。** 当前试用构建使用固定版本 FP32，128 维；FaceLogin 从 `graph.input` 移除 174 个重复列出的权重输入，权重数值、节点及其他字段保持原样。许可全文、模型目录说明和上游/衍生文件来源位于 `third_party/models/sface/`；按发布方条款保留声明，无需另行申请个别授权。训练数据权利未独立核验。R50 权重已退出安装载荷，其授权申请只作历史归档。
 - **`det_10g_gnkps.onnx`：已补齐发布者及 Apache-2.0 许可来源。** 发布者为 Kun-Hsiang Lin（`kunkunlin1221`），其 PyFace 代码明确引用当前模型仓库，同作者的 DOCSAID FaceDetection 提供匹配的训练及导出实现。模型仓库对这份具体权重声明 Apache-2.0，相关训练源码也采用 Apache-2.0；发布版本、原始权重 SHA-256、许可原文及关联证据已固定。按发布者声明保留 Apache-2.0 全文、作者来源及 FaceLogin 修改说明。下面区分直接证据与训练归属推断；不能把架构同名当成 InsightFace 官方权重的证明。本次未独立核验训练数据的全部权利。
 - **双 MiniFAS：按来源仓库的 Apache-2.0 声明保留许可。** yakhyo 的发布仓库及其引用的 MiniVision 上游仓库均提供 Apache-2.0；本次核对未见对这两份公开权重另列的用途限制。完整上游许可快照和来源链接收录在 `THIRD_PARTY_NOTICES.txt`。这不等于对训练数据权利作出独立保证。
 
@@ -17,7 +17,7 @@
 | 交付文件 | 基础模型来源 | FaceLogin 处理 | 可见许可依据 |
 |---|---|---|---|
 | `det_10g_gnkps.onnx` | [Kun-Hsiang Lin 发布的具体版本](https://huggingface.co/kunkunlin1221/face-detection_scrfd-10g-gnkps/tree/eb0e349519cd951b2a9423dac45b39e8ce5a71b8)，文件 `scrfd_10g_gnkps_fp32.onnx`；下载脚本使用同版本 hf-mirror.com 镜像 | FaceLogin 修改：移除输出 stride 缩放节点、调整输出顺序、静态 QDQ INT8 量化；保留上游元数据 | 发布者对该权重的 Apache-2.0 声明；相关 DOCSAID 训练源码及 Apache-2.0 全文见下文 |
-| `face_recognition_sface_2021dec.onnx` | [OpenCV Zoo 固定版本](https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface) | 未修改 FP32 ONNX；输入 RGB 0..255，输出后 L2 归一化 | 模型目录所有文件 Apache-2.0；离线快照见 `third_party/models/sface/` |
+| `face_recognition_sface_2021dec.onnx` | [OpenCV Zoo 固定版本](https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface) | FP32；移除 174 个 initializer graph inputs，权重/节点不变；输入 RGB 0..255，输出后 L2 归一化 | 模型目录所有文件 Apache-2.0；离线快照及转换记录见 `third_party/models/sface/` |
 | `MiniFASNetV2.onnx` | [yakhyo 的 weights 发布](https://github.com/yakhyo/face-anti-spoofing/releases/tag/weights)，同名 ONNX | 直接下载及哈希核验，无本地权重转换 | [yakhyo LICENSE](https://github.com/yakhyo/face-anti-spoofing/blob/main/LICENSE)、[MiniVision 上游 LICENSE](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/LICENSE) |
 | `MiniFASNetV1SE.onnx` | 同上，同名 ONNX | 直接下载及哈希核验，无本地权重转换 | 同上 |
 
@@ -51,7 +51,7 @@
 | 文件 | 字节数 | SHA-256 |
 |---|---:|---|
 | `det_10g_gnkps.onnx` | 4257451 | `07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc` |
-| `face_recognition_sface_2021dec.onnx` | 38696353 | `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79` |
+| `face_recognition_sface_2021dec.onnx` | 38688787 | `ae6a6ac44d2bdc87924e75fb23d8212430dd24f037f5e035c21deff99afc8b61` |
 | `MiniFASNetV2.onnx` | 1743581 | `b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907` |
 | `MiniFASNetV1SE.onnx` | 1742335 | `ebab7f90c7833fbccd46d3a555410e78d969db5438e169b6524be444862b3676` |
 
@@ -60,5 +60,7 @@
 旧 R50 基础 FP32 文件的 SHA-256 为 `4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43`（历史记录，不入包）。以上哈希用于识别具体文件，不代表权利方授权证明。
 
 ## 更新要求
+
+SFace 原始上游文件为 38696353 字节，SHA-256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`。`scripts/normalize_sface_export.py` 只清理重复权重输入并固定衍生哈希；发布说明已注明这一修改。生产 ORT 的输出、现有 V6 库兼容及耗时对照见 [`sface-performance.md`](sface-performance.md)。
 
 模型或其许可改变时，同步本文件、下载/转换脚本及安装器/服务的模型清单。保存来自权利方的版本、来源、许可全文及授权范围；如签订了不宜公开的合同，公开文档应准确记录授权范围与适用模型，并保存可供审核的授权依据。

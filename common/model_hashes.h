@@ -9,7 +9,7 @@ namespace facelogin::model_hashes {
 inline constexpr char kDetector[] =
     "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc";
 inline constexpr char kRecognizer[] =
-    "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79";
+    "ae6a6ac44d2bdc87924e75fb23d8212430dd24f037f5e035c21deff99afc8b61";
 inline constexpr char kMiniFasV2[] =
     "b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907";
 inline constexpr char kMiniFasV1Se[] =

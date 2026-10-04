@@ -43,8 +43,8 @@ var requiredModels = []requiredModel{
 	{
 		embeddedPath: "resources/models/face_recognition_sface_2021dec.onnx",
 		fileName:     "face_recognition_sface_2021dec.onnx",
-		size:         38696353,
-		sha256:       "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+		size:         38688787,
+		sha256:       "ae6a6ac44d2bdc87924e75fb23d8212430dd24f037f5e035c21deff99afc8b61",
 	},
 	{
 		embeddedPath: "resources/models/MiniFASNetV2.onnx",
