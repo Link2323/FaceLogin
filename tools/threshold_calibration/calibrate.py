@@ -42,7 +42,7 @@ decode formula, and rounding step mirrors the C++ source bit-for-bit:
 Usage:
   python calibrate.py --images data/lfw_subset [--detector det_10g_gnkps.onnx]
                       [--recognizer w600k_r50.onnx] [--photos data/photos]
-                      [--report docs/threshold-calibration.md]
+                      [--report docs/work/completed/threshold-calibration.md]
 
 Input layout: --images/<identity_name>/<anything>.{jpg,png} (one subdir per
 person). Optional --photos for screen-replay / print attack samples (any
@@ -637,7 +637,7 @@ def ascii_histogram(
     same: Sequence[float], other: Sequence[float], photo: Sequence[float],
     bins: int = 40, lo: float = 0.3, hi: float = 1.1,
 ) -> list[str]:
-    """Render a 3-row ASCII histogram like docs/performance-baseline.md:80-86."""
+    """Render a 3-row ASCII histogram like docs/work/completed/performance-baseline.md:80-86."""
     edges = np.linspace(lo, hi, bins + 1)
     def counts(vals: Sequence[float]) -> list[int]:
         hist, _ = np.histogram(vals, bins=edges)

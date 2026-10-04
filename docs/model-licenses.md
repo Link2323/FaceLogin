@@ -10,7 +10,7 @@
 - **`det_10g_gnkps.onnx`：已补齐发布者及 Apache-2.0 许可来源。** 发布者为 Kun-Hsiang Lin（`kunkunlin1221`），其 PyFace 代码明确引用当前模型仓库，同作者的 DOCSAID FaceDetection 提供匹配的训练及导出实现。模型仓库对这份具体权重声明 Apache-2.0，相关训练源码也采用 Apache-2.0；发布版本、原始权重 SHA-256、许可原文及关联证据已固定。按发布者声明保留 Apache-2.0 全文、作者来源及 FaceLogin 修改说明。下面区分直接证据与训练归属推断；不能把架构同名当成 InsightFace 官方权重的证明。本次未独立核验训练数据的全部权利。
 - **双 MiniFAS：按来源仓库的 Apache-2.0 声明保留许可。** yakhyo 的发布仓库及其引用的 MiniVision 上游仓库均提供 Apache-2.0；本次核对未见对这两份公开权重另列的用途限制。完整上游许可快照和来源链接收录在 `THIRD_PARTY_NOTICES.txt`。这不等于对训练数据权利作出独立保证。
 
-当前四个交付模型按各发布方 Apache-2.0 声明分发，仍须遵守许可条款；本次不替训练数据权利作独立保证。SFace 的试用状态与安全标定进度见 `sface-trial.md`。
+当前四个交付模型按各发布方 Apache-2.0 声明分发，仍须遵守许可条款；本次不替训练数据权利作独立保证。SFace 的试用状态与安全标定进度见 [`SFace 试用记录`](work/in-progress/sface-trial.md)。
 
 ## 来源与处理
 
@@ -61,6 +61,6 @@
 
 ## 更新要求
 
-SFace 原始上游文件为 38696353 字节，SHA-256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`。`scripts/normalize_sface_export.py` 只清理重复权重输入并固定衍生哈希；发布说明已注明这一修改。生产 ORT 的输出、现有 V6 库兼容及耗时对照见 [`sface-performance.md`](sface-performance.md)。
+SFace 原始上游文件为 38696353 字节，SHA-256 `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`。`scripts/normalize_sface_export.py` 只清理重复权重输入并固定衍生哈希；发布说明已注明这一修改。生产 ORT 的输出、现有 V6 库兼容及耗时对照见 [`sface-performance.md`](work/completed/sface-performance.md)。
 
 模型或其许可改变时，同步本文件、下载/转换脚本及安装器/服务的模型清单。保存来自权利方的版本、来源、许可全文及授权范围；如签订了不宜公开的合同，公开文档应准确记录授权范围与适用模型，并保存可供审核的授权依据。

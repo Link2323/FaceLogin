@@ -1,4 +1,4 @@
-> 2026-10-01：当前安装包为 SFace 试用版：128 维特征、`users.dat` V6、强制重新录入、渐进学习关闭。真实摄像头与锁屏验收状态见 [试用记录](sface-trial.md)。
+> 当前识别模型、数据兼容要求和真实环境验收状态见 [SFace 试用记录](work/in-progress/sface-trial.md)。
 
 # Build Guide
 

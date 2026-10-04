@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Full-LFW imposter calibration for the FaceLogin 512-D pipeline.
 
-Extends the 58-identity subset evidence in docs/threshold-calibration.md to
+Extends the 58-identity subset evidence in docs/work/completed/threshold-calibration.md to
 the complete LFW roster (~5,749 people / 13,233 images). The numerically
 faithful embedding pipeline (SCRFD gnkps -> 5-pt Umeyama -> w600k_r50 ->
 L2-unit embedding) is imported from calibrate.py so every distance here is

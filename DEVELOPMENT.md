@@ -2,7 +2,7 @@
 
 本文件只回答三件事：**改什么先看哪里、必须联查什么、最低怎么验证**。不要从头通读；入口或影响范围不明确时查任务路由，涉及模块边界或契约时再读对应文档。
 
-> 实现核对基线：2026-08 worker 隔离工作树。代码、构建结果和测试结果是事实源；同步修正本次改动涉及的文档事实；其他不一致简要记录。安装包清单与构建命令以 [`docs/BUILD.md`](docs/BUILD.md) 为准。
+> 代码、构建结果和验证结果是事实源。修改时同步修正本次改动涉及的文档事实，并简要记录其他发现的不一致。安装包清单与构建命令以 [`docs/BUILD.md`](docs/BUILD.md) 为准。
 
 ## 使用方式
 
@@ -29,8 +29,8 @@
 | 安装、卸载、ACL、部署资源 | `installer/FaceLoginSetup/app.go`、`installer/FaceLoginSetup/internal/`、`installer/FaceLoginSetup/resources/` | [`installer.md`](docs/modules/installer.md)、[`docs/BUILD.md`](docs/BUILD.md) | 在 Setup 目录 `go test ./...` + 资源白名单 |
 | 安装器 Vue 前端 | `installer/FaceLoginSetup/frontend/src/` | [`installer.md`](docs/modules/installer.md) | 在 `frontend/` 运行 `npm run build` |
 | 第三方声明、模型许可、安装器许可查看 | `scripts/update_third_party_notices.ps1`、`scripts/stage_licenses.ps1`、`THIRD_PARTY_NOTICES.txt`、`third_party/MODEL_LICENSES.txt`、`docs/model-licenses.md`、`frontend/src/App.vue` | [`docs/BUILD.md`](docs/BUILD.md)、[`third_party/MODEL_LICENSES.txt`](third_party/MODEL_LICENSES.txt)、[`model-licenses.md`](docs/model-licenses.md) | 安装器 `go test ./...` + 前端构建；核对载荷/前端三份声明及 slim 卸载 |
-| 模型替换、量化、阈值 | `face_service/FaceService.cpp`、`installer/FaceLoginSetup/internal/extract.go`、`scripts/download_models.ps1`、`tools/threshold_calibration/` | [`face-service.md`](docs/modules/face-service.md)、[`threshold-calibration.md`](docs/threshold-calibration.md) | 标定 + hash/大小同步 + Go 测试 |
-| 识别模型离线 A/B、重新录入与量化 | `tools/threshold_calibration/compare_recognizers.py`、`refine_recognizer_comparison.py`、`recognizer*_candidates.json` | [工具说明](tools/threshold_calibration/README.md)、[初轮结果](docs/recognizer-comparison.md)、[补充结果](docs/recognizer-refined-evaluation.md) | Python 静态检查 + 对比工具测试 + 本地数据实跑；不改变生产模型 |
+| 模型替换、量化、阈值 | `face_service/FaceService.cpp`、`installer/FaceLoginSetup/internal/extract.go`、`scripts/download_models.ps1`、`tools/threshold_calibration/` | [`face-service.md`](docs/modules/face-service.md)、[历史阈值标定](docs/work/completed/threshold-calibration.md) | 标定 + hash/大小同步 + Go 测试 |
+| 识别模型离线 A/B、重新录入与量化 | `tools/threshold_calibration/compare_recognizers.py`、`refine_recognizer_comparison.py`、`recognizer*_candidates.json` | [工具说明](tools/threshold_calibration/README.md)、[初轮结果](docs/work/completed/recognizer-comparison.md)、[补充结果](docs/work/completed/recognizer-refined-evaluation.md) | Python 静态检查 + 对比工具测试 + 本地数据实跑；不改变生产模型 |
 
 ## 运行期架构
 
@@ -99,7 +99,7 @@ ProgramData 不是默认生产位置。
 
 模型来源、转换记录、文件哈希及许可核查见 [`model-licenses.md`](docs/model-licenses.md)；安装器展示的简明许可说明见 [`third_party/MODEL_LICENSES.txt`](third_party/MODEL_LICENSES.txt)。项目代码 MIT 许可不覆盖预训练权重。
 检测权重的发布者许可与 DOCSAID 训练实现证据统一位于 [`third_party/models/scrfd-10g/`](third_party/models/scrfd-10g/provenance.json)，活体模型许可位于 `third_party/models/minifas/`；下载脚本固定原始发布版本及 SHA-256，交付模型字节未因许可补录改变。
-当前识别为固定 OpenCV SFace 2021dec（128 维、FP32 权重/节点不变，导出已移除 174 个 initializer graph inputs）；来源、上游/运行哈希及转换记录在 `third_party/models/sface/`，转换入口 `scripts/normalize_sface_export.py`。R50 旧库切换至 V6 时须重录；本次导出规范化兼容已有 V6/SFC1，无需重录。学习暂关闭，试用准备与验收见 `docs/sface-trial.md`。旧 R50 授权申请归档，不入包。
+当前识别为固定 OpenCV SFace 2021dec（128 维、FP32 权重/节点不变，导出已移除 174 个 initializer graph inputs）；来源、上游/运行哈希及转换记录在 `third_party/models/sface/`，转换入口 `scripts/normalize_sface_export.py`。R50 旧库切换至 V6 时须重录；本次导出规范化兼容已有 V6/SFC1，无需重录。学习暂关闭，试用准备与验收见 [`SFace 试用记录`](docs/work/in-progress/sface-trial.md)。旧 R50 授权申请归档，不入包。
 
 ## 文档地图
 
@@ -107,13 +107,8 @@ ProgramData 不是默认生产位置。
 - 产品/安全设计：[`docs/design/overview.md`](docs/design/overview.md)
 - 本地开发规范：[`docs/design/development.md`](docs/design/development.md)
 - 运维与排障：[`docs/operations/operations.md`](docs/operations/operations.md)
-- 认证 worker 迁移、性能与资源验收：[`docs/auth-worker-migration-completion.md`](docs/auth-worker-migration-completion.md)
-- 迁移前性能实验与后续基线记录：[`docs/performance-baseline.md`](docs/performance-baseline.md)
-- 阈值标定：[`docs/threshold-calibration.md`](docs/threshold-calibration.md)
-- 多角度设计：[`docs/side-face-plan-v2.md`](docs/side-face-plan-v2.md)
-- 渐进学习方案与 R50 阶段记录：[`docs/progressive-learning-v2.md`](docs/progressive-learning-v2.md)；早期探讨：[`docs/progressive-learning.md`](docs/progressive-learning.md)
-- SFace 试用状态：[`docs/sface-trial.md`](docs/sface-trial.md)
-- 待办：[`docs/todo.md`](docs/todo.md)
+- 契约与模块文档：[`docs/contracts/`](docs/contracts/) 与 [`docs/modules/`](docs/modules/)
+- 阶段性工作记录（按进行中/已完成分类）：[`docs/work/README.md`](docs/work/README.md)
 
 ## 文档维护规则
 

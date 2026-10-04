@@ -191,7 +191,7 @@ wails build -clean -platform windows/amd64
 | `MiniFASNetV2.onnx` | 反欺诈活体检测（2.7× 裁剪） |
 | `MiniFASNetV1SE.onnx` | 反欺诈活体检测（4.0× 裁剪） |
 
-> 检测模型经本地 INT8 量化，SFace 使用固定版本未修改的 FP32 权重，双 MiniFAS 使用来源仓库的 ONNX 导出文件，由 `scripts/download_models.ps1` 准备。本次 SFace 切换强制所有账户重新录入，暂时关闭渐进式学习，验收范围见 [试用说明](docs/sface-trial.md)。模型来源、处理和许可见 [模型许可记录](docs/model-licenses.md)。
+> 检测模型经本地 INT8 量化，SFace 使用固定版本的 FP32 权重，双 MiniFAS 使用来源仓库的 ONNX 导出文件，由 `scripts/download_models.ps1` 准备。从 R50 切换到 SFace 时需要重新录入；2026-10-04 的 SFace 导出规范化未改变权重或嵌入格式，现有 SFace 录入无需重做。渐进式学习暂时关闭，试用状态见 [试用说明](docs/work/in-progress/sface-trial.md)。模型来源、处理和许可见 [模型许可记录](docs/model-licenses.md)。
 
 ---
 

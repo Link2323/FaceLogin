@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare two recognizer ONNX models on the SAME chips, same-angle /
 cross-angle / stranger distributions — the exact口径 of the mbf appendix in
-docs/threshold-calibration.md.
+docs/work/completed/threshold-calibration.md.
 
 Usage:
   python compare_models.py --a ../../assets/models/w600k_r50.onnx \

@@ -12,7 +12,7 @@ FaceLogin 是面向 Windows 的人脸登录应用，通过 Credential Provider �
 | `FaceLoginConsole.exe` | 管理注册信息和设置，通过命名管道通知服务重载。 |
 | `FaceLoginSetup.exe` | 安装和卸载，不参与运行时认证。 |
 
-核心实现使用 C++20、ONNX Runtime 和 Windows API；安装器使用 Go/Wails 与 Vue，注册界面使用 WebView2。认证模型、数据版本和阈值状态以 [`face-service.md`](../modules/face-service.md) 及 [`sface-trial.md`](../sface-trial.md) 为准。
+核心实现使用 C++20、ONNX Runtime 和 Windows API；安装器使用 Go/Wails 与 Vue，注册界面使用 WebView2。认证模型、数据版本和阈值状态以 [`face-service.md`](../modules/face-service.md) 及 [`sface-trial.md`](../work/in-progress/sface-trial.md) 为准。
 
 ## 安全边界
 
@@ -25,4 +25,4 @@ FaceLogin 是面向 Windows 的人脸登录应用，通过 Credential Provider �
 
 本地账户和 Microsoft 账户（MSA）支持注册与登录。MSA 身份优先通过 `GetUserNameExW(NameUserPrincipal)` 获取；该 API 不返回 UPN 时，Enrollment 使用 Windows IdentityStore 缓存回退。域账户目前没有正式验证，不承诺支持。
 
-本地账户使用 `COMPUTERNAME\Username`，MSA 使用 UPN 交给 Windows 认证包。模型切换后的数据库兼容与重录要求见 [`users.dat 契约`](../contracts/users-dat.md) 和 [`SFace 试用说明`](../sface-trial.md)。
+本地账户使用 `COMPUTERNAME\Username`，MSA 使用 UPN 交给 Windows 认证包。模型切换后的数据库兼容与重录要求见 [`users.dat 契约`](../contracts/users-dat.md) 和 [`SFace 试用说明`](../work/in-progress/sface-trial.md)。

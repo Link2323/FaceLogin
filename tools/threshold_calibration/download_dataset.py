@@ -2,7 +2,7 @@
 """Download a small LFW subset for threshold calibration.
 
 LFW (Labeled Faces in the Wild) gives the other-person distance distribution
-that docs/todo.md ui1 was missing: hundreds of different people, organized as
+that docs/work/in-progress/todo.md ui1 was missing: hundreds of different people, organized as
 one folder per identity. This script fetches the dataset, keeps the first N
 identities with at most M images each, and writes them to a folder layout
 that calibrate.py consumes directly:

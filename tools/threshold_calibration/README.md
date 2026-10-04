@@ -1,17 +1,14 @@
 # threshold_calibration
 
-测量人脸嵌入距离分布，验证 `face_service/credential_store.h` 里 `EmbeddingThresholdForDim` 对 512-D 模型硬编码的 **0.80** 匹配阈值是否合理。
+本工具的 `calibrate.py` 复现的是旧 R50 512 维流水线，历史报告不能用来判断当前 SFace 试用阈值是否安全。当前模型状态和验收范围见 [SFace 试用记录](../../docs/work/in-progress/sface-trial.md)。
 
-跑完会生成一份距离分布报告（same-person / other-person / photo 三类 + 阈值推荐），用来判断 0.80 是否安全、能否放开。本 README 讲**怎么用工具产出这份数据**。
+工具可生成 same-person / other-person / photo 距离分布及探索性阈值报告；小样本结果不构成生产安全保证。本 README 说明如何采集数据并运行离线分析。
 
 ## 这个工具测什么
 
 复刻生产 C++ 认证管线的 Python 版：SCRFD 检测 → 5 点相似变换对齐 → w600k_r50 生成 512 维嵌入 → L2 归一化 → 欧氏距离。**每一步的归一化常数、解码公式、对齐模板都与 C++ 源码逐字段对齐**，所以测出的距离可以直接和生产阈值 0.80 比较。
 
-它回答两个问题：
-
-1. **陌生人能冒充你解锁吗？** → 测 other-person 距离（你和别人嵌入的最近距离）。实测都在 1.25 以上，离 0.80 极远，安全。
-2. **你自己能稳定解锁吗？** → 测 same-person 距离（你的不同帧之间）。同摄像头条件下稳定在 0.40–0.78。
+它分别测量同一人的不同图像距离，以及不同身份间的距离，帮助检查样本分布和阈值候选。结果受样本来源、数量和采集条件限制，不能单独外推为真实锁屏的误识率或拒识率。
 
 照片/屏幕翻拍攻击**不在这个工具的评估范围**——那是 PAD（双 MiniFAS 反欺诈层）的职责，用 `PadCalibration.exe` + `../../scripts/analyze_pad_calibration.py` 单独测。
 
@@ -50,10 +47,10 @@ my_faces/
 ```powershell
 python tools\threshold_calibration\calibrate.py `
     --images my_faces `
-    --report docs\threshold-calibration.md
+    --report docs\work\completed\threshold-calibration.md
 ```
 
-报告写到 `docs/threshold-calibration.md`，含 same-person / other-person 距离分布表 + 直方图 + 阈值推荐。脚本带 sanity check：若 same-person 分布没有任何一对落在 C++ baseline 区间 [0.40, 0.80]，会判定与 C++ 管线不一致而拒绝出报告。
+报告写到 `docs/work/completed/threshold-calibration.md`，含 same-person / other-person 距离分布表 + 直方图 + 阈值推荐。脚本带 sanity check：若 same-person 分布没有任何一对落在 C++ baseline 区间 [0.40, 0.80]，会判定与 C++ 管线不一致而拒绝出报告。
 
 ### 方向修正（重要）
 
@@ -65,7 +62,7 @@ python tools\threshold_calibration\calibrate.py `
 python tools\threshold_calibration\calibrate.py `
     --images my_faces `
     --rotate-gallery 90 `
-    --report docs\threshold-calibration.md
+    --report docs\work\completed\threshold-calibration.md
 ```
 
 `--rotate-gallery` 对所有身份的图统一旋转。如果不同人的图方向不一致，先把各自的图转正再放进目录。
@@ -79,7 +76,7 @@ python tools\threshold_calibration\calibrate.py `
     --images my_faces\me `
     --photos attack_photos `
     --rotate-photos 90 `
-    --report docs\threshold-calibration.md
+    --report docs\work\completed\threshold-calibration.md
 ```
 
 `--images` 和 `--photos` 的旋转参数相互独立，因为它们的图通常来自不同设备、方向不同。
@@ -95,7 +92,7 @@ python tools\threshold_calibration\download_dataset.py
 # 下载到 tools\threshold_calibration\data\lfw_subset\<身份>\<图>.jpg
 python tools\threshold_calibration\calibrate.py `
     --images tools\threshold_calibration\data\lfw_subset `
-    --report docs\threshold-calibration.md
+    --report docs\work\completed\threshold-calibration.md
 ```
 
 下载器支持两个源（自动尝试，失败会明确报错并给出手动方案）：HuggingFace `bitmind/lfw` parquet（首选，经 hf-mirror.com）和 UMass 官方 tgz。首次下载约 180 MB，缓存在 `data\_cache\`，后续重跑免费。
@@ -140,7 +137,7 @@ python -m unittest discover -s tools/threshold_calibration -p test_compare_recog
 
 ### 重新录入、小账户库与 INT8 研究
 
-SFace initializer 输入清理由 `scripts/normalize_sface_export.py` 生成；2026-10-04 原生 ORT 1.23.2 对照通过后已采用为正式导出。脚本只接受固定上游哈希，移除 `graph.input` 中重复列出的权重，拒绝覆盖文件或直接写入正式模型/安装载荷目录，并验证衍生哈希。权重和节点保持原样，ORT 可启用额外图优化；数值差异、现有库兼容与初始化/推理取舍见 [`docs/sface-performance.md`](../../docs/sface-performance.md)。普通构建直接复用现有正式文件；缺模型时由 `scripts/download_models.ps1` 验证上游、生成暂存文件并晋升。手工离线重现可使用已下载的**原始上游**研究文件和含 `onnx` 的 Python 环境：
+SFace initializer 输入清理由 `scripts/normalize_sface_export.py` 生成；2026-10-04 原生 ORT 1.23.2 对照通过后已采用为正式导出。脚本只接受固定上游哈希，移除 `graph.input` 中重复列出的权重，拒绝覆盖文件或直接写入正式模型/安装载荷目录，并验证衍生哈希。权重和节点保持原样，ORT 可启用额外图优化；数值差异、现有库兼容与初始化/推理取舍见 [SFace 性能记录](../../docs/work/completed/sface-performance.md)。普通构建直接复用现有正式文件；缺模型时由 `scripts/download_models.ps1` 验证上游、生成暂存文件并晋升。手工离线重现可使用已下载的**原始上游**研究文件和含 `onnx` 的 Python 环境：
 
 ```powershell
 & D:/anaconda/python.exe scripts/normalize_sface_export.py `
@@ -165,9 +162,9 @@ SeetaFace 原始 CSTA 保留用于来源及原生 SDK 复核；推理只读取 O
 
 另读取已有 `my_faces/me` / `mother` 的 `WIN_*` 摄像头照片：按解码像素 SHA-256 去重，每人前三张注册、剩余图测试两账户匹配。它只补充短时间连拍结果，不读取照片攻击或遮挡目录，不代表跨日或实时摄像头验证。
 
-结果在 [`docs/recognizer-refined-evaluation.md`](../../docs/recognizer-refined-evaluation.md)。重跑只更新 `BEGIN/END GENERATED EVALUATION` 注释间的指标区，保留区外的许可核对、研究判断和原生验证记录。距离阈值、ratio 和 INT8 都是探索性结果；未切换生产、未打包、未进行摄像头/PAD/锁屏验收。
+结果在 [补充模型评估](../../docs/work/completed/recognizer-refined-evaluation.md)。重跑只更新 `BEGIN/END GENERATED EVALUATION` 注释间的指标区，保留区外的许可核对、研究判断和原生验证记录。距离阈值、ratio 和 INT8 都是探索性结果；未切换生产、未打包、未进行摄像头/PAD/锁屏验收。
 
-公开汇总在 [`docs/recognizer-comparison.md`](../../docs/recognizer-comparison.md)，个体记录、失败项、chip、嵌入和 JSON 只留在忽略的 `data/recognizer_ab/`，供后续量化/换模复测。候选采用发布方 FP32，基线是生产 R50 INT8；速度不代表相同量化条件。阈值只用于探索，不是部署建议；本工具没有执行 PAD、多帧或锁屏认证。
+公开汇总在 [初轮模型比较](../../docs/work/completed/recognizer-comparison.md)，个体记录、失败项、chip、嵌入和 JSON 只留在忽略的 `data/recognizer_ab/`，供后续量化/换模复测。候选采用发布方 FP32，基线是生产 R50 INT8；速度不代表相同量化条件。阈值只用于探索，不是部署建议；本工具没有执行 PAD、多帧或锁屏认证。
 
 | 文件 | 作用 |
 |---|---|

@@ -81,7 +81,7 @@ float  yawDeg             // 帧姿态 yaw 估计（度，有限且 |v| ≤ 90�
 float  pitchDeg           // 帧姿态 pitch 估计（同上）                 ← v5
 ```
 
-每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 保留归一化前范数（不可从归一化向量恢复），SFace 离线样本中位数约 12.77；当前渐进学习关闭，旧 R50 范数门不能用于 SFace。`yawDeg`/`pitchDeg` 由 worker 侧 `EstimateYawDeg`/`EstimatePitchDeg`（`face_align.h` 弱透视模型，与录入同源）从绑定帧关键点估计，供后续学习姿态锥门验证使用（`docs/progressive-learning-v2.md` §3）。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
+每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 保留归一化前范数，不可从归一化向量恢复。`yawDeg`/`pitchDeg` 由 worker 侧 `EstimateYawDeg`/`EstimatePitchDeg`（`face_align.h` 弱透视模型，与录入同源）从绑定帧关键点估计，供姿态门控使用。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
 
 `AuthSucceeded` 的 `AuthTiming` 顺序固定为：
 

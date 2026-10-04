@@ -322,7 +322,7 @@ def main() -> None:
     parser.add_argument("--threads", type=int, default=min(8, max(2, (os.cpu_count() or 4) // 2)))
     parser.add_argument("--target-fmr", type=float, default=0.001)
     parser.add_argument("--bench-iters", type=int, default=100)
-    parser.add_argument("--report", type=Path, default=HERE.parents[1] / "docs" / "recognizer-comparison.md")
+    parser.add_argument("--report", type=Path, default=HERE.parents[1] / "docs" / "work" / "completed" / "recognizer-comparison.md")
     args = parser.parse_args()
     if not 0 <= args.target_fmr < 1 or args.threads < 1 or args.bench_iters < 1:
         parser.error("Invalid FMR/thread/benchmark option")

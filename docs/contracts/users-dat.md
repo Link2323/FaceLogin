@@ -45,7 +45,7 @@
     nominalPitch: float                // V5：角度槽标称 pitch（度）     ← V5
 ```
 
-`nominalYaw`/`nominalPitch` 是录入时的**姿态目标**（`EnrollmentWizard` 的 `kAngleTargets`：正面 0/0、左转 +30/0、右转 −30/0），不是实测均值——固定目标保证三个角度槽的 ±25° 学习锥（[`docs/progressive-learning-v2.md`](../progressive-learning-v2.md) §3）互不重叠，即使用户转角不足。合法值域 ±90°；无效哨兵 `1000.0f` 表示"无角度信息"，未传角度的内存构造携带它；V4 数据已停用，不会迁入新库，序列化按原值往返（锥门对其放行）。
+`nominalYaw`/`nominalPitch` 是录入时的**姿态目标**（`EnrollmentWizard` 的 `kAngleTargets`：正面 0/0、左转 +30/0、右转 −30/0），不是实测均值——固定目标保证三个角度槽的 ±25° 学习锥（[渐进式学习方案](../work/in-progress/progressive-learning-v2.md) §3）互不重叠，即使用户转角不足。合法值域 ±90°；无效哨兵 `1000.0f` 表示"无角度信息"，未传角度的内存构造携带它；V4 数据已停用，不会迁入新库，序列化按原值往返（锥门对其放行）。
 
 当前写入上限：
 
@@ -82,7 +82,7 @@
 5. 多账号时执行最佳/次佳比门控；单账号不执行 ratio 拒绝。
 6. 成功后才解密密码；使用后立即清零。
 
-128 维 SFace 试用阈值由 `EmbeddingThresholdForDim` 再次收口。具体数值和标定依据见 [`docs/threshold-calibration.md`](../threshold-calibration.md) 与 [`docs/modules/face-service.md`](../modules/face-service.md)。
+128 维 SFace 试用阈值由 `EmbeddingThresholdForDim` 再次收口。具体数值和标定依据见 [历史阈值标定](../work/completed/threshold-calibration.md) 与 [`docs/modules/face-service.md`](../modules/face-service.md)。
 
 ## 消费者与兼容风险
 

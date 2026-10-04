@@ -38,11 +38,11 @@
 | 锁屏后短暂显示“正在加载模型” | 锁屏预加载尚未完成或锁屏事件延迟 | 认证请求会兜底等待；检查 `Model load requested: session lock` 与 `Authentication worker ready` 日志间隔 |
 | 服务启动失败 | 缺少运行时 DLL | 安装时确保 DLL 与 EXE 同目录 |
 | 锁屏不显示磁贴 | 未注册或已禁用 / 无注册用户 | 检查注册表 Disabled 键值，确认已录入人脸 |
-| 识别率低 | 光照、距离或注册样本质量不匹配 | 在与注册相近的光线和距离下重试。查看 `service.log` 的 `closest identity distance` 与阈值；查看 `auth_worker.log` 的 `face luma`，持续低于 50 时检查相机朝向和遮挡。当前 SFace 阈值仍处于试用阶段，见 [`SFace 试用说明`](../sface-trial.md)。 |
+| 识别率低 | 光照、距离或注册样本质量不匹配 | 在与注册相近的光线和距离下重试。查看 `service.log` 的 `closest identity distance` 与阈值；查看 `auth_worker.log` 的 `face luma`，持续低于 50 时检查相机朝向和遮挡。当前 SFace 阈值仍处于试用阶段，见 [`SFace 试用说明`](../work/in-progress/sface-trial.md)。 |
 | 摄像头不工作 | Session 0 权限、相机占用或驱动错误 | 检查 `auth_worker.log` 的 DirectShow 相机初始化错误，并关闭占用相机的程序 |
 | 人脸失败后密码输入被打断 | 部署了会在失败后重新枚举的旧 Credential Provider | 核对已部署 DLL；新版本（2026-08-29 起）失败 tile 无重试按钮、按任意键/点击即重试，会记录 `Terminal failure shown in-place; passive retry re-armed`——监听严格限定本磁贴选中期间，切到密码磁贴即停止；若部署的是更旧版本则应见 `passive retry disabled` 且仅点击“重新尝试人脸识别”才产生新 `AUTH_REQUEST` |
 | 锁屏后摄像头指示灯立即点亮 | 旧版服务、其他应用占用摄像头，或 worker 收到异常早到的认证请求 | 当前版本没有摄像头预热开关；核对已部署 EXE 哈希和 `auth_worker.log`，正常顺序必须先 ready，收到认证后才初始化相机 |
-| 多次锁屏后内存或句柄持续增长 | 旧服务 EXE 仍在运行，或 worker 没有退出 | 确认每轮成功后 `service.log` 有 `Authentication worker timing ... cleanup=...`，任务管理器无遗留 `FaceLoginService.exe -auth-worker`，并比较父 `service.log` 的 worker-ready 资源值；根因与验收数据见 [`auth-worker-migration-completion.md`](../auth-worker-migration-completion.md) |
+| 多次锁屏后内存或句柄持续增长 | 旧服务 EXE 仍在运行，或 worker 没有退出 | 确认每轮成功后 `service.log` 有 `Authentication worker timing ... cleanup=...`，任务管理器无遗留 `FaceLoginService.exe -auth-worker`，并比较父 `service.log` 的 worker-ready 资源值；根因与验收数据见 [`auth-worker-migration-completion.md`](../work/completed/auth-worker-migration-completion.md) |
 | 人脸通过后 Windows 拒绝登录 | Windows 账户名或凭据不匹配 | MSA 使用 UPN、本地账户使用 `COMPUTERNAME\Username`；检查当前账户身份，必要时重新注册。数据库兼容规则见 [`users.dat 契约`](../contracts/users-dat.md)。 |
 
 ### 2.3 worker 与 DirectShow 诊断

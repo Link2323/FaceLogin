@@ -381,7 +381,7 @@ def main():
         (DATA / "local_camera_results.json").write_text(json.dumps(camera, indent=2), "utf-8")
     else:
         (DATA / "local_camera_results.json").unlink(missing_ok=True)
-    target = HERE.parents[1] / "docs" / "recognizer-refined-evaluation.md"
+    target = HERE.parents[1] / "docs" / "work" / "completed" / "recognizer-refined-evaluation.md"
     write_report(target, results)
     print(target, flush=True)
 

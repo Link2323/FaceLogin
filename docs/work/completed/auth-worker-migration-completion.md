@@ -3,7 +3,7 @@
 > 状态：**已完成**  
 > 验收日期：2026-08-13  
 > 适用版本：当前 worker 隔离工作树及最终安装器候选  
-> 私有协议契约：[`contracts/auth-worker-ipc.md`](contracts/auth-worker-ipc.md)
+> 私有协议契约：[`contracts/auth-worker-ipc.md`](../../contracts/auth-worker-ipc.md)
 
 ## 1. 结论
 
@@ -242,7 +242,7 @@ SHA-256：C70586693D0AA49FC85D0FFB1E27C693D1D6FAE176B7FC083FDE8F63215172C6
 - 不把 worker 放进交互用户 Session；生产边界仍是 LocalSystem / Session 0。
 - 不恢复相机后端选择或同次认证 fallback；产品只保留 DirectShow。
 - 不改变 PAD 5/5、三次身份绑定、匹配阈值、安全超时或公共 IPC 语义。
-- 未提交的通用加固与工程事项继续以 [`todo.md`](todo.md) 为准，例如日志 ACL、模型 hash 跨语言单一来源、face align/config 边界测试和 trace ID；它们不是本次 worker 迁移与资源验收的未完成项。
+- 未提交的通用加固与工程事项继续以 [`todo.md`](../in-progress/todo.md) 为准，例如日志 ACL、模型 hash 跨语言单一来源、face align/config 边界测试和 trace ID；它们不是本次 worker 迁移与资源验收的未完成项。
 
 ## 11. 最终判定
 
