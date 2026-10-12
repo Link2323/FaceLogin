@@ -28,12 +28,15 @@ inline int AntiSpoofPassRequired(int checkCount) {
 //     instead of an instant attack verdict;
 //   - the attack fast fail applies only before the first PAD pass — after a
 //     pass, all-fail sequences are bounded by the every-frame-pass rule and
-//     the 8 s window, never by a second fast-fail timer.
+//     the 8 s window, never by a second attack timer;
+//   - identity Retry has its own 2 s clock, independent of PAD passes. An
+//     accepted binding resets it; sensor settling pauses it with the others.
 struct LivenessTiming {
     using TimePoint = std::chrono::steady_clock::time_point;
 
     static constexpr double kEmptySceneSeconds = 2.5;
     static constexpr double kAttackSeconds = 2.0;
+    static constexpr double kIdentityRetrySeconds = 2.0;
     static constexpr double kWindowSeconds = 8.0;
 
     explicit LivenessTiming(TimePoint windowStart)
@@ -76,6 +79,7 @@ struct LivenessTiming {
         m_noFaceStart += shift;
         // Unread while !m_anyFaceSeen; shifting it anyway keeps one rule.
         m_firstFaceSeenAt += shift;
+        if (m_identityRetryPending) m_identityRetryStartedAt += shift;
     }
 
     // Call after a frame with a detected face; must never fire on the frame
@@ -89,6 +93,19 @@ struct LivenessTiming {
         if (passed) ++m_passCount;
     }
 
+    // Called only after an explicit binding Retry. Camera/embedding failures
+    // do not start this clock, and expiry is checked on a fresh identity miss.
+    bool OnIdentityRetry(TimePoint now) {
+        if (!m_identityRetryPending) {
+            m_identityRetryPending = true;
+            m_identityRetryStartedAt = now;
+        }
+        return Elapsed(now, m_identityRetryStartedAt) >= kIdentityRetrySeconds;
+    }
+
+    void OnIdentityAccepted() { m_identityRetryPending = false; }
+    bool IdentityRetryPending() const { return m_identityRetryPending; }
+
     bool AnyFaceSeen() const { return m_anyFaceSeen; }
     int PassCount() const { return m_passCount; }
 
@@ -101,6 +118,8 @@ private:
     TimePoint m_noFaceStart;
     bool m_anyFaceSeen = false;
     TimePoint m_firstFaceSeenAt{};
+    bool m_identityRetryPending = false;
+    TimePoint m_identityRetryStartedAt{};
     int m_passCount = 0;
     bool m_suspended = false;
     TimePoint m_suspendedAt{};

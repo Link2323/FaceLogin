@@ -143,6 +143,43 @@ void TestBackToBackSuspendsAccumulate() {
           "empty-scene fast fail still fires after the accumulated shift");
 }
 
+void TestIdentityRetryAfterPadPass() {
+    // The 10-12 trace: one identity/PAD frame passes, then the pending
+    // binding keeps missing. The attack timer is off but Retry must expire.
+    LivenessTiming timing{At(0.0)};
+    timing.OnFaceDetected(At(0.0));
+    timing.OnIdentityAccepted();
+    timing.OnPadScore(true);
+    Check(!timing.OnIdentityRetry(At(0.1)), "first identity miss gets a retry");
+    Check(!timing.OnIdentityRetry(At(2.099)), "identity retry allows the full 2s budget");
+    Check(timing.OnIdentityRetry(At(2.1)), "identity retry expires at 2s despite a PAD pass");
+    Check(!timing.ShouldFailPersistentAttack(At(2.1)),
+          "identity timeout does not re-enable the attack timer");
+    Check(!timing.WindowExpired(At(2.1)) && timing.PassCount() == 1,
+          "identity timeout neither shortens the PAD window nor adds evidence");
+}
+
+void TestIdentityAcceptanceResetsRetryClock() {
+    LivenessTiming timing{At(0.0)};
+    Check(!timing.IdentityRetryPending(), "no identity retry before a binding miss");
+    Check(!timing.OnIdentityRetry(At(0.1)), "initial miss starts its clock");
+    Check(!timing.OnIdentityRetry(At(1.9)), "transient misses stay inside the budget");
+    timing.OnIdentityAccepted();
+    Check(!timing.IdentityRetryPending(), "accepted identity clears the retry state");
+    Check(!timing.OnIdentityRetry(At(3.0)), "a new binding gets a new retry budget");
+    Check(!timing.OnIdentityRetry(At(4.999)), "old misses do not consume the new budget");
+    Check(timing.OnIdentityRetry(At(5.0)), "new miss sequence expires independently");
+}
+
+void TestSensorSettlingPausesIdentityRetryClock() {
+    LivenessTiming timing{At(0.0)};
+    Check(!timing.OnIdentityRetry(At(0.5)), "pre-binding identity miss starts clock");
+    timing.Suspend(At(1.0));
+    timing.Resume(At(4.0));
+    Check(!timing.OnIdentityRetry(At(5.499)), "sensor settling is excluded from retry time");
+    Check(timing.OnIdentityRetry(At(5.5)), "identity retry expires after 2s active time");
+}
+
 } // namespace
 
 int main() {
@@ -155,6 +192,9 @@ int main() {
     TestSuspendPausesAttackClock();
     TestResumeWithoutSuspendIsNoOp();
     TestBackToBackSuspendsAccumulate();
+    TestIdentityRetryAfterPadPass();
+    TestIdentityAcceptanceResetsRetryClock();
+    TestSensorSettlingPausesIdentityRetryClock();
     if (g_failures == 0) {
         std::printf("LivenessTimingTest: all checks passed\n");
     }

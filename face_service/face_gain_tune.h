@@ -161,11 +161,14 @@ struct TuneKnobState {
     long exposure = 0;
     bool hasGain = false;
     long gain = 0;
+    bool hasExposureMode = false;
+    bool exposureManual = false;
 };
 
-// Two ASCII lines, "exposure=<v>" / "gain=<v>"; a missing line means that
-// knob was unsupported at save time. Torn or corrupt content fails the parse
-// and is ignored — persistence is best-effort, the tune stays the authority.
+// ASCII "exposure=<v>" / "gain=<v>" with optional "exposure_manual=0|1".
+// Old two-line states retain their value-only replay behavior. Missing or
+// unknown mode data never turns an AE observation into a manual-mode claim.
+// Persistence is best-effort; measured tuning stays the authority.
 inline bool LoadTuneKnobState(const std::wstring& path, TuneKnobState& out) {
     out = TuneKnobState{};
     FILE* f = nullptr;
@@ -179,6 +182,10 @@ inline bool LoadTuneKnobState(const std::wstring& path, TuneKnobState& out) {
         } else if (sscanf_s(line, " gain = %ld", &v) == 1) {
             out.gain = v;
             out.hasGain = true;
+        } else if (sscanf_s(line, " exposure_manual = %ld", &v) == 1 &&
+                   (v == 0 || v == 1)) {
+            out.hasExposureMode = true;
+            out.exposureManual = v == 1;
         }
     }
     fclose(f);
@@ -191,18 +198,23 @@ inline bool SaveTuneKnobState(const std::wstring& path, const SensorKnobs& knobs
         static_cast<bool>(knobs.exposureGet) && knobs.exposureGet(exposure);
     const bool haveGain = static_cast<bool>(knobs.gainGet) && knobs.gainGet(gain);
     if (!haveExposure && !haveGain) return false;
+    bool manual = false;
+    const bool haveMode = haveExposure && knobs.exposureIsManual &&
+        knobs.exposureIsManual(manual);
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt") != 0 || !f) return false;
     if (haveExposure) fprintf(f, "exposure=%ld\n", exposure);
     if (haveGain) fprintf(f, "gain=%ld\n", gain);
+    if (haveMode) fprintf(f, "exposure_manual=%d\n", manual ? 1 : 0);
     fclose(f);
     return true;
 }
 
 // Replay a persisted combo at camera init. Values are clamped into the
-// driver's current range and equal values are never re-written, so an intact
-// driver pays nothing. The exposure write settles during the host's warmup /
-// model-load window; the tune that follows remains the authority. Returns
+// driver's current range; intact values AND mode are never re-written. A
+// driver may reset AE while retaining the same numeric exposure, so a saved
+// manual state must restore its mode too. The exposure write settles during
+// the host's warmup / model-load window; tuning remains the authority. Returns
 // whether anything was written — the host must treat sensor readings as
 // untrustworthy until the write-lag window has passed (the auth worker
 // re-measures its trigger after it; deciding a tune on the pre-settle
@@ -214,12 +226,33 @@ inline bool ApplyTuneKnobState(const SensorKnobs& knobs, const TuneKnobState& st
     bool wrote = false;
     long mn = 0, mx = 0, stp = 0, cur = 0;
     if (st.hasExposure &&
-        knobs.exposureRange && knobs.exposureGet && knobs.exposureSet &&
+        knobs.exposureRange && knobs.exposureGet &&
         knobs.exposureRange(mn, mx, stp) && knobs.exposureGet(cur)) {
         const long target = std::clamp(st.exposure, mn, mx);
-        if (target != cur && knobs.exposureSet(target)) {
-            FACELOGIN_INFO(L"Tune state replay: exposure %ld→%ld", cur, target);
-            wrote = true;
+        bool manual = false;
+        const bool knownMode = st.hasExposureMode && knobs.exposureIsManual &&
+            knobs.exposureIsManual(manual);
+        if (st.hasExposureMode && !st.exposureManual) {
+            // AE chooses its own current value: do not pin a saved AE reading
+            // just because the driver's new numeric value differs.
+            if ((!knownMode || manual) && knobs.exposureSetAuto &&
+                knobs.exposureSetAuto(target)) {
+                FACELOGIN_INFO(L"Tune state replay: exposure %ld→%ld (auto)", cur, target);
+                wrote = true;
+            }
+        } else {
+            const bool restoreMode = st.hasExposureMode && (!knownMode || !manual);
+            if (target != cur || restoreMode) {
+                if (knobs.exposureSet && knobs.exposureSet(target)) {
+                    FACELOGIN_INFO(L"Tune state replay: exposure %ld→%ld (manual)", cur, target);
+                    wrote = true;
+                } else if (restoreMode) {
+                    // Do not stack a saved gain write against AE after its
+                    // required manual-mode restoration failed. The measured
+                    // tune can retry takeover or keep its normal fallback.
+                    return false;
+                }
+            }
         }
     }
     if (st.hasGain &&
@@ -618,7 +651,10 @@ inline int TuneFaceExposure(float firstLuma,
                            static_cast<long long>(
                                std::chrono::duration<double, std::milli>(
                                    std::chrono::steady_clock::now() - takeoverStart).count()));
-            gainFirst = measurementValid;
+            // AE takeover may itself restore enough light. Do not chase the
+            // gain correction's extra margin on an already in-band face;
+            // otherwise a needless gain overshoot requires exposure recovery.
+            gainFirst = measurementValid && luma < cfg.minFaceLuma;
         } else {
             measurementValid = false;
             FACELOGIN_INFO(L"AE takeover unavailable — gain tuning skipped this round");

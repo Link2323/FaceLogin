@@ -404,6 +404,118 @@ void TestShortExposurePolicy() {
           "dead gain gets no repeated second pass and exposure recovers in one stop");
 }
 
+void TestReplayRestoresManualModeAtSameValue() {
+    StateFile file;
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    bool manual = true;
+    int exposureWrites = 0;
+    auto knobs = sensor.Knobs();
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) {
+        sensor.exposure = value;
+        manual = true;
+        ++exposureWrites;
+        return true;
+    };
+    Check(SaveTuneKnobState(file.path, knobs), "save settled manual camera settings");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved), "reload settled camera settings");
+    // Driver reset observed on 10-12: exposure reads -5 again, but AE is on
+    // and gain has returned to zero. Restoring only gain leaves AE in control.
+    manual = false;
+    sensor.gain = 0;
+    Check(ApplyTuneKnobState(knobs, saved) && manual && sensor.gain == 22 &&
+              exposureWrites == 1,
+          "same exposure value still restores the saved manual mode");
+    Check(!ApplyTuneKnobState(knobs, saved) && exposureWrites == 1,
+          "intact mode and values do not incur another replay write");
+}
+
+void TestTakeoverStopsAfterLandingInBand() {
+    StateFile file;
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    bool manual = false;
+    int exposureWrites = 0;
+    auto knobs = sensor.Knobs();
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) {
+        sensor.exposure = value;
+        manual = true;
+        ++exposureWrites;
+        return true;
+    };
+    const auto measure = [&](float& luma) {
+        luma = manual ? (55.5f + (sensor.gain - 22) * 5.0f) *
+                           std::exp2(static_cast<float>(sensor.exposure + 5))
+                      : 26.0f;
+        return true;
+    };
+    const auto cfg = Config(file);
+    const int steps = TuneFaceExposure(26, knobs, measure, [] { return false; }, cfg);
+    Check(steps == 1 && exposureWrites == 1 && sensor.gainWrites.empty() &&
+              sensor.exposure == -5 && sensor.gain == 22,
+          "settled AE takeover in band avoids gain overshoot and corrective exposure writes");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.exposure == -5 && saved.gain == 22,
+          "in-band takeover persists the settled controls without backtracking");
+}
+
+void TestReplayPreservesAutoMode() {
+    StateFile file;
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    bool manual = false;
+    int manualWrites = 0, autoWrites = 0;
+    auto knobs = sensor.Knobs();
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) {
+        sensor.exposure = value; manual = true; ++manualWrites; return true;
+    };
+    knobs.exposureSetAuto = [&](long value) {
+        sensor.exposure = value; manual = false; ++autoWrites; return true;
+    };
+    Check(SaveTuneKnobState(file.path, knobs), "save an automatic exposure observation");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved), "reload automatic exposure observation");
+    sensor.exposure = -4;
+    Check(!ApplyTuneKnobState(knobs, saved) && !manual && manualWrites == 0 && autoWrites == 0,
+          "AE numeric changes are not mistaken for lost manual settings");
+    manual = true;
+    Check(ApplyTuneKnobState(knobs, saved) && !manual && autoWrites == 1 && manualWrites == 0,
+          "saved automatic mode is restored when another graph left manual mode");
+}
+
+void TestLegacyReplayAndFailedModeRestore() {
+    StateFile file;
+    {
+        std::ofstream output(file.path);
+        output << "exposure=-5\ngain=22\n";
+    }
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    auto knobs = sensor.Knobs();
+    bool manual = false;
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) { sensor.exposure = value; manual = true; return true; };
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && !saved.hasExposureMode,
+          "old two-line state has no claimed exposure mode");
+    Check(!ApplyTuneKnobState(knobs, saved) && !manual,
+          "legacy replay keeps its value-only behavior");
+    saved.hasExposureMode = true;
+    saved.exposureManual = true;
+    sensor.gain = 0;
+    knobs.exposureSet = [](long) { return false; };
+    Check(!ApplyTuneKnobState(knobs, saved) && sensor.gainWrites.empty() && !manual,
+          "failed manual restoration does not replay gain against AE");
+}
+
 // Optional replay of ExposureResponseProbe CSV through the actual gate.
 void ReplayResponseCsv(const char* path) {
     std::ifstream input(path);
@@ -466,6 +578,10 @@ int main(int argc, char** argv) {
     TestDarkFallbackAndBrightRecovery();
     TestUnavailableGainFallsBackToExposure();
     TestGainlessCameraPrefersAutoExposure();
+    TestReplayRestoresManualModeAtSameValue();
+    TestTakeoverStopsAfterLandingInBand();
+    TestReplayPreservesAutoMode();
+    TestLegacyReplayAndFailedModeRestore();
     std::printf("FaceGainTuneTest: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

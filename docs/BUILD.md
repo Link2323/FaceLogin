@@ -52,6 +52,12 @@ powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 
 脚本负责构建 C++、恢复前端依赖、生成许可声明、构建 slim 卸载器、按白名单同步资源、打包载荷、运行安装器测试并生成完整安装包。完成后输出路径、大小、SHA-256 和 ProductVersion。
 
+### 构建环境排障
+
+- **MSBuild 退出码 1，却无具体错误**：用 `cmake --build build --config Release --parallel 1` 重试，通过后按下方手动流程打包。2026-10-12 本机串行构建通过，并行失败根因尚未确认；一键脚本目前固定使用 `--parallel`。
+- **npm 报 `spawn EPERM` 或缓存无法写入**：检查沙箱与执行权限，允许构建子进程启动和 npm 缓存写入后重试。
+- **PowerShell 找不到 `Get-FileHash`**：改用 PowerShell 7，或清除传入 Windows PowerShell 5.1 子进程的 `PSModulePath`，让它恢复默认模块路径。5.1 本身支持该命令；本机已复现继承模块路径导致命令不可用。
+
 ### 手动构建与核对
 
 资源目录 `installer/FaceLoginSetup/resources/` 被 gitignore，只有 Console 和正式模型会由 CMake 同步，其余文件必须显式准备。手动打包按此顺序：

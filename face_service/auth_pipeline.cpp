@@ -522,6 +522,7 @@ AuthPipelineResult AuthPipeline::Run() {
         FaceRect prevRect{};
         bool livenessInferenceError = false;
         bool identityRejected = false;
+        bool identityRetryTimedOut = false;
         bool failFastEmpty = false;
         bool failFastAttack = false;
         // Both verifyBinding hosts return Retry only for "no enrolled identity
@@ -745,6 +746,15 @@ AuthPipelineResult AuthPipeline::Run() {
                         haveRetryConditions = true;
                     }
                     sawUnknownFace = true;
+                    if (timing.OnIdentityRetry(std::chrono::steady_clock::now())) {
+                        FACELOGIN_INFO(L"Identity matching failed continuously for 2s — "
+                                       L"failing fast (bindings=%u/3, counted=%d, "
+                                       L"width=%ld px, face luma=%.0f)",
+                                       bindingCount, totalChecked, faceRect.width(),
+                                       FaceRegionLuma(cur.frame, faceRect));
+                        identityRetryTimedOut = true;
+                        break;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     continue;
                 }
@@ -756,6 +766,7 @@ AuthPipelineResult AuthPipeline::Run() {
                         : decision.errorMessage;
                     break;
                 }
+                timing.OnIdentityAccepted();
                 ++bindingCount;
                 boundFaceWidth = faceRect.width();
                 boundFaceLuma = FaceRegionLuma(cur.frame, faceRect);
@@ -837,7 +848,7 @@ AuthPipelineResult AuthPipeline::Run() {
         }
 
         const bool livenessPassed = !failFastEmpty && !failFastAttack &&
-            !livenessInferenceError && !identityRejected &&
+            !livenessInferenceError && !identityRejected && !identityRetryTimedOut &&
             totalChecked == totalChecks && timing.PassCount() >= passRequired && bindingCount == 3;
         if (livenessPassed) {
             FACELOGIN_INFO(L"Liveness passed — tail anchor bound, authentication evidence "
@@ -847,16 +858,21 @@ AuthPipelineResult AuthPipeline::Run() {
             return result;
         }
 
-        FACELOGIN_WARN(L"Anti-spoof check failed: %d/%d passed (need %d)",
-                       timing.PassCount(), totalChecked, passRequired);
+        FACELOGIN_WARN(L"Authentication evidence incomplete: identity=%u/3, "
+                       L"PAD=%d/%d passed (need %d)",
+                       bindingCount, timing.PassCount(), totalChecked, passRequired);
         if (livenessInferenceError) {
             result.errorMessage = L"活体检测模块异常，请使用密码登录";
         } else if (identityRejected) {
             result.errorMessage = identityError;
         } else if (!timing.AnyFaceSeen()) {
             result.errorMessage = L"未检测到人脸";
-        } else if (totalChecked == 0 && sawUnknownFace) {
-            result.errorMessage = L"未识别到已注册人脸，请使用密码登录";
+        } else if (identityRetryTimedOut || (totalChecked == 0 && sawUnknownFace) ||
+                   (timing.IdentityRetryPending() && bindingCount < 3 &&
+                    timing.PassCount() == totalChecked)) {
+            result.errorMessage = bindingCount == 0
+                ? L"未识别到已注册人脸，请使用密码登录"
+                : L"人脸匹配持续失败，请调整位置或光照后重试";
         } else {
             result.errorMessage = L"未通过活体检测，请使用真实人脸";
         }
