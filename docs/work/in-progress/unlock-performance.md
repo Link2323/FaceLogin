@@ -50,7 +50,7 @@ Service、Console Release 已构建；AuthWorkerProtocolTest、ModelIntegrityTes
 
 ## 交付边界
 
-最初实现验收只覆盖自动回归及桌面相机对照。随后已构建安装包，用户安装并完成锁屏实测；下文的安装后日志确认新版稳定帧复用分支生效，并有 Windows `ReportResult` 成功结果。亮环境干扰后的恢复问题尚未修复，见 [曝光问题与解锁提速方向](exposure-issues-and-speedups.md)。standalone 完整认证、注册 GUI、快速移动/换人及逐轮标记的 PAD 攻击验收仍未覆盖，不能由桌面对照、推理替身或未解锁的照片轮次替代。
+最初实现验收只覆盖自动回归及桌面相机对照。随后已构建安装包，用户安装并完成锁屏实测；下文的安装后日志确认新版稳定帧复用分支生效，并有 Windows `ReportResult` 成功结果。亮环境干扰后的恢复问题在当时尚未修复；后续已补齐曝光确认中断后的稳定复核，并在真实锁屏验证接续确认保存路径，完整场景组仍待验收，见 [曝光问题与解锁提速方向](exposure-issues-and-speedups.md)。standalone 完整认证、注册 GUI、快速移动/换人及逐轮标记的 PAD 攻击验收仍未覆盖，不能由桌面对照、推理替身或未解锁的照片轮次替代。
 
 ## 实机测试步骤
 

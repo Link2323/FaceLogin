@@ -5,6 +5,7 @@
 ## 进行中
 
 - [`in-progress/sface-trial.md`](in-progress/sface-trial.md)：SFace 试用与待完成验收。
+- [`in-progress/unlock-performance.md`](in-progress/unlock-performance.md)：手动曝光稳定帧复用、首帧计时与解锁性能验证。
 - [`in-progress/exposure-issues-and-speedups.md`](in-progress/exposure-issues-and-speedups.md)：曝光环境切换、重复调节与缓存重放的待验证机制、提速优先级及验收条件。
 - [`in-progress/todo.md`](in-progress/todo.md)：跨模块工程待办。
 - [`in-progress/unlock-flow-security-todo.md`](in-progress/unlock-flow-security-todo.md)：解锁流程安全与稳定性问题。

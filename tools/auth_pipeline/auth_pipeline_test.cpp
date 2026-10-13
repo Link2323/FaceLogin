@@ -14,6 +14,8 @@ namespace {
 std::atomic<float> g_padScore{1.0f};
 std::atomic<int> g_minDetectLuma{0};
 std::atomic<bool> g_smallBacklitFace{false};
+std::atomic<unsigned int> g_detectCalls{0};
+int g_lastEmbeddingMarker = 0;
 int g_failures = 0;
 
 void Check(bool condition, const char* description) {
@@ -37,6 +39,7 @@ bool OnnxAntiSpoof::Initialize(const std::wstring&, const std::wstring&) {
 }
 
 std::optional<OnnxDetector::Detection> OnnxDetector::DetectLargestFace(const FrameImage& frame) {
+    ++g_detectCalls;
     if (frame.size() == 0 ||
         frame(frame.nr() / 2, frame.nc() / 2).red < g_minDetectLuma.load()) return std::nullopt;
     if (g_smallBacklitFace.load())
@@ -46,8 +49,9 @@ std::optional<OnnxDetector::Detection> OnnxDetector::DetectLargestFace(const Fra
                      {60, 45, 100, 45, 80, 80, 60, 100, 100, 100}};
 }
 
-std::vector<float> OnnxRecognizer::ComputeEmbedding(const FrameImage&, const float[10],
+std::vector<float> OnnxRecognizer::ComputeEmbedding(const FrameImage& frame, const float[10],
                                                    float* preNorm) {
+    g_lastEmbeddingMarker = frame(0, 0).red;
     if (preNorm) *preNorm = 10.0f;
     std::vector<float> embedding(128, 0.0f);
     embedding.front() = 1.0f;
@@ -424,6 +428,111 @@ void TestTuneRecoveries() {
                        TuneRecoveryScene::Frozen}) TestInterruptedTuneRecovery(scene);
 }
 
+enum class SeedScene { Manual, Auto, UnknownMode, Drift, Dark, Bright,
+                       Expired, ControlWrite, PadFailure, IdentityReject, Cancel, Duplicate };
+
+void TestManualWarmupSeed(SeedScene scene = SeedScene::Manual, int rotation = 0,
+                          bool fastUnlock = true) {
+    g_detectCalls = 0;
+    g_padScore = scene == SeedScene::PadFailure ? 0.0f : 1.0f;
+    unsigned long long sequence = 0;
+    unsigned int bindings = 0;
+    int firstMarker = 0;
+    bool wrote = false, cancelled = false;
+    bool duplicateReturned = false;
+    std::vector<int> markers;
+    std::vector<Clock::time_point> grabs;
+    const auto result = Run(fastUnlock,
+        [&](const std::vector<float>&, unsigned int, float, float, float) {
+            if (bindings++ == 0) firstMarker = g_lastEmbeddingMarker;
+            markers.push_back(g_lastEmbeddingMarker);
+            if (scene == SeedScene::IdentityReject)
+                return BindingDecision{BindingDecisionKind::Reject, L"test identity rejection"};
+            return BindingDecision{BindingDecisionKind::Accept, {}};
+        }, [&] { return cancelled; }, [] { return false; }, ipc::AUTH_TIMEOUT_SECONDS,
+        [] { return false; }, [&](AuthPipelineCallbacks& callbacks, AuthPipelineConfig& config) {
+            config.cameraRotation = rotation;
+            callbacks.sensorKnobs.exposureIsManual = [&](bool& manual) {
+                manual = scene != SeedScene::Auto && !wrote;
+                return scene != SeedScene::UnknownMode;
+            };
+            if (scene == SeedScene::Auto || scene == SeedScene::ControlWrite) {
+                callbacks.sensorKnobs.exposureGet = [](long& value) { value = -8; return true; };
+                callbacks.sensorKnobs.exposureSetAuto = [&](long) { wrote = true; return true; };
+            }
+            callbacks.grabFrame = [&](FrameImage& frame, unsigned long long& seq) {
+                if (sequence == 1) {
+                    const auto deadline = Clock::now() + std::chrono::seconds(1);
+                    while (g_detectCalls == 0 && Clock::now() < deadline)
+                        std::this_thread::yield();
+                    // Simulate a slower camera cadence, letting the first
+                    // asynchronous detection finish before sample two.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(
+                        scene == SeedScene::Expired ? 450 : 40));
+                    if (scene == SeedScene::Cancel) cancelled = true;
+                    if (scene == SeedScene::Duplicate && !duplicateReturned) {
+                        duplicateReturned = true;
+                        frame = FrameImage(160, 160);
+                        for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(80, 80, 80);
+                        seq = sequence;
+                        return true;
+                    }
+                }
+                frame = FrameImage(160, 160);
+                for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(80, 80, 80);
+                seq = ++sequence;
+                if (sequence == 2) {
+                    const unsigned char luma = scene == SeedScene::Drift ? 95
+                        : scene == SeedScene::Dark ? 45 : scene == SeedScene::Bright ? 125 : 80;
+                    // Change only the face ROI; the whole-frame warmup still
+                    // opens, so this exercises the separate face drift guard.
+                    for (long y = 20; y < 120; ++y)
+                        for (long x = 20; x < 120; ++x) frame(y, x) = RgbPixel(luma, luma, luma);
+                }
+                const RgbPixel marker(static_cast<unsigned char>(seq), 80, 80);
+                frame(0, 0) = frame(0, 159) = frame(159, 0) = frame(159, 159) = marker;
+                grabs.push_back(Clock::now());
+                return true;
+            };
+        });
+    if (scene == SeedScene::Cancel) {
+        Check(result.cancelled && !result.succeeded && bindings == 0,
+              "cancellation at the stable gate releases async detection without binding");
+    } else {
+        const bool mayReuse = scene == SeedScene::Manual || scene == SeedScene::Auto ||
+            scene == SeedScene::PadFailure || scene == SeedScene::IdentityReject ||
+            scene == SeedScene::Duplicate;
+        Check(mayReuse ? firstMarker == 1 : firstMarker > 1,
+              "only stable known-mode, fresh, unchanged warmup evidence is reused");
+        if (scene == SeedScene::IdentityReject) {
+            Check(!result.succeeded && bindings == 1 && result.errorMessage == L"test identity rejection",
+                  "reused seed cannot bypass identity rejection");
+        } else if (scene == SeedScene::PadFailure) {
+            Check(!result.succeeded && bindings == 3, "reused seed cannot bypass failed PAD");
+        } else {
+            Check(result.succeeded && bindings == 3, "warmup seed preserves all three identity bindings");
+        }
+        for (size_t i = 1; i < markers.size(); ++i) {
+            Check(markers[i] > markers[i - 1], "reused seed bindings use increasing distinct frames");
+            Check(grabs[markers[i] - 1] - grabs[markers[i - 1] - 1] >= std::chrono::milliseconds(60),
+                  "reused seed retains at least 60ms between bound-frame captures");
+        }
+    }
+    g_padScore = 1.0f;
+    std::printf("Warmup seed scene=%d rotation=%d fast=%d: first=%d, bindings=%u, success=%d\n",
+                static_cast<int>(scene), rotation, fastUnlock, firstMarker, bindings, result.succeeded);
+}
+
+void TestWarmupSeeds() {
+    for (auto scene : {SeedScene::Manual, SeedScene::Auto, SeedScene::UnknownMode,
+                       SeedScene::Drift, SeedScene::Dark, SeedScene::Bright,
+                       SeedScene::Expired, SeedScene::ControlWrite, SeedScene::PadFailure,
+                       SeedScene::IdentityReject, SeedScene::Cancel, SeedScene::Duplicate})
+        TestManualWarmupSeed(scene);
+    TestManualWarmupSeed(SeedScene::Manual, 90);
+    TestManualWarmupSeed(SeedScene::Drift, 90);
+    TestManualWarmupSeed(SeedScene::Manual, 0, false);
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -431,7 +540,12 @@ int main(int argc, char** argv) {
         TestTuneRecoveries();
         return g_failures == 0 ? 0 : 1;
     }
+    if (argc == 2 && std::strcmp(argv[1], "--warmup-seed") == 0) {
+        TestWarmupSeeds();
+        return g_failures == 0 ? 0 : 1;
+    }
     TestTuneRecoveries();
+    TestWarmupSeeds();
     TestNoFaceDarkRecovery();
     if (argc == 2 && std::strcmp(argv[1], "--dark-recovery") == 0)
         return g_failures == 0 ? 0 : 1;

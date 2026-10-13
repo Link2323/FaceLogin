@@ -33,6 +33,7 @@ struct ExposureTimingProfile {
     std::array<std::array<Calls, OperationCount>, PhaseCount> calls{};
     Phase phase = Replay;
     bool gateReached = false;
+    double preparationMs = 0.0;
     double seedWaitMs = 0.0;
     double seedRefreshMs = 0.0;
     double replaySettleMs = 0.0;
@@ -50,12 +51,12 @@ struct ExposureTimingProfile {
         // Emit only after the work, so measuring individual driver calls does
         // not add a log write between them or perturb the warmup schedule.
         if (gateReached) {
-            FACELOGIN_INFO(L"Exposure phase timing: seed_wait=%.2f ms, seed_refresh=%.2f ms, "
+            FACELOGIN_INFO(L"Exposure phase timing: preparation=%.2f ms, seed_wait=%.2f ms, seed_refresh=%.2f ms, "
                            L"replay_settle=%.2f ms, trigger=%.2f ms, tune=%.2f ms, "
                            L"status=%.2f ms, gate_to_loop=%.2f ms, "
                            L"trigger_query=%.2f ms, query_before_seed_wait=%d, "
                            L"seed_reused=%d, seed_seq=%llu, seed_age=%.2f ms",
-                           seedWaitMs, seedRefreshMs, replaySettleMs, triggerMs,
+                           preparationMs, seedWaitMs, seedRefreshMs, replaySettleMs, triggerMs,
                            tuneMs, statusMs, gateToLoopMs, triggerQueryMs,
                            triggerQueriesBeforeSeedWait, reusedCompletedSeed,
                            warmupSeedSeq, warmupSeedAgeMs);
@@ -264,6 +265,14 @@ AuthPipelineResult AuthPipeline::Run() {
                 replayWrote = ApplyTuneKnobState(sensorKnobs, saved);
             }
         }
+        // With usable gain, the AE policy above does not query the current
+        // mode. Confirm manual mode on the camera's COM thread before warmup;
+        // unknown modes and rounds that wrote controls retain latest detection.
+        bool manualExposure = false;
+        const bool stableSeedMode = usingAutoExposure ||
+            (!replayWrote && sensorKnobs.exposureIsManual &&
+             sensorKnobs.exposureIsManual(manualExposure) && manualExposure);
+        exposureTiming.preparationMs = ElapsedMs(replayAt);
 
         // Let auto-exposure settle before the first PAD frame. Adaptive gate
         // (see exposure_warmup.h): sample the mean luma of distinct frames
@@ -305,13 +314,14 @@ AuthPipelineResult AuthPipeline::Run() {
             }
             const bool gateOpened = warmup.Feed(MeanLuma(warmFrame));
             // A completed detection from the preceding sample already belongs
-            // to this stable two-frame window. Keep it when AE and face luma
-            // agree, rather than start another detection and move the first
+            // to this stable two-frame window. Keep it when the exposure mode
+            // is known and face luma agrees, rather than start another
+            // detection and move the first
             // counted frame's pacing anchor forward by one camera period.
             // An unstable/capped window, control write, missing face or older
             // sample keeps the original latest/pending detection path.
             bool reuseCompleted = gateOpened && warmup.Settled() &&
-                usingAutoExposure && !replayWrote && hadPreviousWarm &&
+                stableSeedMode && !replayWrote && hadPreviousWarm &&
                 seed.valid && seed.det && seed.seq == previousWarmSeq &&
                 ElapsedMs(seed.grabWall) <= kSeedMaxAgeMs;
             if (reuseCompleted) {

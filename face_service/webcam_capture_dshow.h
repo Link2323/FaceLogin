@@ -186,6 +186,13 @@ private:
     long   m_frameSize   = 0;
     bool   m_frameReady  = false;
     unsigned long long m_frameSeq = 0;   // bumped per delivered frame; monotonic
+    // Startup diagnostics only, protected by m_frameCs. Reset before each Run;
+    // callbacks record timestamps without writing logs on the streaming thread.
+    LONGLONG m_runStartedTicks = 0;
+    LONGLONG m_runReturnedTicks = 0;
+    LONGLONG m_firstCallbackTicks = 0;
+    LONGLONG m_firstBufferReadyTicks = 0;
+    bool m_startupTimingLogged = false;
     int    m_width       = 1280;
     int    m_height      = 720;
     bool   m_initialized = false;

@@ -3,6 +3,7 @@
 // Examples:
 //   CameraLifecycleTest --mode child --cycles 100 --settle-ms 500
 #include "webcam_capture_dshow.h"
+#include "logger.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -28,6 +29,7 @@ struct Options {
     int cycles = 10;
     int settleMs = 500;
     int singleCycleNumber = 0;
+    std::wstring devicePath;
 };
 
 struct ProcessMetrics {
@@ -49,7 +51,9 @@ bool ParseInt(const wchar_t* text, int minimum, int maximum, int& value) {
 bool ParseOptions(int argc, wchar_t** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
-        if (arg == L"--mode" && i + 1 < argc) {
+        if (arg == L"--device" && i + 1 < argc) {
+            options.devicePath = argv[++i];
+        } else if (arg == L"--mode" && i + 1 < argc) {
             const std::wstring value = argv[++i];
             if (value == L"inproc") options.mode = RunMode::InProcess;
             else if (value == L"child") options.mode = RunMode::Child;
@@ -118,7 +122,7 @@ std::vector<facelogin::CameraDeviceInfo> Enumerate() {
     return facelogin::WebcamCaptureDS::ListCameras();
 }
 
-bool RunOneCameraCycle(const Options&, int cycle) {
+bool RunOneCameraCycle(const Options& options, int cycle) {
     const auto enumStart = Clock::now();
     const auto devices = Enumerate();
     const auto enumDone = Clock::now();
@@ -132,12 +136,12 @@ bool RunOneCameraCycle(const Options&, int cycle) {
     // in Initialize) with the legacy single-shot path so both are covered in
     // every run against the real camera.
     const bool usePreload = (cycle % 2) == 1;
-    if (usePreload && !camera->Preload(L"")) {
+    if (usePreload && !camera->Preload(options.devicePath)) {
         std::cerr << "camera preload failed at cycle " << cycle << "\n";
         return false;
     }
     const auto activateStart = Clock::now();
-    if (!camera->Initialize(640, 480, L"")) {
+    if (!camera->Initialize(640, 480, options.devicePath)) {
         std::cerr << "camera initialization failed at cycle " << cycle << "\n";
         return false;
     }
@@ -161,6 +165,18 @@ bool RunOneCameraCycle(const Options&, int cycle) {
     camera->Shutdown();
     camera.reset();
     const auto shutdownDone = Clock::now();
+    for (const auto& line : facelogin::Logger::Instance().GetRecentLogs()) {
+        const auto position = line.find(L"DirectShow first frame timing:");
+        if (position != std::wstring::npos) {
+            // All fields are ASCII numbers; keep narrow stdout consistent
+            // with the existing cycle metrics, including redirected output.
+            const auto timing = line.substr(position);
+            std::string ascii;
+            for (wchar_t ch : timing) ascii.push_back(static_cast<char>(ch));
+            std::cout << ascii << '\n';
+        }
+    }
+    facelogin::Logger::Instance().ClearLogs();
 
     ProcessMetrics metrics;
     if (!ReadProcessMetrics(metrics)) return false;
@@ -191,11 +207,25 @@ std::wstring CurrentExecutablePath() {
     return std::wstring(path.data(), length);
 }
 
-bool RunChildCycle(const Options&, int cycle) {
+std::wstring QuoteArgument(const std::wstring& value) {
+    std::wstring result = L"\"";
+    size_t slashes = 0;
+    for (wchar_t ch : value) {
+        if (ch == L'\\') { ++slashes; continue; }
+        result.append(ch == L'\"' ? slashes * 2 + 1 : slashes, L'\\');
+        result += ch;
+        slashes = 0;
+    }
+    result.append(slashes * 2, L'\\');
+    return result + L"\"";
+}
+
+bool RunChildCycle(const Options& options, int cycle) {
     const std::wstring executable = CurrentExecutablePath();
     if (executable.empty()) return false;
     std::wstring command = L"\"" + executable + L"\" --single-cycle " +
         std::to_wstring(cycle);
+    if (!options.devicePath.empty()) command += L" --device " + QuoteArgument(options.devicePath);
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
@@ -235,7 +265,7 @@ bool RunChildCycle(const Options&, int cycle) {
 }
 
 void Usage() {
-    std::cerr << "usage: CameraLifecycleTest --mode inproc|child --cycles N --settle-ms N\n";
+    std::cerr << "usage: CameraLifecycleTest --mode inproc|child --cycles N --settle-ms N [--device PATH]\n";
 }
 
 } // namespace

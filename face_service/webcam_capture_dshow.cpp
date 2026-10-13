@@ -8,6 +8,19 @@
 #pragma comment(lib, "strmiids.lib")
 
 namespace facelogin {
+namespace {
+LONGLONG CaptureTicks() {
+    LARGE_INTEGER ticks{};
+    QueryPerformanceCounter(&ticks);
+    return ticks.QuadPart;
+}
+
+double CaptureMilliseconds(LONGLONG start, LONGLONG end) {
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    return 1000.0 * static_cast<double>(end - start) / frequency.QuadPart;
+}
+} // namespace
 
 // ============================================================================
 // Static COM helpers
@@ -90,7 +103,9 @@ STDMETHODIMP WebcamCaptureDS::GrabberCB::BufferCB(double, BYTE* buffer, long len
     if (!buffer || len <= 0)
         return S_OK;
 
+    const auto callbackAt = CaptureTicks();
     EnterCriticalSection(&m_parent->m_frameCs);
+    const bool firstCallback = m_parent->m_firstCallbackTicks == 0;
 
     if (m_parent->m_frameSize < len) {
         delete[] m_parent->m_frameBuffer;
@@ -105,6 +120,10 @@ STDMETHODIMP WebcamCaptureDS::GrabberCB::BufferCB(double, BYTE* buffer, long len
     memcpy(m_parent->m_frameBuffer, buffer, len);
     m_parent->m_frameReady = true;
     ++m_parent->m_frameSeq;
+    if (firstCallback) {
+        m_parent->m_firstCallbackTicks = callbackAt;
+        m_parent->m_firstBufferReadyTicks = CaptureTicks();
+    }
 
     LeaveCriticalSection(&m_parent->m_frameCs);
     return S_OK;
@@ -667,7 +686,18 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
         return false;
     }
 
+    EnterCriticalSection(&m_frameCs);
+    m_firstCallbackTicks = 0;
+    m_firstBufferReadyTicks = 0;
+    m_runReturnedTicks = 0;
+    m_startupTimingLogged = false;
+    m_runStartedTicks = CaptureTicks();
+    LeaveCriticalSection(&m_frameCs);
     HRESULT hr = m_pControl->Run();
+    const auto runReturnedAt = CaptureTicks();
+    EnterCriticalSection(&m_frameCs);
+    m_runReturnedTicks = runReturnedAt;
+    LeaveCriticalSection(&m_frameCs);
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS IMediaControl::Run failed: 0x%08X", hr);
         Shutdown();
@@ -696,6 +726,7 @@ void WebcamCaptureDS::Pause() {
 bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame, unsigned long long* frameSequence) {
     if (!m_initialized) return false;
 
+    const auto grabAt = CaptureTicks();
     EnterCriticalSection(&m_frameCs);
 
     if (!m_frameReady || !m_frameBuffer || m_frameSize == 0) {
@@ -703,6 +734,7 @@ bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame, unsigned long long* frameS
         return false;
     }
 
+    const auto copyStartedAt = CaptureTicks();
     long stride = m_width * 3;
     outFrame.set_size(m_height, m_width);
 
@@ -729,7 +761,25 @@ bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame, unsigned long long* frameS
 
     if (frameSequence) *frameSequence = m_frameSeq;
 
+    const bool logStartup = !m_startupTimingLogged && m_firstBufferReadyTicks != 0;
+    const auto copiedAt = logStartup ? CaptureTicks() : 0;
+    const auto runStartedAt = m_runStartedTicks;
+    const auto runReturnedAt = m_runReturnedTicks;
+    const auto callbackAt = m_firstCallbackTicks;
+    const auto readyAt = m_firstBufferReadyTicks;
+    if (logStartup) m_startupTimingLogged = true;
     LeaveCriticalSection(&m_frameCs);
+    if (logStartup) {
+        FACELOGIN_INFO(L"DirectShow first frame timing: run_call=%.2f ms, "
+                       L"run_to_callback=%.2f ms, callback_copy=%.2f ms, "
+                       L"ready_to_grab=%.2f ms, grab_lock_wait=%.2f ms, grab_copy=%.2f ms",
+                       CaptureMilliseconds(runStartedAt, runReturnedAt),
+                       CaptureMilliseconds(runStartedAt, callbackAt),
+                       CaptureMilliseconds(callbackAt, readyAt),
+                       CaptureMilliseconds(readyAt, copyStartedAt),
+                       CaptureMilliseconds(grabAt, copyStartedAt),
+                       CaptureMilliseconds(copyStartedAt, copiedAt));
+    }
     return true;
 }
 

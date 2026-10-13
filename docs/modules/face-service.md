@@ -14,9 +14,9 @@ worker 预载诊断在 `auth_worker.log` 输出当前 Session 与显式电源限
 
 worker 的纯诊断快照通过一次 `GetExposure` 同时读取曝光值和模式；宿主未提供合并回调时使用原来的独立读取。未发生参数重放写入且有待收集检测时，在相机原 COM 线程上先读取诊断参数，与已有异步 SCRFD 重叠；发生重放写入时，仍在稳定等待/重测之后读取。快照仅用于日志，不供调节器作控制判断；调节器继续读取当前模式，曝光诊断本身不改变检测帧选择、新鲜度检查、计帧间隔与认证规则。阶段对照与故障路径检查见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
-预热循环先判断当前样本是否打开稳定门，再决定是否启动当前帧检测。在自动曝光、无控制重放写入的稳定窗口内，若已有来自紧邻上一预热样本的已完成人脸检测，年龄不超过 400 ms，且旧帧与当前帧在旧人脸框内的亮度均处于 50–120、差不超过 10，则复用已有 seed；其余情况保留原来的最新或待完成检测流程。亮度检查先按配置旋转当前帧，后续过期丢弃、控制写入后失效、身份绑定、PAD 和 60 ms pacing 仍执行。异步检测 future 在输入帧释放之前收敛，包括取消退出路径。
+预热循环先判断当前样本是否打开稳定门，再决定是否启动当前帧检测。在无控制重放写入的稳定窗口内，自动曝光策略已确认 AE 活跃，或在预热前通过当前传感器回调确认手动曝光时，若已有来自紧邻上一预热样本的已完成人脸检测，年龄不超过 400 ms，且旧帧与当前帧在旧人脸框内的亮度均处于 50–120、差不超过 10，则复用已有 seed；模式未知、查询失败或其他条件不满足时保留原来的最新或待完成检测流程。手动模式查询在相机原 COM 线程上执行，不使用诊断快照作控制判断。亮度检查先按配置旋转当前帧，后续过期丢弃、控制写入后失效、身份绑定、PAD 和 60 ms pacing 仍执行。异步检测 future 在输入帧释放之前收敛，包括取消退出路径。
 
-`Exposure phase timing` 的 `seed_reused` 标识上述已完成结果复用分支，`seed_seq` 和 `seed_age` 记录预热门后、过期丢弃和曝光调节之前的 seed 选择；不代表该帧最终已计入认证。实现和试用包记录见 [种子调度试用](../work/completed/sface-performance.md#ready-seed-trial)。
+`Exposure phase timing` 的 `preparation` 记录预热前的传感器准备（策略判断、缓存重放和手动模式确认），与首帧等待窗口存在重叠，不能额外加到 pipeline 首帧时间上。`seed_reused` 标识上述已完成结果复用分支，`seed_seq` 和 `seed_age` 记录预热门后、过期丢弃和曝光调节之前的 seed 选择；不代表该帧最终已计入认证。自动曝光试用包记录见 [种子调度试用](../work/completed/sface-performance.md#ready-seed-trial)，手动曝光扩展与首帧诊断见 [当前优化记录](../work/in-progress/unlock-performance.md)。
 
 种子调度试用包安装后的 7 次已 ready 的 Session 0 请求全部由 Windows 确认成功，6 次走新增复用分支，全部选择第一帧且 seed 剩余等待为 0 ms；pipeline 中位数 430.3 ms，CP 请求到 Windows ReportResult 为 619 ms。与前批 7 次比较不是受控 A/B，完整差值不能全部归因于调度，首轮相机初始化慢尾仍在。逐轮和限制见 [安装后记录](../work/completed/sface-performance.md#ready-seed-installed)。
 
@@ -74,6 +74,8 @@ SFace 正式运行导出已移除 174 个 initializer graph inputs，保留权�
 worker 和 standalone 在创建 Session 前校验四个模型的 SHA-256；C++ 哈希见 `common/model_hashes.h`，安装器提取时也会校验。普通构建复用现有模型，不要重新下载或量化。
 
 worker 的模型状态为 `Unloaded → Loading → Ready/Failed`。加载、释放由生命周期线程串行处理；配置重载会替换锁屏 worker，并在新 worker 就绪后确认。服务与 worker 分别写 `service.log`、`auth_worker.log`；排障步骤见 [`运维手册`](../operations/operations.md)。
+
+`DirectShow first frame timing` 单独记录采集启动边界：`run_call` 为 `IMediaControl::Run` 调用耗时；`run_to_callback` 从调用 Run 前到首个有效 BufferCB 入口；`callback_copy` 包含该回调锁等待、缓冲分配和拷贝；`ready_to_grab` 从首缓冲写好到应用首次成功取帧取得锁并准备拷贝；`grab_lock_wait` 为该次取帧的锁等待；`grab_copy` 为 RGB 转换拷贝。回调只记录 QPC 时间戳，日志在首次成功取帧释放锁后输出，每次 Run 最多一条。`run_call`、`grab_lock_wait` 与其他分项有重叠，不能全部相加；这些是采集链路边界，不直接指认固件内部成本。诊断只记录时间，不保存画面或改变采集调度。
 
 ## 当前关键值
 
