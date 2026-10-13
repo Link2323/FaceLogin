@@ -279,6 +279,46 @@ void TestAuthFaults() {
     Check(timedOut.timedOut && !timeout.IsAlive(),
           "wedged worker times out and is killed by its Job");
 
+    facelogin::AuthWorkerClient defaultTimeout(MockConfig(L"mock:hang"));
+    Check(defaultTimeout.Start(error), "default-timeout worker reaches READY");
+    const auto defaultStart = std::chrono::steady_clock::now();
+    bindings = 0;
+    const auto defaultResult = defaultTimeout.Authenticate(AcceptCallbacks(bindings));
+    const auto defaultMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - defaultStart).count();
+    Check(defaultResult.timedOut && !defaultTimeout.IsAlive() &&
+          defaultMs >= 4900 && defaultMs < 5500,
+          "default authentication stops a hung worker at five seconds");
+    std::printf("default_auth_timeout_ms=%lld\n", defaultMs);
+
+    facelogin::AuthWorkerClient borrowedTimeout(MockConfig(L"mock:hang"));
+    Check(borrowedTimeout.Start(error), "remaining-budget worker reaches READY");
+    const auto originalDeadline = facelogin::ipc::MakeAuthDeadline(300);
+    Sleep(200); // stand in for time already spent preparing this request
+    const auto borrowedStart = std::chrono::steady_clock::now();
+    bindings = 0;
+    const auto borrowedResult = borrowedTimeout.Authenticate(
+        AcceptCallbacks(bindings), originalDeadline);
+    const auto borrowedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - borrowedStart).count();
+    Check(borrowedResult.timedOut && !borrowedTimeout.IsAlive() && borrowedMs < 250,
+          "authentication inherits the remaining budget instead of restarting it");
+
+    facelogin::AuthWorkerClient lateBinding(MockConfig(L"mock:success"));
+    Check(lateBinding.Start(error), "late-binding worker reaches READY");
+    bindings = 0;
+    auto lateCallbacks = AcceptCallbacks(bindings);
+    const auto accept = lateCallbacks.verifyBinding;
+    lateCallbacks.verifyBinding = [accept](const std::vector<float>& embedding,
+        unsigned int index, float norm, float yaw, float pitch) {
+        Sleep(200);
+        return accept(embedding, index, norm, yaw, pitch);
+    };
+    const auto lateResult = lateBinding.Authenticate(std::move(lateCallbacks),
+                                                    facelogin::ipc::MakeAuthDeadline(100));
+    Check(lateResult.timedOut && !lateResult.succeeded && !lateBinding.IsAlive(),
+          "a binding verdict delivered after the deadline cannot authenticate");
+
     facelogin::AuthWorkerClient cancelled(MockConfig(L"mock:hang"), 1000);
     error.clear();
     Check(cancelled.Start(error), "cancellation worker reaches READY");

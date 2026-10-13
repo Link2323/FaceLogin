@@ -152,6 +152,22 @@ AuthPipelineResult AuthPipeline::Run() {
         return result;
     }
 
+    const auto localDeadline = ipc::MakeAuthDeadline(m_config.authTimeoutSeconds * 1000);
+    const auto authDeadline = m_config.authDeadline == ipc::AuthDeadline{} ||
+        localDeadline < m_config.authDeadline ? localDeadline : m_config.authDeadline;
+    const auto interrupted = [&]() {
+        if (m_callbacks.isCancelled()) {
+            result.cancelled = true;
+            return true;
+        }
+        if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+            result.timedOut = true;
+            return true;
+        }
+        return false;
+    };
+    if (interrupted()) return result;
+
     try {
         ExposureTimingProfile exposureTiming;
         const SensorKnobs sensorKnobs = ProfileSensorKnobs(m_callbacks.sensorKnobs, exposureTiming);
@@ -160,7 +176,15 @@ AuthPipelineResult AuthPipeline::Run() {
         // round at any exit. RAII so cancel/timeout/attack paths log too.
         struct NormLog {
             std::vector<float> norms;
-            void add(float n) { if (norms.size() < 16) norms.push_back(n); }
+            unsigned long long attempts = 0, repeatedFrames = 0;
+            unsigned long long firstSequence = 0, lastSequence = 0;
+            void add(float n, unsigned long long sequence) {
+                if (attempts == 0) firstSequence = sequence;
+                else if (sequence == lastSequence) ++repeatedFrames;
+                lastSequence = sequence;
+                ++attempts;
+                if (norms.size() < 16) norms.push_back(n);
+            }
             ~NormLog() {
                 if (norms.empty()) return;
                 wchar_t buf[16 * 8];
@@ -171,6 +195,9 @@ AuthPipelineResult AuthPipeline::Run() {
                 if (off > 0 && buf[off - 1] == L',') buf[--off] = L'\0';
                 FACELOGIN_INFO(L"Embedding norms pre-normalize (binding attempts): [%s]",
                                buf);
+                FACELOGIN_INFO(L"Binding capture sequence: attempts=%llu, repeated=%llu, "
+                               L"first=%llu, last=%llu",
+                               attempts, repeatedFrames, firstSequence, lastSequence);
             }
         } normLog;
 
@@ -256,8 +283,7 @@ AuthPipelineResult AuthPipeline::Run() {
         unsigned long long lastSeq = 0;
         bool haveLastSeq = false;
         for (int attempts = 0; attempts < warmupConfig.maxAttempts; ++attempts) {
-            if (m_callbacks.isCancelled()) {
-                result.cancelled = true;
+            if (interrupted()) {
                 return result;
             }
             FrameImage warmFrame;
@@ -374,6 +400,7 @@ AuthPipelineResult AuthPipeline::Run() {
                              std::move(seedDet), seedWall };
         }
         exposureTiming.seedWaitMs = ElapsedMs(seedWaitAt);
+        if (interrupted()) return result;
         exposureTiming.warmupSeedSeq = seed.valid ? seed.seq : 0;
         exposureTiming.warmupSeedAgeMs = seed.valid ? ElapsedMs(seed.grabWall) : -1.0;
         if (seed.valid && std::chrono::duration<double, std::milli>(
@@ -390,7 +417,7 @@ AuthPipelineResult AuthPipeline::Run() {
         GainTuneConfig tuneCfg;
         tuneCfg.persistPath = m_config.tuneStatePath;
         const auto seedRefreshAt = std::chrono::steady_clock::now();
-        if (!seed.valid && !m_callbacks.isCancelled()) {
+        if (!seed.valid && !interrupted()) {
             FrameImage fresh;
             unsigned long long freshSeq = 0;
             if (m_callbacks.grabFrame(fresh, freshSeq)) {
@@ -424,8 +451,7 @@ AuthPipelineResult AuthPipeline::Run() {
                 unsigned long long freshSeq = 0;
                 unsigned long long lastObserved = seed.seq;
                 while (std::chrono::steady_clock::now() < settleUntil) {
-                    if (m_callbacks.isCancelled()) {
-                        result.cancelled = true;
+                    if (interrupted()) {
                         return result;
                     }
                     if (m_callbacks.grabFrame(fresh, freshSeq)) {
@@ -435,8 +461,7 @@ AuthPipelineResult AuthPipeline::Run() {
                 }
                 seed = Prefetch{};
                 for (int attempt = 0; attempt < tuneCfg.maxGrabAttempts; ++attempt) {
-                    if (m_callbacks.isCancelled()) {
-                        result.cancelled = true;
+                    if (interrupted()) {
                         return result;
                     }
                     if (m_callbacks.grabFrame(fresh, freshSeq) && freshSeq > lastObserved) {
@@ -483,31 +508,34 @@ AuthPipelineResult AuthPipeline::Run() {
         exposureTiming.triggerMs = ElapsedMs(triggerAt);
         exposureTiming.phase = ExposureTimingProfile::Tune;
         const auto tuneAt = std::chrono::steady_clock::now();
+        bool darkRecoveryAttempted = false;
         if (seed.valid && seed.det) {
             const float faceLuma = FaceBoxLuma(seed.frame, *seed.det);
             if (faceLuma >= 0.0f) {
                 const int tuneSteps = TuneFaceExposure(
                     faceLuma, sensorKnobs, m_callbacks.grabFrame,
-                    m_detector, m_callbacks.isCancelled,
+                    m_detector, interrupted,
                     m_config.cameraRotation, tuneCfg);
                 if (tuneSteps > 0) seed = Prefetch{};
             }
-        } else if (seed.valid && IsSceneWhiteout(seed.frame)) {
+        } else if (seed.valid &&
+                   (IsSceneWhiteout(seed.frame) || IsSceneDark(seed.frame, tuneCfg))) {
             // Recovery precedes all PAD/identity frames. Never reuse a seed
             // after this path: controls or the camera stream may have moved.
+            darkRecoveryAttempted = IsSceneDark(seed.frame, tuneCfg);
             TuneFaceExposure(sensorKnobs, m_callbacks.grabFrame,
-                             m_detector, m_callbacks.isCancelled,
+                             m_detector, interrupted,
                              m_config.cameraRotation, tuneCfg);
             seed = Prefetch{};
         }
         exposureTiming.tuneMs = ElapsedMs(tuneAt);
+        if (interrupted()) return result;
 
         const auto statusAt = std::chrono::steady_clock::now();
         m_callbacks.reportStatus(L"正在识别...");
         exposureTiming.statusMs = ElapsedMs(statusAt);
         exposureTiming.gateToLoopMs = ElapsedMs(gateAt);
         exposureTiming.phase = ExposureTimingProfile::Loop;
-        const auto startTime = std::chrono::steady_clock::now();
         // No per-round echo of the PAD threshold/check counts here: the
         // active config (threshold included) is logged once per load by
         // LoadConfig, and "need N" appears in the failure line.
@@ -569,12 +597,19 @@ AuthPipelineResult AuthPipeline::Run() {
             (static_cast<bool>(sensorKnobs.exposureSet) ||
              static_cast<bool>(sensorKnobs.gainSet));
 
-        // Returns false on cancel or grab failure; the caller re-checks
-        // isCancelled() to distinguish. Failed grabs keep the legacy 30 ms
+        // Returns false on interruption, window expiry or grab failure.
+        // The caller re-checks interrupted() to preserve timeout/cancel results.
+        // Failed grabs keep the legacy 30 ms
         // retry pace outside this helper's loop.
         const auto grabWithPacing = [&](Prefetch& out) {
             for (;;) {
-                if (m_callbacks.isCancelled()) return false;
+                if (interrupted() || m_callbacks.isClientDisconnected()) return false;
+                // A stalled camera can keep returning the last buffered frame.
+                // Keep the outer loop's deadlines active during dedup/pacing.
+                const auto waitNow = std::chrono::steady_clock::now();
+                if (timing.WindowExpired(waitNow)) {
+                    return false;
+                }
                 if (haveLastCounted) {
                     const auto deadline = lastCountedWall + std::chrono::milliseconds(60);
                     if (std::chrono::steady_clock::now() < deadline) {
@@ -613,8 +648,7 @@ AuthPipelineResult AuthPipeline::Run() {
 
         Prefetch next = std::move(seed);            // warmup SCRFD pre-run seed, if fresh
         while (totalChecked < totalChecks) {
-            if (m_callbacks.isCancelled()) {
-                result.cancelled = true;
+            if (interrupted()) {
                 return result;
             }
             if (m_callbacks.isClientDisconnected()) {
@@ -624,12 +658,6 @@ AuthPipelineResult AuthPipeline::Run() {
             }
 
             const auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count()
-                >= m_config.authTimeoutSeconds) {
-                FACELOGIN_INFO(L"Authentication timed out");
-                result.timedOut = true;
-                return result;
-            }
             if (timing.WindowExpired(now)) {
                 break;
             }
@@ -641,8 +669,7 @@ AuthPipelineResult AuthPipeline::Run() {
 
             if (!next.valid) {
                 if (!grabWithPacing(next)) {
-                    if (m_callbacks.isCancelled()) {
-                        result.cancelled = true;
+                    if (interrupted()) {
                         return result;
                     }
                     continue;                       // grab failure: legacy 30 ms pace already served
@@ -652,6 +679,16 @@ AuthPipelineResult AuthPipeline::Run() {
             next = Prefetch{};
 
             if (!cur.det) {
+                if (totalChecked == 0 && sensorKnobsWired && !darkRecoveryAttempted &&
+                    IsSceneDark(cur.frame, tuneCfg)) {
+                    darkRecoveryAttempted = true;
+                    timing.Suspend(std::chrono::steady_clock::now());
+                    TuneFaceExposure(sensorKnobs, m_callbacks.grabFrame, m_detector,
+                                     interrupted, m_config.cameraRotation, tuneCfg);
+                    timing.Resume(std::chrono::steady_clock::now());
+                    if (interrupted()) return result;
+                    continue; // discard all pre-write/no-face evidence
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 continue;
             }
@@ -682,11 +719,10 @@ AuthPipelineResult AuthPipeline::Run() {
                     // pacing anchor is untouched — no frame was counted yet.
                     TuneFaceExposure(lateLuma, sensorKnobs,
                                      m_callbacks.grabFrame, m_detector,
-                                     m_callbacks.isCancelled, m_config.cameraRotation,
+                                     interrupted, m_config.cameraRotation,
                                      tuneCfg);
                     timing.Resume(std::chrono::steady_clock::now());
-                    if (m_callbacks.isCancelled()) {
-                        result.cancelled = true;
+                    if (interrupted()) {
                         return result;
                     }
                     continue;
@@ -732,7 +768,7 @@ AuthPipelineResult AuthPipeline::Run() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(30));
                     continue;
                 }
-                normLog.add(preNorm);
+                normLog.add(preNorm, cur.seq);
 
                 const BindingDecision decision =
                     m_callbacks.verifyBinding(embedding, bindingCount, preNorm,
@@ -814,11 +850,9 @@ AuthPipelineResult AuthPipeline::Run() {
                 Prefetch candidate;
                 if (grabWithPacing(candidate)) {
                     next = std::move(candidate);
-                } else if (m_callbacks.isCancelled()) {
-                    // The helper only fails after a cancel check or a grab
-                    // failure; cancel must abort before frame N is counted.
+                } else if (interrupted()) {
+                    // Cancellation or timeout must abort before frame N is counted.
                     scoreFuture.get();
-                    result.cancelled = true;
                     return result;
                 }
                 // Grab failure: leave the slot empty — frame N still counts
@@ -826,6 +860,7 @@ AuthPipelineResult AuthPipeline::Run() {
             }
 
             const float score = scoreFuture.get();
+            if (interrupted()) return result;
             if (!std::isfinite(score) || score < 0.0f || score > 1.0f) {
                 FACELOGIN_ERROR(L"Anti-spoof inference returned invalid score: %.4f", score);
                 livenessInferenceError = true;

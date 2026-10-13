@@ -40,14 +40,15 @@ struct AuthWorkerResult {
 class AuthWorkerClient {
 public:
     explicit AuthWorkerClient(auth_worker::WorkerConfig config,
-                              DWORD authSupervisorTimeoutMs = 20000,
+                              DWORD authSupervisorTimeoutMs = ipc::AUTH_TIMEOUT_MS,
                               std::wstring executablePathOverride = {});
     ~AuthWorkerClient();
     AuthWorkerClient(const AuthWorkerClient&) = delete;
     AuthWorkerClient& operator=(const AuthWorkerClient&) = delete;
 
     bool Start(std::wstring& errorMessage);
-    AuthWorkerResult Authenticate(AuthWorkerCallbacks callbacks);
+    AuthWorkerResult Authenticate(AuthWorkerCallbacks callbacks,
+                                  ipc::AuthDeadline deadline = {});
     void Stop();
     bool IsReady() const;
     bool IsAlive() const;
@@ -73,7 +74,7 @@ private:
     HANDLE m_process = nullptr;
     HANDLE m_job = nullptr;
     uint64_t m_nextRequestId = 1;
-    DWORD m_authSupervisorTimeoutMs = 20000;
+    DWORD m_authSupervisorTimeoutMs = ipc::AUTH_TIMEOUT_MS;
     std::wstring m_executablePathOverride;
     bool m_ready = false;
 };

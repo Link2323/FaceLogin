@@ -41,6 +41,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 ## 架构边界与易踩坑
 
 - 运行期由 LogonUI、`FaceLoginService.exe` 和 `FaceLoginConsole.exe` 协作。Credential Provider 与注册程序通过本地命名管道和服务通信；服务与认证 worker 使用私有继承管道。协议细节见 [`docs/contracts/ipc.md`](docs/contracts/ipc.md) 和 [`docs/contracts/auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md)。项目不使用网络 API，也不监听 TCP 端口。
+- 修改认证计时时联查锁屏端、父服务和 worker 的截止时间；一次认证共用 5 秒预算，模型等待、相机准备及曝光调节都计入，阶段切换不重新计时。起点和超时终态以 IPC 契约为准。
 - 服务父进程管理公共管道和凭据存储；认证 worker 持有推理模型。锁屏预载阶段禁止打开摄像头，认证开始后才激活设备。配置了 `DevicePath` 时必须使用指定设备；找不到设备就失败，不得静默切换到其他摄像头。生命周期细节见 [`docs/modules/face-service.md`](docs/modules/face-service.md)。
 - `DataPath` 默认指向安装目录，ProgramData 仅作回退。服务、Credential Provider 和注册程序的路径校验逻辑不同；修改路径处理时要检查三个组件。入口见 [`DEVELOPMENT.md`](DEVELOPMENT.md#sec-paths)。
 - 服务 worker 使用 MTA；Credential Provider 和 WebView2 注册界面使用 Apartment 线程。DirectShow 必须复用当前线程已初始化的 COM 公寓；只有在同一线程初始化 COM 的代码才能调用 `CoUninitialize`。

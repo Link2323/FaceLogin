@@ -679,12 +679,13 @@ void FaceService::EndModelUse() {
     m_modelCv.notify_all();
 }
 
-std::shared_ptr<FaceService::InferenceModels> FaceService::AcquireModelsForAuth() {
+std::shared_ptr<FaceService::InferenceModels> FaceService::AcquireModelsForAuth(
+    ipc::AuthDeadline deadline) {
     // AUTH_REQUEST is the fail-safe if WTS_SESSION_LOCK was delayed or missed.
     RequestModelLoad(L"AUTH_REQUEST fallback");
 
     std::unique_lock<std::mutex> lock(m_modelMutex);
-    m_modelCv.wait(lock, [this]() {
+    m_modelCv.wait_until(lock, deadline, [this]() {
         return m_modelState == ModelState::Ready ||
                m_modelState == ModelState::Failed ||
                m_modelState == ModelState::Stopping ||
@@ -709,12 +710,13 @@ std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
     return worker;
 }
 
-std::shared_ptr<AuthWorkerClient> FaceService::AcquireAuthWorkerForAuth() {
+std::shared_ptr<AuthWorkerClient> FaceService::AcquireAuthWorkerForAuth(
+    ipc::AuthDeadline deadline) {
     // AUTH_REQUEST is the fail-safe if WTS_SESSION_LOCK was delayed or missed.
     RequestModelLoad(L"AUTH_REQUEST worker fallback");
 
     std::unique_lock<std::mutex> lock(m_modelMutex);
-    m_modelCv.wait(lock, [this]() {
+    m_modelCv.wait_until(lock, deadline, [this]() {
         return m_modelState == ModelState::Ready ||
                m_modelState == ModelState::Failed ||
                m_modelState == ModelState::Stopping ||
@@ -1244,6 +1246,7 @@ bool FaceService::SendAuthErrorMessage(const std::wstring& message) {
 }
 
 bool FaceService::ProcessWorkerAuthRequest() {
+    const auto authDeadline = ipc::MakeAuthDeadline();
     if (m_store->GetUserCount() == 0) {
         FACELOGIN_WARN(L"No registered users");
         SendAuthErrorMessage(L"没有注册用户");
@@ -1285,8 +1288,10 @@ bool FaceService::ProcessWorkerAuthRequest() {
         }
         m_modelCv.notify_all();
 
-        worker = AcquireAuthWorkerForAuth();
-        if (!worker || !worker->IsReady()) {
+        worker = AcquireAuthWorkerForAuth(authDeadline);
+        if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+            workerResult.timedOut = true;
+        } else if (!worker || !worker->IsReady()) {
             std::wstring loadError;
             {
                 std::lock_guard<std::mutex> lock(m_modelMutex);
@@ -1313,7 +1318,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
                                              lockedIdentity, initialSid,
                                              &identityMissDistance, &roundBest);
             };
-            workerResult = worker->Authenticate(std::move(callbacks));
+            workerResult = worker->Authenticate(std::move(callbacks), authDeadline);
         }
     }
 
@@ -1353,6 +1358,12 @@ bool FaceService::ProcessWorkerAuthRequest() {
         return false;
     }
 
+    if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+        MarkAuthWorkerConsumed(true);
+        SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
+        return false;
+    }
+
     std::optional<CredentialStore::MatchResult> credential;
     {
         EnterCriticalSection(&m_storeLock);
@@ -1364,6 +1375,12 @@ bool FaceService::ProcessWorkerAuthRequest() {
         MarkAuthWorkerConsumed(true);
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
         SendAuthErrorMessage(L"账户凭据不可用，请使用密码登录");
+        return false;
+    }
+    if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+        SecureClearMatchPassword(credential);
+        MarkAuthWorkerConsumed(true);
+        SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
 
@@ -1424,6 +1441,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
 
 bool FaceService::ProcessAuthRequest() {
     if (m_isServiceMode) return ProcessWorkerAuthRequest();
+    const auto authDeadline = ipc::MakeAuthDeadline();
 
     FACELOGIN_INFO(L"Starting face authentication...");
 
@@ -1439,7 +1457,11 @@ bool FaceService::ProcessAuthRequest() {
         SendStatusMessage(L"正在加载模型...");
     }
 
-    auto models = AcquireModelsForAuth();
+    auto models = AcquireModelsForAuth(authDeadline);
+    if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+        SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
+        return false;
+    }
     if (!models) {
         FACELOGIN_ERROR(L"Required models not loaded — cannot authenticate");
         const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
@@ -1501,7 +1523,7 @@ bool FaceService::ProcessAuthRequest() {
         *models->detector, *models->recognizer, *models->antiSpoof,
         AuthPipelineConfig{m_antiSpoofThreshold, m_authTimeoutSeconds,
                            m_config.camera_rotation, m_config.fast_unlock,
-                           m_dataDir + L"\\camera_tune.state"},
+                           m_dataDir + L"\\camera_tune.state", authDeadline},
         std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
 

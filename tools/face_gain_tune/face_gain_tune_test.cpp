@@ -341,6 +341,122 @@ void TestResponseGate() {
               "small-range drift stays unconfirmed even after the 900ms fallback");
 }
 
+void TestDarkSceneEvidence() {
+    FrameImage frame(90, 90);
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(230, 230, 230);
+    Check(!IsSceneDark(frame) && !IsSceneDark(FrameImage{}),
+          "bright/invalid frames cannot authorize dark recovery");
+    for (long y = 30; y < 60; ++y)
+        for (long x = 30; x < 60; ++x) frame(y, x) = RgbPixel(20, 20, 20);
+    Check(IsSceneDark(frame) && CentralSceneLuma(frame) == 20,
+          "bright background cannot mask central darkness");
+    for (long y = 30; y < 60; ++y)
+        for (long x = 30; x < 60; ++x) frame(y, x) = RgbPixel(31, 31, 31);
+    Check(!IsSceneDark(frame), "ordinary no-face brightness is left alone");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(180, 180, 180);
+    for (long y = 30; y < 46; ++y)
+        for (long x = 30; x < 46; ++x) frame(y, x) = RgbPixel(20, 20, 20);
+    Check(FaceBoxLuma(frame, 30, 30, 59, 59) > 120 && IsSceneDark(frame),
+          "a small dark subject still triggers when most central pixels are bright");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(180, 180, 180);
+    frame(40, 40) = RgbPixel(0, 0, 0);
+    Check(!IsSceneDark(frame), "isolated black pixel cannot authorize a sensor write");
+}
+
+void TestNoFaceDarkRecovery() {
+    StateFile file;
+    Sensor sensor;
+    auto knobs = sensor.Knobs();
+    auto cfg = Config(file);
+    Check(SaveTuneKnobState(file.path, knobs), "seed checkpoint before dark bootstrap");
+    float recovered = -1;
+    int samples = 0;
+    const auto responsive = [&](DarkSceneSample& sample) {
+        ++samples;
+        sample.sceneLuma = 20.0f + (sensor.gain - 50) * 8;
+        sample.faceLuma = sample.sceneLuma >= 50 ? sample.sceneLuma : -1.0f;
+        return true;
+    };
+    Check(RecoverSceneDarkness(knobs, responsive, noCancel, recovered, cfg) == 1 &&
+          sensor.gain == 55 && recovered == 60 && samples >= 4,
+          "no face box needed to boost gain and hand off a settled face");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+          "dark bootstrap never persists unvalidated settings itself");
+
+    for (int scenario = 0; scenario < 8; ++scenario) {
+        sensor.gain = 50;
+        sensor.exposure = -5;
+        sensor.gainWrites.clear();
+        samples = 0;
+        cfg = Config(file);
+        auto candidate = sensor.Knobs();
+        if (scenario == 3) { cfg.settleMs = 900; cfg.settleFrames = 2; }
+        if (scenario == 7) { candidate.gainSet = {}; candidate.exposureSet = {}; }
+        const auto measure = [&](DarkSceneSample& sample) {
+            ++samples;
+            sample = {20.0f, -1.0f};
+            if (scenario == 1 && samples > 1) sample.sceneLuma = 80;
+            if (scenario == 2) return false;
+            if (scenario == 4 && !sensor.gainWrites.empty()) return false;
+            if (scenario == 5 && !sensor.gainWrites.empty())
+                sample.faceLuma = samples % 2 ? 60.0f : 100.0f;
+            return true;
+        };
+        const auto cancel = [&] {
+            return scenario == 0 || (scenario == 6 && !sensor.gainWrites.empty());
+        };
+        const int writes = RecoverSceneDarkness(candidate, measure, cancel, recovered, cfg);
+        Check(writes == (scenario >= 4 && scenario <= 6 ? 1 : 0) && recovered < 0,
+              "cancel/transient/dead camera/unsettled/unsupported never stack writes or hand off");
+    }
+    sensor.gain = 50;
+    sensor.exposure = -5;
+    cfg = Config(file);
+    samples = 0;
+    const auto emptyRoom = [&](DarkSceneSample& sample) {
+        sample = {20.0f + (sensor.gain - 50) * 2, -1.0f}; return true;
+    };
+    Check(RecoverSceneDarkness(knobs, emptyRoom, noCancel, recovered, cfg) == 2 && recovered < 0,
+          "persistent no-face scene obeys total write budget");
+    Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+          "empty room cannot overwrite the face checkpoint");
+
+    sensor.gain = 63;
+    sensor.exposure = -6;
+    const auto exposureResponse = [&](DarkSceneSample& sample) {
+        sample.sceneLuma = 20 * std::exp2(static_cast<float>(sensor.exposure + 6));
+        sample.faceLuma = sample.sceneLuma >= 50 ? sample.sceneLuma : -1;
+        return true;
+    };
+    Check(RecoverSceneDarkness(knobs, exposureResponse, noCancel, recovered, cfg) == 2 &&
+          sensor.exposure == -4 && recovered == 80,
+          "gain exhaustion uses single exposure steps until a settled face returns");
+    const auto darkness = [](DarkSceneSample& sample) { sample = {20, -1}; return true; };
+    sensor.exposure = -4;
+    Check(RecoverSceneDarkness(knobs, darkness, noCancel, recovered, cfg) == 0,
+          "blind exposure search respects frame-rate cap");
+    sensor.exposure = -5;
+    sensor.gain = 50;
+    Check(RecoverSceneDarkness(knobs, darkness, noCancel, recovered, cfg) == 2 &&
+          sensor.exposure == -4,
+          "confirmed dead gain switches to bounded exposure fallback");
+
+    sensor.gain = 50;
+    sensor.exposure = -5;
+    bool manual = false;
+    auto autoKnobs = sensor.Knobs();
+    autoKnobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    autoKnobs.exposureSet = [&](long value) { sensor.exposure = value; manual = true; return true; };
+    autoKnobs.gainSet = [&](long value) {
+        Check(manual, "dark bootstrap freezes AE before boosting gain");
+        sensor.gain = value; return true;
+    };
+    Check(RecoverSceneDarkness(autoKnobs, responsive, noCancel, recovered, cfg) == 2 &&
+          manual && recovered == 60,
+          "AE takeover and gain together obey the total two-write limit");
+}
+
 void TestShortExposurePolicy() {
     StateFile file;
     Sensor sensor;
@@ -567,11 +683,35 @@ void ReplayResponseCsv(const char* path) {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--dark-frame") {
+        // Temporary RGB PPM exported from a user-supplied preview crop. Keep
+        // personal camera imagery outside committed regression fixtures.
+        std::ifstream input(argv[2], std::ios::binary);
+        std::string magic;
+        long width = 0, height = 0, maximum = 0;
+        input >> magic >> width >> height >> maximum;
+        if (!input || magic != "P6" || maximum != 255 ||
+            width < 3 || height < 3 || width > 4096 || height > 4096) return 2;
+        input.get();
+        FrameImage frame(height, width);
+        for (size_t i = 0; i < frame.size(); ++i) {
+            unsigned char pixel[3]{};
+            input.read(reinterpret_cast<char*>(pixel), 3);
+            frame[i] = RgbPixel(pixel[0], pixel[1], pixel[2]);
+        }
+        if (!input) return 2;
+        std::printf("Backlit preview: central luma=%.2f, dark trigger=%d\n",
+                    CentralSceneLuma(frame), IsSceneDark(frame));
+        Check(IsSceneDark(frame), "dark face against bright background must trigger recovery");
+        return failures ? 1 : 0;
+    }
     TestResponseGate();
     TestShortExposurePolicy();
     if(argc==2) ReplayResponseCsv(argv[1]);
     TestWhiteoutEvidence();
     TestNoFaceRecovery();
+    TestDarkSceneEvidence();
+    TestNoFaceDarkRecovery();
     TestConsecutiveDarkUnlocks();
     TestMeasuredGainConvergesWithMargin();
     TestUnconfirmedProgressIsNotSaved();

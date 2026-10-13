@@ -397,7 +397,7 @@ bool EnrollmentWizard::StartPreview() {
     // (face_gain_tune.h): under the driver's full-frame-average AE a small
     // backlit face stays dark, and the preview must show (and enrollment
     // capture) the same brightened domain unlock will see. No face in frame
-    // skips tuning unless the scene is clipped; the watch retries while preview
+    // skips tuning unless the scene is clipped or centrally dark; the watch retries while preview
     // runs, and the next StartPreview re-tunes otherwise.
     {
         const auto noCancel = [] { return false; };
@@ -546,7 +546,7 @@ void EnrollmentWizard::WatchPreviewExposure(const FrameImage& frame,
     cfg.persistPath = m_dataDir + L"\\camera_tune.state";
     if (!det) {
         m_pendingWatchLuma = -1.0f;
-        if (!IsSceneWhiteout(frame)) return;
+        if (!IsSceneWhiteout(frame) && !IsSceneDark(frame, cfg)) return;
         m_lastExposureTune = now;
         TuneFaceExposure(BuildSensorKnobs(),
                          [this](FrameImage& f, unsigned long long& s) {

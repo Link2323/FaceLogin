@@ -12,6 +12,7 @@
 #include <cwchar>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -62,6 +63,8 @@ struct GainTuneConfig {
                                   // states) can never stop at -3 and ping-pongs
                                   // -2↔-4 forever. 90–120 is a legal landing.
     int maxSteps = 3;             // hard cap on adjust-settle-measure cycles per knob
+    float maxNoFaceLuma = 30.0f;  // central shadow evidence for a dark detection bootstrap
+    int maxNoFaceSteps = 2;       // total writes, including an AE mode takeover
     // Settle gate — time floor plus agreement. This driver applies an
     // exposure write with a large lag (reads through a 10-frame window stay
     // flat, then the combined effect lands during the NEXT control write's
@@ -828,6 +831,142 @@ struct WhiteoutSample {
     float faceLuma = -1.0f;
 };
 
+// Mean of the darkest quarter of samples in the central third. A face may
+// occupy only part of this region; its bright background must not hide it.
+// Requiring a quarter of the samples avoids chasing isolated dark pixels.
+// This is bounded capture-quality evidence, never identity evidence.
+inline float CentralSceneLuma(const FrameImage& frame) {
+    if (frame.nr() < 3 || frame.nc() < 3) return -1.0f;
+    unsigned long long histogram[256]{};
+    unsigned long long count = 0;
+    for (long y = frame.nr() / 3; y < 2 * frame.nr() / 3; y += 2) {
+        for (long x = frame.nc() / 3; x < 2 * frame.nc() / 3; x += 2) {
+            const auto& p = frame(y, x);
+            const int luma = std::clamp(static_cast<int>(
+                0.299 * p.red + 0.587 * p.green + 0.114 * p.blue + 0.5), 0, 255);
+            ++histogram[luma];
+            ++count;
+        }
+    }
+    if (count == 0) return -1.0f;
+    const auto target = (count + 3) / 4;
+    unsigned long long used = 0, sum = 0;
+    for (int luma = 0; luma < 256 && used < target; ++luma) {
+        const auto take = std::min(histogram[luma], target - used);
+        used += take;
+        sum += take * luma;
+    }
+    return static_cast<float>(sum) / static_cast<float>(target);
+}
+
+inline bool IsSceneDark(const FrameImage& frame, const GainTuneConfig& cfg = {}) {
+    const float luma = CentralSceneLuma(frame);
+    return luma >= 0.0f && luma <= cfg.maxNoFaceLuma;
+}
+
+struct DarkSceneSample {
+    float sceneLuma = -1.0f;
+    float faceLuma = -1.0f;
+};
+
+// Bounded detection bootstrap. Confirm darkness before writing; wait for
+// response/plateau after each write. An appearing face needs its own stable
+// window before handoff. No-face observations never overwrite the checkpoint.
+inline int RecoverSceneDarkness(
+    const SensorKnobs& knobs,
+    const std::function<bool(DarkSceneSample&)>& measure,
+    const std::function<bool()>& isCancelled,
+    float& recoveredLuma,
+    const GainTuneConfig& cfg = {}) {
+    recoveredLuma = -1.0f;
+    int steps = 0;
+    float before = -1.0f;
+    bool gainUnresponsive = false;
+    bool lastWriteGain = false;
+    bool pinnedExposure = false;
+    while (true) {
+        auto start = std::chrono::steady_clock::now();
+        std::optional<detail::FaceSettleGate> gate;
+        bool measuringFace = false, settled = false;
+        DarkSceneSample sample;
+        for (int f = 0; f < cfg.settleFrames; ++f) {
+            if (isCancelled() || !measure(sample) || isCancelled()) return steps;
+            const bool face = std::isfinite(sample.faceLuma) && sample.faceLuma >= 0.0f;
+            const float luma = face ? sample.faceLuma : sample.sceneLuma;
+            if (!std::isfinite(luma) || luma < 0.0f) return steps;
+            if (steps == 0 && !face && luma > cfg.maxNoFaceLuma) return 0;
+            if (!gate || face != measuringFace) {
+                start = std::chrono::steady_clock::now();
+                gate.emplace(cfg, face ? -1.0f : before, face || steps == 0 ? 0 : 1);
+                measuringFace = face;
+            }
+            if (gate->Feed(luma, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - start).count())) {
+                settled = true;
+                break;
+            }
+        }
+        if (!settled || isCancelled()) return steps;
+        if (measuringFace) {
+            recoveredLuma = sample.faceLuma;
+            return steps;
+        }
+        if (sample.sceneLuma >= cfg.minFaceLuma || steps >= cfg.maxNoFaceSteps) return steps;
+        if (lastWriteGain && sample.sceneLuma - before < cfg.deadKnobRise)
+            gainUnresponsive = true;
+        // AE can undo gain writes. Pin its current exposure first when its
+        // manual mode is unknown/off, and let that write settle on its own.
+        bool manual = false;
+        const bool knownManual = pinnedExposure || (knobs.exposureIsManual &&
+            knobs.exposureIsManual(manual) && manual);
+        if (isCancelled()) return steps;
+        if (!knownManual) {
+            long cur = 0;
+            if (!knobs.exposureGet || !knobs.exposureSet || !knobs.exposureGet(cur) ||
+                isCancelled() || !knobs.exposureSet(cur)) return steps;
+            ++steps;
+            pinnedExposure = true;
+            before = sample.sceneLuma;
+            lastWriteGain = false;
+            FACELOGIN_INFO(L"No-face dark recovery: pinned exposure %ld (%d/%d)",
+                           cur, steps, cfg.maxNoFaceSteps);
+            continue;
+        }
+        long mn = 0, mx = 0, step = 0, cur = 0;
+        const bool gainReady = !gainUnresponsive && knobs.gainRange && knobs.gainGet &&
+            knobs.gainSet && knobs.gainRange(mn, mx, step) && knobs.gainGet(cur) &&
+            mn <= mx && cur >= mn && cur < mx && step > 0;
+        if (gainReady) {
+            const long long span = static_cast<long long>(mx) - cur;
+            const long long requested = static_cast<long long>(std::ceil(
+                span * std::clamp(cfg.maxGainBoostFraction, 0.0f, 1.0f) / 2.0));
+            const long long move = std::min(span,
+                std::max<long long>(step, ((requested + step - 1) / step) * step));
+            const long next = static_cast<long>(cur + move);
+            if (isCancelled() || !knobs.gainSet(next)) return steps;
+            ++steps;
+            before = sample.sceneLuma;
+            lastWriteGain = true;
+            FACELOGIN_INFO(L"No-face dark recovery: gain %ld→%ld, central shadow luma %.0f (%d/%d)",
+                           cur, next, before, steps, cfg.maxNoFaceSteps);
+            continue;
+        }
+        if (!knobs.exposureRange || !knobs.exposureGet || !knobs.exposureSet ||
+            !knobs.exposureRange(mn, mx, step) || !knobs.exposureGet(cur) ||
+            mn > mx || cur < mn || cur >= mx || step <= 0) return steps;
+        const long limit = cfg.exposureUpCapValue >= mn
+            ? std::min(mx, cfg.exposureUpCapValue) : mx;
+        const long next = static_cast<long>(std::min(static_cast<long long>(limit),
+                                                    static_cast<long long>(cur) + step));
+        if (next <= cur || isCancelled() || !knobs.exposureSet(next)) return steps;
+        ++steps;
+        before = sample.sceneLuma;
+        lastWriteGain = false;
+        FACELOGIN_INFO(L"No-face dark recovery: exposure %ld→%ld, central shadow luma %.0f (%d/%d)",
+                       cur, next, before, steps, cfg.maxNoFaceSteps);
+    }
+}
+
 // Bounded no-face escape path. Each measurement must be a fresh frame.
 // Confirm the initial scene for a full actuator-lag window too: the host
 // may just have replayed manual controls. Never persist no-face settings.
@@ -884,8 +1023,8 @@ inline int RecoverSceneWhiteout(
 
 // Self-contained variant for hosts without a warmup-produced detection
 // (console preview): measures the trigger on a fresh distinct frame, then
-// delegates. No-face white-out gets a bounded recovery; normal empty rooms
-// stay silent and retain their controls.
+// delegates. No-face white-out/darkness gets bounded recovery; ordinary
+// empty scenes retain their controls.
 inline int TuneFaceExposure(const SensorKnobs& knobs,
                             const std::function<bool(FrameImage&, unsigned long long&)>& grab,
                             OnnxDetector& detector,
@@ -907,9 +1046,10 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
             RotateFrame(frame, cameraRotation);
             const auto det = detector.DetectLargestFace(frame);
             if (!det) {
-                if (!IsSceneWhiteout(frame)) continue;
+                const bool whiteout = IsSceneWhiteout(frame);
+                if (!whiteout && !IsSceneDark(frame, cfg)) continue;
                 float recoveredLuma = -1.0f;
-                const int steps = RecoverSceneWhiteout(knobs, [&](WhiteoutSample& sample) {
+                const auto measure = [&](float& faceLuma, float& sceneLuma, bool& clipped) {
                     for (int retry = 0; retry < cfg.maxGrabAttempts; ++retry) {
                         if (isCancelled()) return false;
                         FrameImage fresh;
@@ -918,14 +1058,24 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
                             lastSeq = freshSeq;
                             RotateFrame(fresh, cameraRotation);
                             const auto face = detector.DetectLargestFace(fresh);
-                            sample.faceLuma = face ? FaceBoxLuma(fresh, *face) : -1.0f;
-                            sample.whiteout = !face && IsSceneWhiteout(fresh);
+                            faceLuma = face ? FaceBoxLuma(fresh, *face) : -1.0f;
+                            sceneLuma = CentralSceneLuma(fresh);
+                            clipped = !face && IsSceneWhiteout(fresh);
                             return true;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                     return false;
-                }, isCancelled, recoveredLuma, cfg);
+                };
+                const int steps = whiteout
+                    ? RecoverSceneWhiteout(knobs, [&](WhiteoutSample& sample) {
+                        float sceneLuma = -1.0f;
+                        return measure(sample.faceLuma, sceneLuma, sample.whiteout);
+                    }, isCancelled, recoveredLuma, cfg)
+                    : RecoverSceneDarkness(knobs, [&](DarkSceneSample& sample) {
+                        bool clipped = false;
+                        return measure(sample.faceLuma, sample.sceneLuma, clipped);
+                    }, isCancelled, recoveredLuma, cfg);
                 if (recoveredLuma >= 0.0f && !isCancelled()) {
                     return steps + TuneFaceExposure(recoveredLuma, knobs, grab, detector,
                                                     isCancelled, cameraRotation, cfg);

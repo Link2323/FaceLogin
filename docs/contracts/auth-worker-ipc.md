@@ -50,6 +50,8 @@ struct MessageHeader {
 
 设计中的 `MATCH_DECISION` 在 v1 线上拆为 `MatchAccept/MatchRetry/MatchReject`，`AUTH_COMPLETE` 拆为 `AuthSucceeded/AuthFailed/AuthTimedOut`，使每个终态的合法 payload 可单独校验。`Cancel` 是父端停止、解锁、服务退出或客户端断开时的协议意图；父端同时终止 Job，因此不会等待被驱动或推理阻塞的 worker 自愿退出。
 
+生产认证共用 5 秒预算：父服务从公共 `AUTH_REQUEST` 起计时，有界等待 worker 就绪，再把原截止时间传给本地 supervisor；相机初始化和私有 IPC 等待计入剩余预算。supervisor 的读取等待截断为剩余时间，读取或身份回调返回后再次检查截止时间，迟到结果不能认证成功。worker 配置默认 `authTimeoutSeconds=5`，其 pipeline 继承从相机初始化前开始的截止时间，曝光准备和调节不重置它。截止时间在父进程内传递，不新增线上字段；协议仍为 v8，工具用配置字段的既有 `[1, 60]` 编解码范围保持不变。父端到时终止 Job；进程退出确认属于资源回收，不延长 CP 的认证等待上限。
+
 ## Payload 编码
 
 字符串编码为 `uint32_t charCount`，随后是恰好 `charCount` 个 UTF-16LE `wchar_t`；不带 NUL。通用字符串上限为 2048 个字符，解码后必须正好耗尽 payload。

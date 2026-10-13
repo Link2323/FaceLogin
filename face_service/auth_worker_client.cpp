@@ -39,7 +39,7 @@ AuthWorkerClient::AuthWorkerClient(auth_worker::WorkerConfig config,
                                    std::wstring executablePathOverride)
     : m_config(std::move(config)),
       m_authSupervisorTimeoutMs(authSupervisorTimeoutMs == 0
-          ? 20000 : authSupervisorTimeoutMs),
+          ? ipc::AUTH_TIMEOUT_MS : authSupervisorTimeoutMs),
       m_executablePathOverride(std::move(executablePathOverride)) {}
 
 AuthWorkerClient::~AuthWorkerClient() {
@@ -233,7 +233,8 @@ bool AuthWorkerClient::Start(std::wstring& errorMessage) {
     return true;
 }
 
-AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
+AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks,
+                                               ipc::AuthDeadline deadline) {
     AuthWorkerResult result;
     if (!IsReady() || !callbacks.reportStatus || !callbacks.isCancelled ||
         !callbacks.verifyBinding) {
@@ -243,6 +244,15 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
 
     const uint64_t requestId = m_nextRequestId++;
     const auto authStart = std::chrono::steady_clock::now();
+    const auto supervisorDeadline = authStart + std::chrono::milliseconds(m_authSupervisorTimeoutMs);
+    if (deadline == ipc::AuthDeadline{} || deadline > supervisorDeadline) {
+        deadline = supervisorDeadline;
+    }
+    if (ipc::RemainingAuthTimeMs(deadline) == 0) {
+        result.timedOut = true;
+        Stop();
+        return result;
+    }
     // This loop picks the worker's messages up via PeekNamedPipe+Sleep(1)
     // polling; on the default ~15.6 ms clock tick that Sleep actually waits a
     // full tick (measured 2026-09-03: every pickup averages half a tick and
@@ -258,8 +268,6 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
     }
 
     auth_worker::AuthExchangeValidator exchange(requestId);
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(m_authSupervisorTimeoutMs);
     while (std::chrono::steady_clock::now() < deadline) {
         if (callbacks.isCancelled()) {
             result.cancelled = true;
@@ -271,7 +279,10 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
         // Poll at 1 ms here to avoid adding a 5 ms quantum to every status,
         // binding and terminal frame; the idle preloaded worker keeps the
         // default 5 ms interval.
-        const auth_worker::ReadStatus read = m_channel.Read(message, 200, 1);
+        const DWORD remainingMs = ipc::RemainingAuthTimeMs(deadline);
+        const auth_worker::ReadStatus read = m_channel.Read(
+            message, remainingMs < 200 ? remainingMs : 200, 1);
+        if (ipc::RemainingAuthTimeMs(deadline) == 0) break;
         if (read == auth_worker::ReadStatus::Timeout) continue;
         if (IsClosedRead(read) || !exchange.HasExpectedRequestId(message.requestId)) {
             result.errorMessage = L"认证工作进程中途退出";
@@ -305,6 +316,7 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks) {
             const BindingDecision decision =
                 callbacks.verifyBinding(embedding, bindingIndex, preNorm,
                                         yawDeg, pitchDeg);
+            if (ipc::RemainingAuthTimeMs(deadline) == 0) break;
             auth_worker::MessageType response = auth_worker::MessageType::MatchRetry;
             std::vector<uint8_t> payload;
             if (decision.kind == BindingDecisionKind::Accept) {

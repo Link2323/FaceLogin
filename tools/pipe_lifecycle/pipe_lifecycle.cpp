@@ -314,6 +314,72 @@ bool VerifyEventDrivenClient() {
     return true;
 }
 
+bool VerifyClientAuthTimeout(int mode) {
+    facelogin::PipeServer server;
+    HANDLE releaseEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE terminalEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!releaseEvent || !terminalEvent) {
+        if (releaseEvent) CloseHandle(releaseEvent);
+        if (terminalEvent) CloseHandle(terminalEvent);
+        return false;
+    }
+    std::thread serverThread([&]() {
+        if (!server.WaitForClient(5000, kClientEventTestPipeName)) return;
+        if (mode == 1) {
+            while (WaitForSingleObject(releaseEvent, 30) == WAIT_TIMEOUT) {
+                if (!server.WriteMessage(std::wstring(facelogin::ipc::MSG_STATUS_PREFIX) +
+                                         L"still-running")) break;
+            }
+        } else if (mode == 3) {
+            Sleep(350);
+            server.WriteMessage(L"AUTH_ERROR:late terminal");
+        } else {
+            WaitForSingleObject(releaseEvent, 7000);
+        }
+    });
+    Sleep(50);
+    auto client = std::make_unique<facelogin::PipeClient>();
+    bool connected = client->Connect(5000, kClientEventTestPipeName);
+    auto deadline = mode == 0 ? facelogin::ipc::AuthDeadline{} :
+                               facelogin::ipc::MakeAuthDeadline(300);
+    if (mode == 2) Sleep(200); // request preparation already consumed this time
+    std::atomic<int> callbacks{0}, statuses{0};
+    std::atomic<bool> timeoutOk{false};
+    const auto started = std::chrono::steady_clock::now();
+    const bool readerStarted = connected && client->StartBackgroundRead(
+        [&](bool success, const std::wstring& message) {
+            ++callbacks;
+            timeoutOk.store(success && message == facelogin::ipc::MSG_AUTH_TIMEOUT &&
+                            !client->IsConnected());
+            client.reset(); // timeout callback must support same-thread destruction
+            SetEvent(terminalEvent);
+        }, [&](const std::wstring&) { ++statuses; }, deadline);
+    const DWORD wait = readerStarted ? WaitForSingleObject(terminalEvent, 6500) : WAIT_FAILED;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    if (client) {
+        client->Disconnect();
+        client.reset();
+    }
+    SetEvent(releaseEvent);
+    serverThread.join();
+    server.Close();
+    CloseHandle(releaseEvent);
+    CloseHandle(terminalEvent);
+    const long long lower = mode == 0 ? 4900 : 0;
+    const long long upper = mode == 0 ? 5500 : mode == 2 ? 250 : 500;
+    const bool passed = wait == WAIT_OBJECT_0 && timeoutOk.load() &&
+        callbacks.load() == 1 && elapsed >= lower && elapsed < upper &&
+        (mode != 1 || statuses.load() > 0);
+    if (!passed) {
+        std::cerr << "FAIL: client auth timeout mode=" << mode << " ms=" << elapsed
+                  << " callbacks=" << callbacks.load() << " statuses=" << statuses.load() << "\n";
+    } else {
+        std::cout << "client_auth_timeout_mode=" << mode << " elapsed_ms=" << elapsed << "\n";
+    }
+    return passed;
+}
+
 HANDLE ConnectTestClient() {
     HANDLE h = CreateFileW(kReadTestPipeName, GENERIC_READ | GENERIC_WRITE, 0,
                            nullptr, OPEN_EXISTING, 0, nullptr);
@@ -701,6 +767,9 @@ int main(int argc, char** argv) {
 
     if (verify30s && !VerifyDefaultDeadlineReleaseInstance()) return 1;
     if (!VerifyEventDrivenClient()) return 1;
+    for (int mode = 0; mode < 4; ++mode) {
+        if (!VerifyClientAuthTimeout(mode)) return 1;
+    }
     if (!VerifyRemoteRejection()) return 1;
     if (!VerifyStopCancelsPipeWait()) return 1;
     if (!VerifyReadTimeoutReleasesInstance()) return 1;

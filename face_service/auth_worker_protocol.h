@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include "../common/recognizer_profile.h"
+#include "../common/ipc_protocol.h"
 
 #include <cstdint>
 #include <string>
@@ -161,7 +162,7 @@ private:
 struct WorkerConfig {
     int cameraRotation = 0;
     float antiSpoofThreshold = 0.28f;
-    int authTimeoutSeconds = 15;
+    int authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
     std::wstring cameraDevice;
     // v7 trailing field. Fast unlock: 3 counted PAD frames, every frame
     // binds identity. Wire format: I32, must be 0 or 1.

@@ -4,6 +4,7 @@
 #include "face_gain_tune.h"
 #include "onnx_models.h"
 #include "../common/frame_image.h"
+#include "../common/ipc_protocol.h"
 
 #include <functional>
 #include <string>
@@ -64,7 +65,7 @@ struct AuthPipelineCallbacks {
 
 struct AuthPipelineConfig {
     float antiSpoofThreshold = 0.28f;
-    int authTimeoutSeconds = 15;
+    int authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
     int cameraRotation = 0;
     // Fast unlock: 3 counted frames, every frame binds identity (the
     // default 5-frame plan binds counted frames 1/3/5). Security
@@ -74,6 +75,8 @@ struct AuthPipelineConfig {
     // (camera_tune.state in the data dir, face_gain_tune.h). Empty disables
     // persistence and replay.
     std::wstring tuneStatePath;
+    // Hosts pass their original deadline so preparation consumes the same budget.
+    ipc::AuthDeadline authDeadline{};
 };
 
 struct AuthPipelineResult {

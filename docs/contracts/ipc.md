@@ -41,6 +41,10 @@
 
 ## 消息表
 
+单次认证上限由 `ipc::AUTH_TIMEOUT_SECONDS` 定义，当前为 **5 秒**。Credential Provider 从 `StartAuth` 进入认证状态起使用单调时钟计时，连接、发送请求和等待终态共用同一截止时间；`STATUS:` 不延长预算。服务收到 `AUTH_REQUEST` 后建立本轮截止时间，模型等待、相机初始化、曝光准备、身份绑定和 PAD 均计入；阶段切换不重新计时。
+
+时限耗尽返回 `AUTH_TIMEOUT`。即使服务不回应，CP 的后台 overlapped 读取也在自身截止时间主动取消 I/O、关闭管道，并以本地 `AUTH_TIMEOUT` 驱动同一失败状态，不依赖 LogonUI 再次调用 `GetSerialization`。截止时间之后收到的终态不用于放行凭据；结束本轮后按原重试交互发起新一轮。Windows 接收凭据后的登录处理不属于人脸识别预算。
+
 | 消息 | 方向 | 当前行为 |
 |---|---|---|
 | `AUTH_REQUEST` | CP → 服务 | 发起一次认证 |

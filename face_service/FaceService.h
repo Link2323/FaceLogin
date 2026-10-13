@@ -141,9 +141,9 @@ private:
     void StopModelWorker();
     void RequestModelLoad(const wchar_t* reason);
     void RequestModelUnload(const wchar_t* reason);
-    std::shared_ptr<InferenceModels> AcquireModelsForAuth();
+    std::shared_ptr<InferenceModels> AcquireModelsForAuth(ipc::AuthDeadline deadline);
     std::shared_ptr<InferenceModels> LoadInferenceModels(ModelLoadFailure& failureReason);
-    std::shared_ptr<AuthWorkerClient> AcquireAuthWorkerForAuth();
+    std::shared_ptr<AuthWorkerClient> AcquireAuthWorkerForAuth(ipc::AuthDeadline deadline);
     std::shared_ptr<AuthWorkerClient> LoadAuthenticationWorker(const AppConfig& config,
                                                                 std::wstring& errorMessage);
     void MarkAuthWorkerConsumed(bool preloadReplacement);
@@ -185,7 +185,7 @@ private:
     std::wstring m_dataDir;
     std::wstring m_modelsDir;
     float m_matchThreshold = 0.30f;
-    int m_authTimeoutSeconds = 15;
+    int m_authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
 
     // --- Session-aware model residency ---
     std::shared_ptr<InferenceModels> m_models;

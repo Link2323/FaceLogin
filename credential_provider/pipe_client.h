@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include "../common/ipc_protocol.h"
 #include <atomic>
 #include <string>
 #include <functional>
@@ -39,15 +40,17 @@ public:
     bool Connect(DWORD timeoutMs = 5000, const wchar_t* pipeName = nullptr);
 
     // Send a message to the server. Returns true on success.
-    bool SendMessage(const std::wstring& message);
+    bool SendMessage(const std::wstring& message, DWORD timeoutMs = ipc::AUTH_TIMEOUT_MS);
 
     // Spawn a background thread that loops reading messages from the pipe.
     // STATUS: messages trigger onStatus (if set).
     // Terminal messages (AUTH_SUCCESS/AUTH_TIMEOUT/AUTH_ERROR/etc.) trigger
-    // onResponse once and the thread exits.
+    // onResponse once and the thread exits. The original auth deadline also
+    // bounds silent reads and STATUS streams; expiry reports AUTH_TIMEOUT.
     // Returns false if the reader could not be started; no callback will run.
     bool StartBackgroundRead(OnResponseCallback onResponse = nullptr,
-                             OnStatusCallback onStatus = nullptr);
+                             OnStatusCallback onStatus = nullptr,
+                             ipc::AuthDeadline deadline = {});
 
     // Check if connected
     bool IsConnected() const { return m_connected; }
@@ -61,6 +64,7 @@ private:
     static DWORD WINAPI ReadThreadProc(LPVOID param);
     void CleanupReadThread();
     void NotifyReadFailure();
+    void NotifyReadTimeout();
 
     HANDLE m_hPipe = INVALID_HANDLE_VALUE;
     // Written by the read thread (pipe breakage) and by the owning thread
@@ -75,6 +79,7 @@ private:
     // happens-before), never touched afterwards.
     OnResponseCallback m_onResponse;
     OnStatusCallback   m_onStatus;
+    ipc::AuthDeadline m_authDeadline{};
 };
 
 } // namespace facelogin

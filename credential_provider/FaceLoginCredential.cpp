@@ -681,25 +681,14 @@ STDMETHODIMP FaceLoginCredential::GetSerialization(
     }
 
     if (m_state == State::Authenticating) {
-        // Terminal results arrive exclusively via OnPipeResponse on the pipe
-        // read thread (a dead service breaks the pipe and is reported there
-        // within one 50 ms poll). This polling-side guard only bounds the
-        // rare case where LogonUI polls us while Authenticating (e.g. the
-        // user pressed Enter) and the service never answers at all.
-        LONGLONG now = 0;
-        GetSystemTimeAsFileTime(reinterpret_cast<FILETIME*>(&now));
-        if (m_authStartTime == 0) {
-            m_authStartTime = now;
-        } else {
-            // Preserve the established public-auth timeout: 15s service
-            // window plus 5s grace for pipe delivery/serialization.
-            const LONGLONG AUTH_TIMEOUT_100NS = 200000000LL;
-            if (now - m_authStartTime > AUTH_TIMEOUT_100NS) {
-                FACELOGIN_WARN(L"Auth timed out waiting for service response");
-                PresentRetryableFailure(State::Failed, L"识别超时，请重试");
-                *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
-                return S_OK;
-            }
+        // The background reader enforces this deadline even without LogonUI polls.
+        const auto authDeadline = m_authDeadline.load();
+        if (authDeadline != facelogin::ipc::AuthDeadline{} &&
+            facelogin::ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+            FACELOGIN_WARN(L"Auth timed out waiting for service response");
+            PresentRetryableFailure(State::Failed, L"识别超时，请重试");
+            *pcpgsr = CPGSR_NO_CREDENTIAL_FINISHED;
+            return S_OK;
         }
         // Not ready yet — LogonUI re-polls GetSerialization when auto-logon
         // is set; OnPipeResponse flips the state and re-enumerates.
@@ -793,12 +782,6 @@ STDMETHODIMP FaceLoginCredential::ReportResult(
 // ============================================================================
 
 void FaceLoginCredential::StartAuth() {
-    // Single reset point for the polling-side deadline: every round (first
-    // attempt, explicit retry, re-armed watcher trigger) enters here, so a
-    // round can never inherit the start time of an earlier, aborted one and
-    // be instantly judged "timed out" by GetSerialization.
-    m_authStartTime = 0;
-
     // StartAuth runs on the input-detection thread (auto-trigger / explicit
     // retry) or the LogonUI thread (command link). It does NOT take m_cs:
     // the pipe callbacks (OnPipeResponse/OnPipeStatus) run on the pipe read
@@ -810,14 +793,22 @@ void FaceLoginCredential::StartAuth() {
         return;
     }
 
+    const auto authDeadline = facelogin::ipc::MakeAuthDeadline();
+    m_authDeadline.store(authDeadline);
     m_state = State::Authenticating;
     m_pipeClient = std::make_unique<facelogin::PipeClient>();
 
-    if (m_pipeClient->Connect()) {
-        if (!m_pipeClient->SendMessage(facelogin::ipc::MSG_AUTH_REQUEST)) {
+    if (m_pipeClient->Connect(facelogin::ipc::RemainingAuthTimeMs(authDeadline))) {
+        if (facelogin::ipc::RemainingAuthTimeMs(authDeadline) == 0 ||
+            !m_pipeClient->SendMessage(facelogin::ipc::MSG_AUTH_REQUEST,
+                                      facelogin::ipc::RemainingAuthTimeMs(authDeadline))) {
             FACELOGIN_WARN(L"Failed to send authentication request");
             m_pipeClient->Disconnect();
-            PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+            if (facelogin::ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+                PresentRetryableFailure(State::Failed, L"识别超时，请重试");
+            } else {
+                PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+            }
             return;
         }
 
@@ -836,7 +827,7 @@ void FaceLoginCredential::StartAuth() {
             },
             [this](const std::wstring& msg) {
                 OnPipeStatus(msg);
-            })) {
+            }, authDeadline)) {
             FACELOGIN_WARN(L"Failed to start authentication response reader");
             m_pipeClient->Disconnect();
             PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
@@ -845,7 +836,11 @@ void FaceLoginCredential::StartAuth() {
         FACELOGIN_INFO(L"Pipe connected, auth request sent");
     } else {
         FACELOGIN_WARN(L"Failed to connect to face service pipe");
-        PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+        if (facelogin::ipc::RemainingAuthTimeMs(authDeadline) == 0) {
+            PresentRetryableFailure(State::Failed, L"识别超时，请重试");
+        } else {
+            PresentRetryableFailure(State::Error, L"人脸登录服务不可用");
+        }
     }
 }
 
@@ -1180,7 +1175,7 @@ void FaceLoginCredential::PresentRetryableFailure(
     }
 
     m_state = failureState;
-    m_authStartTime = 0;
+    m_authDeadline.store({});
     SetStatusText(statusText.empty() ? L"人脸识别失败" : statusText);
 
     // A terminal state ends any pending Ready handoff — the retained packed

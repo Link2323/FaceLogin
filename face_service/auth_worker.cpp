@@ -400,7 +400,8 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
                                              config.authTimeoutSeconds,
                                              config.cameraRotation,
                                              config.fastUnlock,
-                                             dataDir + L"\\camera_tune.state"},
+                                             dataDir + L"\\camera_tune.state",
+                                             authStart + std::chrono::seconds(config.authTimeoutSeconds)},
                           std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
     const auto pipelineDoneAt = std::chrono::steady_clock::now();
