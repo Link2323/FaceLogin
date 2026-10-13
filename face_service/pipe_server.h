@@ -34,7 +34,7 @@ public:
 
     // Create the named pipe instance (security descriptor + handle) WITHOUT
     // blocking for a client. Separated from WaitForClient so the create→close
-    // cycle can be driven directly (dev tool tools/pipe_lifecycle).
+    // cycle can be driven directly.
     // pipeName overrides ipc::PIPE_NAME (used by the dev tool to avoid
     // colliding with a live service's single instance); nullptr = production
     // name.
@@ -42,7 +42,7 @@ public:
                             const wchar_t* pipeName = nullptr);
 
     // Number of SetEntriesInAclW allocations not yet LocalFree'd. Dev/test
-    // aid for the per-instance ACL ownership fix (tools/pipe_lifecycle): an
+    // aid for the per-instance ACL ownership fix: an
     // absolute-format security descriptor does NOT own its DACL, so one ACL
     // used to leak per pipe instance. Must read 0 after every Close().
     static long OutstandingAclAllocations() { return g_aclAllocations.load(); }

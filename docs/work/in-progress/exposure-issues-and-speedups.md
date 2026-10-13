@@ -136,7 +136,7 @@ flowchart TD
 
 同时评价正常速度有无退化、环境变化的成功率和慢尾、写入/重放/纠正次数。先测出改善幅度再承诺时间目标。照片在身份门先被拒绝的轮次，不能用于量化 PAD 防照片能力。
 
-必要验证为 Service/Console Release、AuthPipelineTest、FaceGainTuneTest、ExposureWarmupTest、LivenessTimingTest、AuthWorkerProtocolTest、ModelIntegrityTest、AuthWorkerLifecycleTest；相机生命周期变更另做指定设备 CameraLifecycleTest child 100 轮与 Session 0，持久化变化联查注册 GUI。命令以 [`BUILD.md`](../../BUILD.md) 为准。
+必要验证为 Service/Console Release、AuthPipelineTest、FaceGainTuneTest、ExposureWarmupTest、LivenessTimingTest、AuthWorkerProtocolTest、ModelIntegrityTest；worker 生命周期变更另做进程/Job 故障注入，相机生命周期变更另做指定设备 CameraLifecycleTest child 100 轮与 Session 0，持久化变化联查注册 GUI。命令以 [`BUILD.md`](../../BUILD.md) 为准。
 
 2026-10-13 第 1 项修复的自动验证：Service/Console Release 构建及以上七项测试全部通过；`AuthWorkerLifecycleTest` 使用 mock worker 执行 100 轮，不能替代真实相机生命周期。`FaceGainTuneTest` 还重放既有 `exposure-response-20260919-validation.csv`，稳定门规则保持。原复现及三个对照均 PASS，修复后逐项输出与源码哈希见 [`results-after.json`](../../../build/diagnostics/stale-replay/results-after.json)，完整流水线输出见 [`auth-pipeline-test.log`](../../../build/diagnostics/stale-replay/auth-pipeline-test.log)。未部署新版到系统，真实光照切换、standalone、注册 GUI 和锁屏验收尚未执行。
 

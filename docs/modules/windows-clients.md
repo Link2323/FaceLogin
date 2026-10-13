@@ -116,7 +116,7 @@ Credential Provider 和 Enrollment 直接信任注册表 DataPath，读取不到
 Credential Provider 改动：
 
 - Release 构建
-- `CredentialProviderInteractionPolicyTest`
+- 键盘/鼠标触发、取消及密码磁贴切换
 - COM 注册/注销
 - 无用户时磁贴隐藏
 - 登录与解锁场景

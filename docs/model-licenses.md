@@ -21,7 +21,7 @@
 | `MiniFASNetV2.onnx` | [yakhyo 的 weights 发布](https://github.com/yakhyo/face-anti-spoofing/releases/tag/weights)，同名 ONNX | 直接下载及哈希核验，无本地权重转换 | [yakhyo LICENSE](https://github.com/yakhyo/face-anti-spoofing/blob/main/LICENSE)、[MiniVision 上游 LICENSE](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/LICENSE) |
 | `MiniFASNetV1SE.onnx` | 同上，同名 ONNX | 直接下载及哈希核验，无本地权重转换 | 同上 |
 
-上述文件分别提供人脸检测/五关键点、128 维 SFace 人脸识别、2.7× 裁剪活体检测和 4.0× 裁剪活体检测。FaceLogin 的原始下载与处理事实源为 `scripts/download_models.ps1`、`scripts/normalize_scrfd_export.py`、`scripts/download_minifas_models.ps1` 及 `tools/threshold_calibration/quantize_*.py`。
+上述文件分别提供人脸检测/五关键点、128 维 SFace 人脸识别、2.7× 裁剪活体检测和 4.0× 裁剪活体检测。FaceLogin 的原始下载与处理事实源为 `scripts/download_models.ps1`、`scripts/normalize_scrfd_export.py`、`scripts/normalize_sface_export.py`、`scripts/download_minifas_models.ps1` 及 `tools/threshold_calibration/quantize_scrfd.py`。
 
 ## 检测模型的来源核对
 

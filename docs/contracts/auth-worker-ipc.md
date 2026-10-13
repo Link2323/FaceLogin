@@ -119,4 +119,4 @@ worker 每次最多处理一个 `StartAuth`。成功、失败或超时终态写�
 
 ## 验证入口
 
-`AuthWorkerProtocolTest` 覆盖消息往返、超长/截断、magic/version/type、配置边界、128 维 SFace、NaN/Inf/异常范数、binding 越序/重复/缺失和 request ID 不一致。`AuthWorkerLifecycleTest` 使用同一父端 supervisor 的 mock worker 覆盖启动失败、模型失败、崩溃、超时、断管、取消、100 次创建/认证/退出以及父进程退出时 Job 杀死子进程。
+`AuthWorkerProtocolTest` 覆盖消息往返、超长/截断、magic/version/type、配置边界、128 维 SFace、NaN/Inf/异常范数、binding 越序/重复/缺失和 request ID 不一致。worker 生命周期需另行通过进程/Job 故障注入验证启动失败、模型失败、崩溃、超时、断管、取消、重复创建/认证/退出以及父进程退出时 Job 杀死子进程。
