@@ -414,8 +414,10 @@ AuthPipelineResult AuthPipeline::Run() {
         // pay one bbox luma pass and zero extra inference. In-band rounds
         // take the early return, which also refreshes the persisted combo;
         // only an actual tune invalidates the seed frame.
+        FaceTuneRecovery tuneRecovery;
         GainTuneConfig tuneCfg;
         tuneCfg.persistPath = m_config.tuneStatePath;
+        if (!tuneCfg.persistPath.empty()) tuneCfg.recovery = &tuneRecovery;
         const auto seedRefreshAt = std::chrono::steady_clock::now();
         if (!seed.valid && !interrupted()) {
             FrameImage fresh;
@@ -697,6 +699,22 @@ AuthPipelineResult AuthPipeline::Run() {
                                     static_cast<long>(cur.det->y1),
                                     static_cast<long>(cur.det->x2),
                                     static_cast<long>(cur.det->y2));
+
+            // Resume only interrupted sensor writes, before any frame counts.
+            // The independent gate consumes fresh frames and the original
+            // deadline; the old trigger is discarded even when it fails.
+            if (totalChecked == 0 && tuneRecovery.pending && !tuneRecovery.attempted) {
+                const float luma = FaceRegionLuma(cur.frame, faceRect);
+                if (luma >= tuneCfg.minFaceLuma && luma <= tuneCfg.maxFaceLuma) {
+                    timing.Suspend(std::chrono::steady_clock::now());
+                    ConfirmPendingFaceTune(sensorKnobs, m_callbacks.grabFrame, m_detector,
+                        [&] { return interrupted() || m_callbacks.isClientDisconnected(); },
+                        m_config.cameraRotation, cur.seq, tuneCfg);
+                    timing.Resume(std::chrono::steady_clock::now());
+                    if (interrupted()) return result;
+                    continue;
+                }
+            }
 
             // The correction gate sits BEFORE the first binding attempt and
             // before the first counted frame: sensor parameters must never

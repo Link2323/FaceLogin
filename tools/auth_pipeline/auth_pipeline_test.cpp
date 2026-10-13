@@ -336,9 +336,102 @@ void TestNoFaceDarkRecovery(bool lateEntry = false, bool padPass = true,
                 std::chrono::duration<double>(Clock::now() - start).count(),
                 writes, bindings, result.succeeded);
 }
+enum class TuneRecoveryScene { Stable, PadFailure, IdentityReject, Cancel, Disconnect, Drift, Frozen };
+
+void TestInterruptedTuneRecovery(TuneRecoveryScene scene = TuneRecoveryScene::Stable) {
+    wchar_t dir[MAX_PATH]{}, path[MAX_PATH]{};
+    Check(GetTempPathW(MAX_PATH, dir) && GetTempFileNameW(dir, L"ftr", 0, path),
+          "create interrupted-tune checkpoint");
+    if (!*path) return;
+    struct Cleanup { const wchar_t* path; ~Cleanup() { DeleteFileW(path); } } cleanup{path};
+    long exposure = -9;
+    bool hideNext = false;
+    bool lost = false;
+    unsigned int afterLoss = 0;
+    std::vector<long> writes;
+    SensorKnobs knobs;
+    knobs.exposureRange = [](long& lo, long& hi, long& step) {
+        lo = -11; hi = -1; step = 1; return true;
+    };
+    knobs.exposureGet = [&](long& value) { value = exposure; return true; };
+    knobs.exposureSet = [&](long value) {
+        exposure = value; writes.push_back(value); hideNext = value == -8; return true;
+    };
+    knobs.exposureIsManual = [](bool& manual) { manual = true; return true; };
+    knobs.gainRange = [](long& lo, long& hi, long& step) {
+        lo = 0; hi = 63; step = 1; return true;
+    };
+    knobs.gainGet = [](long& value) { value = 63; return true; };
+    knobs.gainSet = [](long) { return true; };
+    Check(SaveTuneKnobState(path, knobs), "seed interrupted-tune checkpoint");
+    g_minDetectLuma = 1;
+    g_padScore = scene == TuneRecoveryScene::PadFailure ? 0.0f : 1.0f;
+    for (int round = 0; round < (scene == TuneRecoveryScene::Stable ? 2 : 1); ++round) {
+        unsigned long long sequence = 0;
+        unsigned int bindings = 0;
+        const size_t startWrites = writes.size();
+        const auto result = Run(true,
+            [&](const std::vector<float>&, unsigned int, float, float, float) {
+                ++bindings;
+                return BindingDecision{scene == TuneRecoveryScene::IdentityReject
+                    ? BindingDecisionKind::Reject : BindingDecisionKind::Accept, {}};
+            }, [&] { return scene == TuneRecoveryScene::Cancel && afterLoss >= 3; },
+            [] { return false; }, scene == TuneRecoveryScene::Frozen ? 1 : ipc::AUTH_TIMEOUT_SECONDS,
+            [&] { return scene == TuneRecoveryScene::Disconnect && afterLoss >= 3; },
+            [&](AuthPipelineCallbacks& callbacks, AuthPipelineConfig& config) {
+                config.tuneStatePath = path;
+                callbacks.sensorKnobs = knobs;
+                callbacks.grabFrame = [&](FrameImage& frame, unsigned long long& seq) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    frame = FrameImage(160, 160);
+                    if (lost) ++afterLoss;
+                    const unsigned char luma = exposure == -9 ? 22
+                        : scene == TuneRecoveryScene::Drift && lost ? 60 + afterLoss % 30 : 80;
+                    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(luma, luma, luma);
+                    if (hideNext) {
+                        frame(80, 80) = RgbPixel(0, 0, 0); hideNext = false; lost = true;
+                    }
+                    if (scene != TuneRecoveryScene::Frozen || afterLoss < 2) ++sequence;
+                    seq = sequence; return true;
+                };
+            });
+        TuneKnobState saved;
+        const bool stable = scene == TuneRecoveryScene::Stable || scene == TuneRecoveryScene::PadFailure ||
+            scene == TuneRecoveryScene::IdentityReject;
+        Check(LoadTuneKnobState(path, saved) && saved.exposure == (stable ? -8 : -9),
+              "only independently settled recovery replaces stale checkpoint");
+        if (scene == TuneRecoveryScene::Stable)
+            Check(result.succeeded && bindings == 3, "recovered tune retains all identity/PAD evidence");
+        else if (scene == TuneRecoveryScene::PadFailure || scene == TuneRecoveryScene::IdentityReject)
+            Check(!result.succeeded && bindings > 0, "settled exposure cannot bypass identity or PAD rejection");
+        else if (scene == TuneRecoveryScene::Cancel || scene == TuneRecoveryScene::Disconnect)
+            Check(result.cancelled && !result.succeeded && bindings == 0,
+                  "resumed settling aborts before binding on cancellation or disconnect");
+        else if (scene == TuneRecoveryScene::Frozen)
+            Check(result.timedOut && !result.succeeded, "resumed settling does not restart the shared deadline");
+        if (round == 1)
+            Check(writes.size() == startWrites, "unchanged scene retry does not undo recovered exposure");
+    }
+    g_minDetectLuma = 0;
+    g_padScore = 1.0f;
+    std::printf("Interrupted tune recovery scene=%d: checks complete\n", static_cast<int>(scene));
+}
+
+void TestTuneRecoveries() {
+    for (auto scene : {TuneRecoveryScene::Stable, TuneRecoveryScene::PadFailure,
+                       TuneRecoveryScene::IdentityReject, TuneRecoveryScene::Cancel,
+                       TuneRecoveryScene::Disconnect, TuneRecoveryScene::Drift,
+                       TuneRecoveryScene::Frozen}) TestInterruptedTuneRecovery(scene);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--tune-recovery") == 0) {
+        TestTuneRecoveries();
+        return g_failures == 0 ? 0 : 1;
+    }
+    TestTuneRecoveries();
     TestNoFaceDarkRecovery();
     if (argc == 2 && std::strcmp(argv[1], "--dark-recovery") == 0)
         return g_failures == 0 ? 0 : 1;

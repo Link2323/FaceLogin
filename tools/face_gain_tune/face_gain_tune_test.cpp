@@ -130,6 +130,50 @@ void TestUnconfirmedProgressIsNotSaved() {
     }
 }
 
+void TestPendingTuneConfirmation() {
+    // Exercise the shared entry used by worker, standalone and preview:
+    // changing the knobs is insufficient; resumption must measure and check
+    // the same manual combo before and after a fresh stable window.
+    for (int scenario = 0; scenario < 11; ++scenario) {
+        StateFile file;
+        Sensor sensor;
+        auto knobs = sensor.Knobs();
+        FaceTuneRecovery recovery;
+        auto cfg = Config(file);
+        cfg.recovery = &recovery;
+        Check(SaveTuneKnobState(file.path, knobs), "seed pending confirmation checkpoint");
+        TuneFaceExposure(27, knobs, [](float&) { return false; }, noCancel, cfg);
+        Check(recovery.pending && sensor.gain == 55, "lost settle measurement retains pending write");
+        cfg.settleMs = 900;
+        cfg.settleFrames = 10;
+        if (scenario == 4) sensor.gain = 56;
+        if (scenario == 5) knobs.exposureIsManual = [](bool& manual) { manual = false; return true; };
+        if (scenario == 6) { recovery.beforeLuma = 80; recovery.direction = 1; }
+        if (scenario == 9) knobs.exposureIsManual = [](bool&) { return false; };
+        if (scenario == 10) knobs.gainGet = [](long&) { return false; };
+        int samples = 0;
+        bool cancelled = false;
+        const auto measure = [&](float& luma) {
+            ++samples;
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            luma = scenario == 3 ? 60.0f + samples : scenario == 7 ? 130.0f : 80.0f;
+            if (scenario == 2) cancelled = true;
+            if (scenario == 8 && samples == 2) sensor.gain = 56;
+            return scenario != 1;
+        };
+        const bool confirmed = ConfirmPendingFaceTune(knobs, measure, [&] { return cancelled; }, cfg);
+        TuneKnobState saved;
+        Check(confirmed == (scenario == 0), "only unchanged, uncancelled stable in-band recovery confirms");
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == (scenario == 0 ? 55 : 50),
+              "lost, drifting, no-response, changed-mode/value or off-band recovery keeps checkpoint");
+        if (scenario != 0) {
+            TuneFaceExposure(80, knobs, measure, noCancel, cfg);
+            Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+                  "an in-band observation cannot bypass a failed independent confirmation");
+        }
+    }
+}
+
 void TestDarkFallbackAndBrightRecovery() {
     StateFile file;
     Sensor sensor;
@@ -715,6 +759,7 @@ int main(int argc, char** argv) {
     TestConsecutiveDarkUnlocks();
     TestMeasuredGainConvergesWithMargin();
     TestUnconfirmedProgressIsNotSaved();
+    TestPendingTuneConfirmation();
     TestDarkFallbackAndBrightRecovery();
     TestUnavailableGainFallsBackToExposure();
     TestGainlessCameraPrefersAutoExposure();

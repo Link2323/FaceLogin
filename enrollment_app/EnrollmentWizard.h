@@ -173,7 +173,8 @@ private:
     // while a capture is in flight so an enrollment sees one stable domain.
     // A null detection also permits bounded no-face white-out recovery.
     void WatchPreviewExposure(const FrameImage& frame,
-                              const OnnxDetector::Detection* det);
+                              const OnnxDetector::Detection* det,
+                              unsigned long long frameSequence);
     // Watch state, frame-thread only (StartPreview initializes before the
     // thread starts; StopPreview joins before anything else touches them).
     std::chrono::steady_clock::time_point m_lastExposureWatch{};
@@ -181,6 +182,7 @@ private:
     // Single face-box luma readings jitter (face fill ratio, ambient flicker);
     // a tune only fires on two consecutive out-of-band watch cycles.
     float m_pendingWatchLuma = -1.0f;
+    FaceTuneRecovery m_exposureRecovery;
 
     // Reads <m_dataDir>\log\<logFileName> and returns a JSON array of lines
     // for the JS log viewer (shared by Service/AuthWorker/CredentialProvider).

@@ -45,6 +45,8 @@ namespace facelogin {
 // worker's trigger measurement reuses the detection its warmup already
 // produced, so in-band scenes — the common case — pay one bbox luma pass and
 // zero extra inference.
+struct FaceTuneRecovery;
+
 struct GainTuneConfig {
     float minFaceLuma = 50.0f;    // below: dark — tune up. Equal to targetLumaLow
                                   // so no luma is simultaneously under target yet
@@ -114,6 +116,9 @@ struct GainTuneConfig {
     // target band: otherwise a budget-limited 50->58 gain adjustment is
     // undone by replaying the old 50 every round (2026-09-15).
     std::wstring persistPath;
+    // Per-camera-session state, owned by the host. Never persisted until
+    // fresh face measurements independently confirm an interrupted write.
+    FaceTuneRecovery* recovery = nullptr;
 };
 
 // Driver-facing exposure/gain controls, injected by each host (auth worker /
@@ -168,6 +173,38 @@ struct TuneKnobState {
     bool exposureManual = false;
 };
 
+struct FaceTuneRecovery {
+    bool pending = false;
+    bool attempted = false;
+    float beforeLuma = -1.0f;
+    int direction = 0;
+    TuneKnobState expected;
+
+    void Arm(float before, int dir) {
+        pending = true;
+        attempted = false;
+        beforeLuma = before;
+        direction = dir;
+        expected = {};
+    }
+};
+
+inline TuneKnobState ReadTuneKnobState(const SensorKnobs& knobs) {
+    TuneKnobState state;
+    state.hasExposure = knobs.exposureGet && knobs.exposureGet(state.exposure);
+    state.hasGain = knobs.gainGet && knobs.gainGet(state.gain);
+    state.hasExposureMode = state.hasExposure && knobs.exposureIsManual &&
+        knobs.exposureIsManual(state.exposureManual);
+    return state;
+}
+
+inline bool SameTuneKnobState(const TuneKnobState& a, const TuneKnobState& b) {
+    return a.hasExposure == b.hasExposure && (!a.hasExposure || a.exposure == b.exposure) &&
+        a.hasGain == b.hasGain && (!a.hasGain || a.gain == b.gain) &&
+        a.hasExposureMode == b.hasExposureMode &&
+        (!a.hasExposureMode || a.exposureManual == b.exposureManual);
+}
+
 // ASCII "exposure=<v>" / "gain=<v>" with optional "exposure_manual=0|1".
 // Old two-line states retain their value-only replay behavior. Missing or
 // unknown mode data never turns an AE observation into a manual-mode claim.
@@ -195,22 +232,20 @@ inline bool LoadTuneKnobState(const std::wstring& path, TuneKnobState& out) {
     return out.hasExposure || out.hasGain;
 }
 
-inline bool SaveTuneKnobState(const std::wstring& path, const SensorKnobs& knobs) {
-    long exposure = 0, gain = 0;
-    const bool haveExposure =
-        static_cast<bool>(knobs.exposureGet) && knobs.exposureGet(exposure);
-    const bool haveGain = static_cast<bool>(knobs.gainGet) && knobs.gainGet(gain);
-    if (!haveExposure && !haveGain) return false;
-    bool manual = false;
-    const bool haveMode = haveExposure && knobs.exposureIsManual &&
-        knobs.exposureIsManual(manual);
+inline bool SaveTuneKnobState(const std::wstring& path, const TuneKnobState& state) {
+    if (!state.hasExposure && !state.hasGain) return false;
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"wt") != 0 || !f) return false;
-    if (haveExposure) fprintf(f, "exposure=%ld\n", exposure);
-    if (haveGain) fprintf(f, "gain=%ld\n", gain);
-    if (haveMode) fprintf(f, "exposure_manual=%d\n", manual ? 1 : 0);
-    fclose(f);
-    return true;
+    bool written = true;
+    if (state.hasExposure) written = fprintf(f, "exposure=%ld\n", state.exposure) >= 0 && written;
+    if (state.hasGain) written = fprintf(f, "gain=%ld\n", state.gain) >= 0 && written;
+    if (state.hasExposureMode)
+        written = fprintf(f, "exposure_manual=%d\n", state.exposureManual ? 1 : 0) >= 0 && written;
+    return fclose(f) == 0 && written;
+}
+
+inline bool SaveTuneKnobState(const std::wstring& path, const SensorKnobs& knobs) {
+    return SaveTuneKnobState(path, ReadTuneKnobState(knobs));
 }
 
 // Replay a persisted combo at camera init. Values are clamped into the
@@ -326,7 +361,7 @@ inline bool GrabMeasure(const std::function<bool(FrameImage&, unsigned long long
         if (isCancelled()) return false;
         FrameImage frame;
         unsigned long long seq = 0;
-        if (grab(frame, seq) && (!haveSeq || seq != lastSeq)) {
+        if (grab(frame, seq) && (!haveSeq || seq > lastSeq)) {
             haveSeq = true;
             lastSeq = seq;
             RotateFrame(frame, cameraRotation);
@@ -556,6 +591,7 @@ inline int StepKnob(const KnobTrio& knob,
         const long prevVal = cur;
         cur = next;
         ++steps;
+        if (cfg.recovery) cfg.recovery->Arm(luma, up ? 1 : -1);
         measurementValid = false;
         float measured = -1.0f;
         const auto stepStart = std::chrono::steady_clock::now();
@@ -593,6 +629,41 @@ inline int StepKnob(const KnobTrio& knob,
 
 } // namespace detail
 
+// One bounded resumption per interrupted write. It never changes controls,
+// counts identity/PAD evidence or treats authentication success as stability.
+inline bool ConfirmPendingFaceTune(const SensorKnobs& knobs,
+                                   const std::function<bool(float&)>& measure,
+                                   const std::function<bool()>& isCancelled,
+                                   const GainTuneConfig& cfg) {
+    if (!cfg.recovery || !cfg.recovery->pending || cfg.recovery->attempted ||
+        cfg.persistPath.empty() || isCancelled()) return false;
+    auto& recovery = *cfg.recovery;
+    recovery.attempted = true;
+    const auto& expected = recovery.expected;
+    if ((!expected.hasExposure && !expected.hasGain) ||
+        (expected.hasExposure && (!expected.hasExposureMode || !expected.exposureManual)) ||
+        !SameTuneKnobState(expected, ReadTuneKnobState(knobs))) {
+        FACELOGIN_INFO(L"Interrupted camera tune not resumed: controls changed or manual mode unavailable");
+        return false;
+    }
+    float luma = -1.0f;
+    if (!detail::SettleFace(measure, isCancelled, cfg, luma,
+                            recovery.beforeLuma, recovery.direction) ||
+        isCancelled()) return false;
+    if (luma < cfg.minFaceLuma || luma > cfg.maxFaceLuma ||
+        !SameTuneKnobState(expected, ReadTuneKnobState(knobs)) || isCancelled()) {
+        FACELOGIN_INFO(L"Interrupted camera tune not saved: face luma %.2f or controls changed", luma);
+        return false;
+    }
+    if (!SaveTuneKnobState(cfg.persistPath, expected)) {
+        FACELOGIN_WARN(L"Failed to save reconfirmed camera tune");
+        return false;
+    }
+    recovery = {};
+    FACELOGIN_INFO(L"Interrupted camera tune reconfirmed: face luma %.2f — state saved", luma);
+    return true;
+}
+
 // Core entry: firstLuma is an already-measured face luma. In-band scenes
 // are a no-op unless there is enough light to reclaim a slow exposure.
 // Returns the number of steps applied on any knob. Always logs one summary
@@ -607,6 +678,10 @@ inline int TuneFaceExposure(float firstLuma,
     if (PreferAutoExposureWithoutGain(knobs, &autoChanged)) return autoChanged ? 1 : 0;
     const bool shorten = detail::CanShortenExposure(firstLuma, knobs, cfg);
     if (firstLuma >= cfg.minFaceLuma && firstLuma <= cfg.maxFaceLuma && !shorten) {
+        if (cfg.recovery && cfg.recovery->pending) {
+            ConfirmPendingFaceTune(knobs, measure, isCancelled, cfg);
+            return 0;
+        }
         // In-band: whatever the knobs hold right now is a certified combo —
         // refresh the persisted state so the next camera init can replay it
         // even after the driver forgets its manual controls.
@@ -644,6 +719,7 @@ inline int TuneFaceExposure(float firstLuma,
         long current = 0;
         if (knobs.exposureGet(current) && !isCancelled() && knobs.exposureSet(current)) {
             ++steps;
+            if (cfg.recovery) cfg.recovery->Arm(luma, 0);
             const float beforeTakeover = luma;
             const auto takeoverStart = std::chrono::steady_clock::now();
             measurementValid = detail::SettleFace(measure, isCancelled, cfg, luma);
@@ -704,6 +780,7 @@ inline int TuneFaceExposure(float firstLuma,
             !knobs.exposureSet(cur - granule)) break;
         ++steps;
         const float before = luma;
+        if (cfg.recovery) cfg.recovery->Arm(before, -1);
         measurementValid = detail::SettleFace(measure, isCancelled, cfg, luma, before, -1);
         FACELOGIN_INFO(L"Short exposure preference: %ld→%ld, face %.0f→%.0f (%s)",
                        cur, cur - granule, before, luma,
@@ -780,8 +857,12 @@ inline int TuneFaceExposure(float firstLuma,
         // reach the existing exposure fallback in a genuinely dark scene.
         if (!SaveTuneKnobState(cfg.persistPath, knobs)) {
             FACELOGIN_WARN(L"Failed to save settled camera tune progress");
+        } else if (cfg.recovery) {
+            *cfg.recovery = {};
         }
     }
+    if (steps > 0 && cfg.recovery && cfg.recovery->pending)
+        cfg.recovery->expected = ReadTuneKnobState(knobs);
     return steps;
 }
 
@@ -797,6 +878,20 @@ inline int TuneFaceExposure(float firstLuma,
     unsigned long long lastSeq = 0;
     bool haveSeq = false;
     return TuneFaceExposure(firstLuma, knobs, [&](float& luma) {
+        return detail::GrabMeasure(grab, detector, isCancelled, cameraRotation,
+                                   cfg, lastSeq, haveSeq, luma);
+    }, isCancelled, cfg);
+}
+
+inline bool ConfirmPendingFaceTune(const SensorKnobs& knobs,
+                                   const std::function<bool(FrameImage&, unsigned long long&)>& grab,
+                                   OnnxDetector& detector,
+                                   const std::function<bool()>& isCancelled,
+                                   int cameraRotation, unsigned long long afterSequence,
+                                   const GainTuneConfig& cfg) {
+    unsigned long long lastSeq = afterSequence;
+    bool haveSeq = true;
+    return ConfirmPendingFaceTune(knobs, [&](float& luma) {
         return detail::GrabMeasure(grab, detector, isCancelled, cameraRotation,
                                    cfg, lastSeq, haveSeq, luma);
     }, isCancelled, cfg);
@@ -1076,6 +1171,14 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
                         bool clipped = false;
                         return measure(sample.faceLuma, sample.sceneLuma, clipped);
                     }, isCancelled, recoveredLuma, cfg);
+                if (steps > 0 && cfg.recovery && recoveredLuma < 0.0f) {
+                    // Scene brightness is not a face response. A later face
+                    // must pass the no-response floor before this can be saved.
+                    cfg.recovery->Arm(-1.0f, 0);
+                    cfg.recovery->expected = ReadTuneKnobState(knobs);
+                } else if (steps > 0 && cfg.recovery) {
+                    *cfg.recovery = {}; // the recovery already confirmed a stable face
+                }
                 if (recoveredLuma >= 0.0f && !isCancelled()) {
                     return steps + TuneFaceExposure(recoveredLuma, knobs, grab, detector,
                                                     isCancelled, cameraRotation, cfg);
@@ -1087,6 +1190,9 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
             if (luma >= cfg.minFaceLuma && luma <= cfg.maxFaceLuma &&
                 !detail::CanShortenExposure(luma, knobs, cfg)) {
                 FACELOGIN_INFO(L"Face exposure tune: not needed (face luma %.0f)", luma);
+                if (cfg.recovery && cfg.recovery->pending)
+                    return TuneFaceExposure(luma, knobs, grab, detector, isCancelled,
+                                            cameraRotation, cfg);
                 if (!cfg.persistPath.empty()) SaveTuneKnobState(cfg.persistPath, knobs);
                 return 0;
             }

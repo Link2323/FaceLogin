@@ -393,6 +393,7 @@ bool EnrollmentWizard::StartPreview() {
         return false;
     }
 
+    m_exposureRecovery = {};
     // Face-priority gain tune — same policy as the auth worker
     // (face_gain_tune.h): under the driver's full-frame-average AE a small
     // backlit face stays dark, and the preview must show (and enrollment
@@ -403,6 +404,7 @@ bool EnrollmentWizard::StartPreview() {
         const auto noCancel = [] { return false; };
         GainTuneConfig tuneCfg;
         tuneCfg.persistPath = tuneStatePath;
+        tuneCfg.recovery = &m_exposureRecovery;
         // Fast model loads must not let a shortening/gain write race replay.
         // No pre-replay luma was measured, so early response cannot be proven.
         while (replayWrote && std::chrono::steady_clock::now() - replayAt <
@@ -435,7 +437,8 @@ bool EnrollmentWizard::StartPreview() {
         int reinitAttempts = 0;
         while (m_frameRunning) {
             FrameImage frame;
-            if (!m_webcam->GrabFrame(frame)) {
+            unsigned long long frameSequence = 0;
+            if (!m_webcam->GrabFrame(frame, &frameSequence)) {
                 // GrabFrame self-shuts down after repeated failures, which is
                 // common when a camera is taken over during lock/resume.
                 // Rebuild it here with a bounded retry budget so the preview
@@ -451,6 +454,7 @@ bool EnrollmentWizard::StartPreview() {
                                              Utf8ToWstr(m_config.camera_device))) {
                         FACELOGIN_INFO(L"Preview camera re-initialized (%d/3)",
                                        reinitAttempts);
+                        m_exposureRecovery = {};
                         reinitAttempts = 0;
                     } else {
                         FACELOGIN_WARN(L"Preview camera re-init %d/3 failed",
@@ -469,7 +473,7 @@ bool EnrollmentWizard::StartPreview() {
             std::string faceJson = "[]";
             if (m_onnxDetector) {
                 auto det = m_onnxDetector->DetectLargestFace(frame);
-                WatchPreviewExposure(frame, det ? &*det : nullptr);
+                WatchPreviewExposure(frame, det ? &*det : nullptr, frameSequence);
                 if (det) {
                     std::vector<facelogin::FaceWithKps> faces;
                     FaceWithKps fwl;
@@ -530,20 +534,35 @@ SensorKnobs EnrollmentWizard::BuildSensorKnobs() {
 }
 
 void EnrollmentWizard::WatchPreviewExposure(const FrameImage& frame,
-                                            const OnnxDetector::Detection* det) {
+                                            const OnnxDetector::Detection* det,
+                                            unsigned long long frameSequence) {
     // A capture in flight must see one stable capture domain — never move the
     // sensor between its PAD/embedding frames.
     if (m_capturing) return;
     const auto now = std::chrono::steady_clock::now();
     if (now - m_lastExposureWatch < kExposureWatchInterval) return;
     m_lastExposureWatch = now;
+    GainTuneConfig cfg;
+    cfg.persistPath = m_dataDir + L"\\camera_tune.state";
+    cfg.recovery = &m_exposureRecovery;
+    if (det && m_exposureRecovery.pending) {
+        const float luma = FaceBoxLuma(frame, *det);
+        if (luma >= cfg.minFaceLuma && luma <= cfg.maxFaceLuma) {
+            // Retry on the watch cadence, independently of identity/PAD and
+            // the write cooldown. A failed check never refreshes the cache.
+            m_exposureRecovery.attempted = false;
+            ConfirmPendingFaceTune(BuildSensorKnobs(),
+                [this](FrameImage& f, unsigned long long& s) { return m_webcam->GrabFrame(f, &s); },
+                *m_onnxDetector, [this] { return !m_frameRunning || m_capturing; },
+                m_config.camera_rotation, frameSequence, cfg);
+            return;
+        }
+    }
     if (now - m_lastExposureTune < kExposureTuneCooldown) return;
     if (PreferAutoExposureWithoutGain(BuildSensorKnobs())) {
         m_pendingWatchLuma = -1.0f;
         return;
     }
-    GainTuneConfig cfg;
-    cfg.persistPath = m_dataDir + L"\\camera_tune.state";
     if (!det) {
         m_pendingWatchLuma = -1.0f;
         if (!IsSceneWhiteout(frame) && !IsSceneDark(frame, cfg)) return;

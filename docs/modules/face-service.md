@@ -51,6 +51,10 @@ AUTH_REQUEST → worker 打开相机并认证 → 父进程匹配 SID、构造�
 
 预热与传感器控制实现见 `exposure_warmup.h`、`face_gain_tune.h` 和 `auth_pipeline.cpp`。曝光探针的使用方法见 [`BUILD.md`](../BUILD.md)。
 
+当前落带参数和已确认调节进度的保存发生在最终身份/PAD 判断前；参数的有效性以曝光测量和稳定依据为准，认证失败本身不否定参数有效，认证成功也不保证参数适合下一轮的新光照。环境切换记录、重复恢复的待验证机制及后续提速候选见 [曝光问题与解锁提速方向](../work/in-progress/exposure-issues-and-speedups.md)。
+
+调节写入因丢脸或样本预算耗尽而未确认时，共享调节器保留本次写入的亮度背景、方向和参数快照。认证在首个计帧前遇到落带人脸时最多接续复核一次：独立稳定门只采纳严格递增的新帧，使用原认证截止时间，复核前后参数及可查询的手动模式须与快照一致；通过后才更新缓存。复核不写硬件、不计身份/PAD 帧，不依赖认证结果，失败不得通过单帧落带分支补存。无脸恢复的场景亮度不能证明人脸响应，须按无响应回退条件重新确认人脸。正常稳定轮次不进入接续复核。
+
 ## 摄像头与模型
 
 SFace 正式运行导出已移除 174 个 initializer graph inputs，保留权重、节点和真正的图像输入；因此不再产生这组 ORT WARN。运行哈希由 `common/model_hashes.h` 固定，与原始上游哈希不同；来源及转换记录见 `third_party/models/sface/provenance.json`。已有 V6/SFC1 人脸库保持兼容，本次不改识别阈值或要求重录。原生输出与旧库对照、初始化/推理取舍见 [`sface-performance.md`](../work/completed/sface-performance.md)。
