@@ -79,7 +79,7 @@ Service、Console Release 已构建；AuthWorkerProtocolTest、ModelIntegrityTes
 
 本轮未运行安装器、替换当前安装文件或重启服务；实机步骤由用户完成。测试用一次性打包脚本已清理。
 
-相关旧事实另记两处：`app.go` 的配置注释写“强制更新阈值”，但 `EnsureConfigDefaults` 实际在 config 已存在时直接返回，现有参数被保留；`ExposureResponseProbe` 未被标记 `EXCLUDE_FROM_ALL`，因此普通 CMake 构建仍会编译该离线工具，资源白名单核对确认它没有入包。两项均未在本次扩大修改范围。
+相关旧事实另记两处：`app.go` 的配置注释写“强制更新阈值”，但 `EnsureConfigDefaults` 实际在 config 已存在时直接返回，现有参数被保留；当时 `ExposureResponseProbe` 未被标记 `EXCLUDE_FROM_ALL`，普通 CMake 构建仍会编译该离线工具，资源白名单核对确认它没有入包。后续打包流程已将探针排除出默认构建，并显式构建三个产品目标；配置注释的不一致仍保留。
 
 <a id="installed-unlock-test"></a>
 

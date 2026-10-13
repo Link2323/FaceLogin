@@ -25,4 +25,5 @@ add_executable(ExposureResponseProbe exposure_response_probe.cpp
 target_include_directories(ExposureResponseProbe PRIVATE ${CMAKE_SOURCE_DIR}/face_service)
 target_link_libraries(ExposureResponseProbe PRIVATE facelogin_common strmiids advapi32 ole32)
 set_target_properties(ExposureResponseProbe PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")

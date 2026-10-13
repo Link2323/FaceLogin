@@ -47,16 +47,17 @@ cmake --build build --config Release --target AuthWorkerProtocolTest CredentialS
 ### 推荐：一键构建
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 ```
 
-脚本负责构建 C++、恢复前端依赖、生成许可声明、构建 slim 卸载器、按白名单同步资源、打包载荷、运行安装器测试并生成完整安装包。完成后输出路径、大小、SHA-256 和 ProductVersion。
+脚本只负责产品构建与打包：显式串行构建 `FaceLoginService`、`FaceLoginCredentialProvider`、`FaceLoginConsole`，恢复前端依赖、生成许可声明、构建 slim 卸载器、按白名单同步资源和已有模型、压缩载荷并生成完整安装包。不构建或运行 `tools/` 下的测试/诊断程序，不执行 `go test`。前端的 TypeScript 编译属于产品构建。完成后输出路径、大小、SHA-256 和 ProductVersion。
 
 ### 构建环境排障
 
-- **MSBuild 退出码 1，却无具体错误**：用 `cmake --build build --config Release --parallel 1` 重试，通过后按下方手动流程打包。2026-10-12 本机串行构建通过，并行失败根因尚未确认；一键脚本目前固定使用 `--parallel`。
-- **npm 报 `spawn EPERM` 或缓存无法写入**：检查沙箱与执行权限，允许构建子进程启动和 npm 缓存写入后重试。
-- **PowerShell 找不到 `Get-FileHash`**：改用 PowerShell 7，或清除传入 Windows PowerShell 5.1 子进程的 `PSModulePath`，让它恢复默认模块路径。5.1 本身支持该命令；本机已复现继承模块路径导致命令不可用。
+- **MSBuild 的 `PATH` / `Path` 重复键或并行失败**：一键脚本在进程内归一化环境变量大小写（合并 PATH 条目），并固定 `--parallel 1`；不修改用户或系统环境。并行失败的底层原因尚未确认，串行是已验证的规避方式。
+- **npm 报 `spawn EPERM` 或缓存无法写入**：脚本默认使用 `build/npm-cache`，保留已设置的 `NPM_CONFIG_CACHE`。构建宿主仍须允许 npm/Node 启动子进程及 Go/npm 缓存写入；Codex 内应在调用完整脚本时使用允许构建的执行权限。脚本不能自行绕过宿主沙箱。
+- **Windows PowerShell 5.1 继承 PowerShell 7 的模块路径**：脚本在 Desktop 版恢复标准模块搜索目录，避免 `Get-FileHash` 等内置命令无法加载。
+- **Wails `-clean` 删除旧产物后受文件锁影响**：一键脚本不再使用 `-clean`，保留构建产物的新鲜度判断；失败立即停止，不自动重复整条构建流程。
 
 ### 手动构建与核对
 
@@ -64,12 +65,14 @@ powershell -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 
 SFace 自 2026-10-04 起使用清理 initializer graph inputs 的规范化 FP32 文件，运行哈希与原始上游不同；文件名和载荷数量不变。普通构建复用 `assets/models/` 已验证文件；确需补模型时，下载器验证上游、规范化并验证衍生哈希后才替换。不得把原始上游文件直接放入载荷。
 
-1. 构建 C++ Release。
+1. 显式串行构建产品目标：`cmake --build build --config Release --target FaceLoginService FaceLoginCredentialProvider FaceLoginConsole --parallel 1`。
 2. 运行 `npm --prefix installer/FaceLoginSetup/frontend ci`，再运行 `scripts/update_third_party_notices.ps1`。
 3. 在 `installer/FaceLoginSetup/` 构建 slim 卸载器：`wails build -tags slim -platform windows/amd64 -ldflags "-s -w"`；将生成的 EXE 复制到 `resources/uninstall.exe`。
 4. 将 Service、Credential Provider 和恰好五个运行时 DLL 复制到 `resources/`。Console 与四个模型已由 CMake 放入该目录。
-5. 按下方白名单清理并核对 `resources/`，运行 `scripts/make_payload.ps1`，再于安装器目录执行 `go test ./...`。
-6. 运行 `wails build -clean -platform windows/amd64 -ldflags "-s -w"`。
+5. 按下方白名单清理并核对 `resources/`，运行 `scripts/make_payload.ps1`。
+6. 运行 `wails build -platform windows/amd64 -ldflags "-s -w"`。
+
+开发验证与打包分开：安装器 Go 代码变更后在 `installer/FaceLoginSetup/` 单独运行 `go test ./...`，C++ 测试按目标显式构建和运行。
 
 改动 `enrollment_app/index.html` 时须先重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
 
