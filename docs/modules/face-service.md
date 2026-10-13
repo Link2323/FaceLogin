@@ -1,5 +1,3 @@
-> 当前 SFace 试用状态和未完成的验收项目见 [试用记录](../work/in-progress/sface-trial.md)。本页维护服务运行约束和当前参数。
-
 # 人脸认证服务
 
 本文说明 `face_service/` 的进程边界和认证约束。实现入口为 [`FaceService.cpp`](../../face_service/FaceService.cpp)。公共 IPC、worker 私有 IPC 和数据库格式分别以 [`IPC 契约`](../contracts/ipc.md)、[`worker IPC 契约`](../contracts/auth-worker-ipc.md) 和 [`users.dat 契约`](../contracts/users-dat.md) 为准。

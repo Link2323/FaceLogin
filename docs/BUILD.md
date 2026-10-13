@@ -34,13 +34,7 @@ cmake --build build --config Release --parallel
 | `FaceLoginCredentialProvider` | `build/credential_provider/Release/FaceLoginCredentialProvider.dll` |
 | `FaceLoginConsole` | `installer/FaceLoginSetup/resources/FaceLoginConsole.exe` |
 
-开发测试从根 CMake 单独构建，例如：
-
-```powershell
-cmake --build build --config Release --target AuthWorkerProtocolTest CredentialStoreTest
-```
-
-相机相关的 `CameraLifecycleTest` 需要真实摄像头。自动化测试不能替代 Session 0、Credential Provider 和锁屏实测。
+开发测试从根 CMake 单独构建。
 
 ## 安装包构建
 
@@ -50,7 +44,7 @@ cmake --build build --config Release --target AuthWorkerProtocolTest CredentialS
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_installer.ps1
 ```
 
-脚本只负责产品构建与打包：显式串行构建 `FaceLoginService`、`FaceLoginCredentialProvider`、`FaceLoginConsole`，恢复前端依赖、生成许可声明、构建 slim 卸载器、按白名单同步资源和已有模型、压缩载荷并生成完整安装包。不构建或运行 `tools/` 下的测试/诊断程序，不执行 `go test`。前端的 TypeScript 编译属于产品构建。完成后输出路径、大小、SHA-256 和 ProductVersion。
+脚本只负责产品构建与打包：显式串行构建 `FaceLoginService`、`FaceLoginCredentialProvider`、`FaceLoginConsole`，恢复前端依赖、生成许可声明、构建 slim 卸载器、按白名单同步资源和已有模型、压缩载荷并生成完整安装包。前端的 TypeScript 编译属于产品构建。完成后输出路径、大小、SHA-256 和 ProductVersion。
 
 ### 构建环境排障
 
@@ -125,16 +119,3 @@ CMake 产物从根 `project()` 版本生成 VERSIONINFO。Wails 的 `build/windo
 ```powershell
 (Get-Item <exe>).VersionInfo.ProductVersion
 ```
-
-## 摄像头曝光诊断（开发工具）
-
-需要时显式构建探针。它会打开指定相机并在正常退出时恢复曝光、增益及自动/手动模式；测量期间不要强制结束进程，也不要移动相机或改变光线。
-
-```powershell
-cmake --build build --config Release --target ExposureResponseProbe FaceGainTuneTest
-.\build\tools\camera_lifecycle\Release\ExposureResponseProbe.exe --list
-.\build\tools\camera_lifecycle\Release\ExposureResponseProbe.exe --camera-index 1 > build/exposure-response.csv
-.\build\tools\face_gain_tune\Release\FaceGainTuneTest.exe build/exposure-response.csv
-```
-
-探针输出仅用于调节器诊断，不替代人脸认证或 Session 0 验证，也不会进入安装包。
