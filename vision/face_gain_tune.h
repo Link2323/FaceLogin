@@ -305,6 +305,28 @@ inline bool ApplyTuneKnobState(const SensorKnobs& knobs, const TuneKnobState& st
     return wrote;
 }
 
+struct ExposureReplay {
+    std::chrono::steady_clock::time_point startedAt{};
+    bool wrote = false;
+    bool usingAutoExposure = false;
+};
+
+// Shared startup policy. Hosts retain their own settling schedule (model
+// loading for preview, warmup for authentication) and must remeasure after
+// a write before deciding whether another adjustment is needed.
+inline ExposureReplay ReplayExposureState(const SensorKnobs& knobs,
+                                          const std::wstring& statePath) {
+    ExposureReplay replay;
+    replay.startedAt = std::chrono::steady_clock::now();
+    replay.usingAutoExposure = PreferAutoExposureWithoutGain(knobs, &replay.wrote);
+    TuneKnobState saved;
+    if (!replay.usingAutoExposure && !statePath.empty() &&
+        LoadTuneKnobState(statePath, saved)) {
+        replay.wrote = ApplyTuneKnobState(knobs, saved);
+    }
+    return replay;
+}
+
 // Mean luma over a pixel rect — the capture condition that dominates
 // identity-match distance. Clipped to the frame.
 inline float FaceBoxLuma(const FrameImage& frame, float x1, float y1,

@@ -8,6 +8,10 @@
 
 服务父进程负责 DataPath、配置、`users.dat`、公开命名管道和身份匹配。锁屏期间异步预载一个 `-auth-worker`，worker 持有 ONNX 模型并在认证请求后打开摄像头，完成一次请求即退出。父进程不持有 ONNX Session，也不会在认证前打开摄像头。
 
+`authentication_residency.*` 的 `AuthenticationResidency` 管理生命周期线程、驻留引用、加载失败、认证使用计数与配置版本。会话事件只调用 `RequestLoad/RequestUnload`；认证通过 `Acquire` 使用原始截止时间获取带作用域的使用凭证，凭证在准备与认证期间阻止解锁回收。实际模型和 worker 创建由宿主的加载入口提供，加载及资源释放不持有状态锁。服务主线程退出或初始化失败时先停止驻留模块，再销毁加载入口依赖。
+
+`ReloadConfig` 统一处理锁屏 worker 替换与版本确认；已排队的重试或替换不能被上一轮的 `Ready/Failed` 提前结束。未锁屏且有意卸载时，配置重载不唤醒模型。worker 的最终回收仍由父服务在公共认证结果确定后执行：失败按锁屏状态补建，成功先交付凭据并等待 ACK，再回收，后续认证请求负责重新加载。
+
 worker 预载诊断在 `auth_worker.log` 输出当前 Session 与显式电源限流标志、三个模型组各自的 SHA-256 校验/初始化耗时，以及模型加预热、相机图骨架和总预载耗时。电源标志不等于实际 CPU 频率，也不足以排除自动调度限制；桌面探针不能替代锁屏 Session 0 测量。桌面加载实验见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
 认证流水线的曝光诊断在本轮退出时汇总输出：`Exposure phase timing` 拆分预热结束后的检测收集、失效 seed 重抓、参数重放后的稳定等待、触发诊断、调节入口和状态交付；`trigger_query` 单列诊断查询耗时，`query_before_seed_wait` 表示查询是否安排在检测收集前。此时 `seed_wait` 只计查询之后的剩余等待，`trigger` 不再包含提前执行的查询。`Exposure sensor timing` 按重放、重放稳定检查、触发诊断、调节及认证循环分组，记录每类传感器回调的调用次数、失败次数、累计及最大耗时。计时覆盖宿主回调全程（包括 DirectShow QI/Get/GetRange/Release），不是单个驱动内部操作；不记录画面、向量或凭据。分项和调用耗时有包含关系，不能重复相加。

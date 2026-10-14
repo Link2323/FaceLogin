@@ -49,7 +49,7 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 目录：`enrollment_app/`
 
-`FaceLoginConsole.exe` 是管理员运行的 Win32 + WebView2 应用。`EnrollmentWizard` 负责预览、采样和录入流程，协调身份检查、配置与数据库更新；`WebviewHost` 把后端通过 `IDispatch` 暴露给嵌入的 `index.html`。
+`FaceLoginConsole.exe` 是管理员运行的 Win32 + WebView2 应用。`EnrollmentWizard` 负责预览、采样和录入流程，协调采样、配置与账户模块调用；`WebviewHost` 把后端通过 `IDispatch` 暴露给嵌入的 `index.html`。
 
 注册端的 Windows 会话查询与密码验证集中在 `session_identity.*`；`service_client.*` 管理数据库重载、配置重载和学习状态查询的管道连接、等待及 ACK；`log_viewer.*` 管理四个固定日志来源的读取、旧 UTF-16 兼容和清空。这三者组成 `facelogin_enrollment_support` 静态库，供 Console 与独立测试使用，不依赖 WebView2、相机或推理模型。
 
@@ -57,9 +57,13 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 控制台 UI 线程由 WebView2 初始化为 STA。DirectShow 预览必须复用该 COM 公寓，不能再次请求 MTA，否则会得到 `RPC_E_CHANGED_MODE` 并使预览在模型初始化前失败。服务 worker 则在其自己的 MTA 中运行。 预览与解锁共用 `WebcamCaptureDS`（face exposure tune 在其调用链上），两侧曝光行为一致；预览分辨率 1280×720、worker 640×480，驱动 AE 为传感器级测光不受分辨率影响。
 
-预览启动调节和后台曝光 watch 共用一份会话内待确认恢复状态。调节写入的稳定测量中断后，watch 每 3 秒遇到落带人脸时可用共享稳定门接续复核，不受写参数的 10 秒冷却限制；仅参数与手动模式在测量前后一致、严格递增的新帧已稳定且仍落带时保存 `camera_tune.state`。复核不写硬件，采集时跳过，停止或采集中止确认，重新建图清除旧状态；帧缓存仍由原 mutex 保护。身份/PAD 结果不能代替曝光稳定证据。
+`preview_exposure.*` 的 `PreviewExposure` 管理预览曝光会话：启动回放、初次调节、后台 watch、冷却计时及待确认恢复状态。`EnrollmentWizard` 保留相机、模型和预览线程所有权，在线程启动前准备曝光会话，帧线程逐帧调用观察入口，停止并 join 后释放会话。回放策略与认证共用 `ReplayExposureState`，模型加载与认证预热各自吸收回放等待时间。预览启动调节和后台曝光 watch 共用一份会话内待确认恢复状态。调节写入的稳定测量中断后，watch 每 3 秒遇到落带人脸时可用共享稳定门接续复核，不受写参数的 10 秒冷却限制；仅参数与手动模式在测量前后一致、严格递增的新帧已稳定且仍落带时保存 `camera_tune.state`。复核不写硬件，采集时跳过，停止或采集中止确认，重新建图清除旧状态；帧缓存仍由原 mutex 保护。身份/PAD 结果不能代替曝光稳定证据。
+
+`preview_frame_encoder.*` 独立管理 WIC 工厂与逐帧 JPEG/Base64 编码，质量维持 0.70。工厂在 UI 的既有 COM 公寓中创建，预览线程串行编码，join 后销毁；模块不初始化或反初始化 COM。编码各阶段失败时返回空输出，临时 COM 对象自动释放。
 
 ### 账号身份
+
+`enrollment_accounts.*` 的 `EnrollmentAccounts` 拥有注册端凭据库，集中处理模板保存、人脸管理及账户身份修复；`EnrollmentWizard` 不再直接读写数据库。所有写入经 `SaveAndReload` 先保存，再等待服务确认。录入保存结果单独报告是否已经落盘：落盘后即消费采样证明，即使服务确认失败也不重复使用样本。数据库解析失败时终止本次写入。账户变化提示的状态、脸数和当前 UPN 来自同一次查询快照。
 
 `session_identity.*` 在构造时读取身份快照，账号变化检测与密码验证时重新查询当前会话。身份来源为：
 
@@ -71,6 +75,10 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 检测 MSA ↔ local 变化时必须保留已有脸并正确更新/清除 UPN。人脸录入要求账户具有 Windows 或 MSA 密码。
 
 ### 多角度注册
+
+`enrollment_capture.*` 的 `EnrollmentCapture` 拥有采样线程、角度进度、活体状态和未保存样本。`EnrollmentWizard` 仅提供受 `m_frameCacheMutex` 保护的帧快照，模型保持存活直到采样 `Stop()` 返回。每次采集固定使用启动时的活体阈值，设置更新对下一次采集生效。重复启动在采样尚未退出时直接失败，不阻塞 UI；取消请求与线程实际完成分别记录，只有完成后才能恢复曝光调节或导出用于保存的样本快照。重新采集某个角度时，一并丢弃该角度和后续角度的旧样本及计数。
+
+保存入口通过 `CopyCompletedSamples` 获取已校验的独立快照，不再直接读取工作线程的样本数组；`enrollment_templates.*` 先检查样本维度、有限值和分组完整性，再逐角度检查一致性、平均并归一化；所有模板准备成功后才进入凭据库更新，失败不会返回部分模板。保存成功后清除会话样本和活体证明。对外 JSON 字段保持不变，`done` 表示线程已退出。
 
 每个正面/左转/右转角度独立执行：
 

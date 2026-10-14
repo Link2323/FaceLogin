@@ -1,4 +1,5 @@
 #include "auth_pipeline.h"
+#include "auth_pipeline_diagnostics.h"
 
 #include "../common/logger.h"
 #include "../vision/exposure_warmup.h"
@@ -6,115 +7,17 @@
 #include "../vision/face_gain_tune.h"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <future>
 #include <thread>
 #include <utility>
 
 namespace facelogin {
-namespace {
-
-// Main-thread-only, per-request diagnostics. Control reads remain fresh;
-// timing does not cache results or change callback arguments/return values.
-struct ExposureTimingProfile {
-    enum Phase { Replay, ReplaySettle, Trigger, Tune, Loop, PhaseCount };
-    enum Operation { ExposureRange, ExposureGet, ExposureSet, GainRange,
-                     GainGet, GainSet, ExposureMode, ExposureAuto, ExposureState,
-                     OperationCount };
-    struct Calls {
-        unsigned int count = 0;
-        unsigned int failed = 0;
-        double totalMs = 0.0;
-        double maxMs = 0.0;
-    };
-    std::array<std::array<Calls, OperationCount>, PhaseCount> calls{};
-    Phase phase = Replay;
-    bool gateReached = false;
-    double preparationMs = 0.0;
-    double seedWaitMs = 0.0;
-    double seedRefreshMs = 0.0;
-    double replaySettleMs = 0.0;
-    double triggerMs = 0.0;
-    double triggerQueryMs = 0.0;
-    bool triggerQueriesBeforeSeedWait = false;
-    bool reusedCompletedSeed = false;
-    unsigned long long warmupSeedSeq = 0;
-    double warmupSeedAgeMs = -1.0;
-    double tuneMs = 0.0;
-    double statusMs = 0.0;
-    double gateToLoopMs = 0.0;
-
-    ~ExposureTimingProfile() {
-        // Emit only after the work, so measuring individual driver calls does
-        // not add a log write between them or perturb the warmup schedule.
-        if (gateReached) {
-            FACELOGIN_INFO(L"Exposure phase timing: preparation=%.2f ms, seed_wait=%.2f ms, seed_refresh=%.2f ms, "
-                           L"replay_settle=%.2f ms, trigger=%.2f ms, tune=%.2f ms, "
-                           L"status=%.2f ms, gate_to_loop=%.2f ms, "
-                           L"trigger_query=%.2f ms, query_before_seed_wait=%d, "
-                           L"seed_reused=%d, seed_seq=%llu, seed_age=%.2f ms",
-                           preparationMs, seedWaitMs, seedRefreshMs, replaySettleMs, triggerMs,
-                           tuneMs, statusMs, gateToLoopMs, triggerQueryMs,
-                           triggerQueriesBeforeSeedWait, reusedCompletedSeed,
-                           warmupSeedSeq, warmupSeedAgeMs);
-        }
-        constexpr const wchar_t* phaseNames[] = {
-            L"replay", L"replay_settle", L"trigger", L"tune", L"loop"};
-        constexpr const wchar_t* operationNames[] = {
-            L"exposure_range", L"exposure_get", L"exposure_set", L"gain_range",
-            L"gain_get", L"gain_set", L"exposure_mode", L"exposure_auto",
-            L"exposure_state"};
-        for (size_t p = 0; p < calls.size(); ++p) {
-            for (size_t op = 0; op < calls[p].size(); ++op) {
-                const auto& c = calls[p][op];
-                if (c.count == 0) continue;
-                FACELOGIN_INFO(L"Exposure sensor timing: phase=%s, op=%s, "
-                               L"calls=%u, failed=%u, total=%.2f ms, max=%.2f ms",
-                               phaseNames[p], operationNames[op], c.count,
-                               c.failed, c.totalMs, c.maxMs);
-            }
-        }
-    }
-};
-
-double ElapsedMs(std::chrono::steady_clock::time_point start) {
-    return std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
-}
-
-SensorKnobs ProfileSensorKnobs(const SensorKnobs& original,
-                              ExposureTimingProfile& profile) {
-    const auto wrap = [&profile](auto callback, ExposureTimingProfile::Operation op) {
-        using Callback = decltype(callback);
-        if (!callback) return Callback{};
-        return Callback([callback = std::move(callback), &profile, op](auto&&... args) {
-            const auto start = std::chrono::steady_clock::now();
-            const bool ok = callback(std::forward<decltype(args)>(args)...);
-            auto& c = profile.calls[profile.phase][op];
-            const double ms = ElapsedMs(start);
-            ++c.count;
-            if (!ok) ++c.failed;
-            c.totalMs += ms;
-            c.maxMs = std::max(c.maxMs, ms);
-            return ok;
-        });
-    };
-    SensorKnobs result = original;
-    result.exposureRange = wrap(original.exposureRange, ExposureTimingProfile::ExposureRange);
-    result.exposureGet = wrap(original.exposureGet, ExposureTimingProfile::ExposureGet);
-    result.exposureSet = wrap(original.exposureSet, ExposureTimingProfile::ExposureSet);
-    result.gainRange = wrap(original.gainRange, ExposureTimingProfile::GainRange);
-    result.gainGet = wrap(original.gainGet, ExposureTimingProfile::GainGet);
-    result.gainSet = wrap(original.gainSet, ExposureTimingProfile::GainSet);
-    result.exposureIsManual = wrap(original.exposureIsManual, ExposureTimingProfile::ExposureMode);
-    result.exposureSetAuto = wrap(original.exposureSetAuto, ExposureTimingProfile::ExposureAuto);
-    return result;
-}
-
-} // namespace
+using auth_diagnostics::ElapsedMs;
+using auth_diagnostics::ExposureTimingProfile;
+using auth_diagnostics::NormLog;
+using auth_diagnostics::ProfileSensorKnobs;
 
 // Mean luma over the face bbox — the capture condition that dominates
 // identity-match distance (dark chips shift embeddings; the exposure
@@ -172,35 +75,7 @@ AuthPipelineResult AuthPipeline::Run() {
     try {
         ExposureTimingProfile exposureTiming;
         const SensorKnobs sensorKnobs = ProfileSensorKnobs(m_callbacks.sensorKnobs, exposureTiming);
-        // Progressive-learning phase 0 instrumentation: per-round
-        // pre-normalization embedding norms (quality signal), one line per
-        // round at any exit. RAII so cancel/timeout/attack paths log too.
-        struct NormLog {
-            std::vector<float> norms;
-            unsigned long long attempts = 0, repeatedFrames = 0;
-            unsigned long long firstSequence = 0, lastSequence = 0;
-            void add(float n, unsigned long long sequence) {
-                if (attempts == 0) firstSequence = sequence;
-                else if (sequence == lastSequence) ++repeatedFrames;
-                lastSequence = sequence;
-                ++attempts;
-                if (norms.size() < 16) norms.push_back(n);
-            }
-            ~NormLog() {
-                if (norms.empty()) return;
-                wchar_t buf[16 * 8];
-                size_t off = 0;
-                for (size_t i = 0; i < norms.size() && off + 8 < ARRAYSIZE(buf); i++) {
-                    off += static_cast<size_t>(swprintf(buf + off, 8, L"%.3f,", norms[i]));
-                }
-                if (off > 0 && buf[off - 1] == L',') buf[--off] = L'\0';
-                FACELOGIN_INFO(L"Embedding norms pre-normalize (binding attempts): [%s]",
-                               buf);
-                FACELOGIN_INFO(L"Binding capture sequence: attempts=%llu, repeated=%llu, "
-                               L"first=%llu, last=%llu",
-                               attempts, repeatedFrames, firstSequence, lastSequence);
-            }
-        } normLog;
+        NormLog normLog;
 
         const auto pipelineStart = std::chrono::steady_clock::now();
         bool firstFrameLogged = false;
@@ -255,16 +130,10 @@ AuthPipelineResult AuthPipeline::Run() {
         // settle-loop tune. A replayed gain lands instantly; a replayed
         // exposure settles inside the warmup window. Equal values are never
         // re-written, so an intact driver pays nothing.
-        bool replayWrote = false;
-        const auto replayAt = std::chrono::steady_clock::now();
-        const bool usingAutoExposure =
-            PreferAutoExposureWithoutGain(sensorKnobs, &replayWrote);
-        if (!usingAutoExposure && !m_config.tuneStatePath.empty()) {
-            TuneKnobState saved;
-            if (LoadTuneKnobState(m_config.tuneStatePath, saved)) {
-                replayWrote = ApplyTuneKnobState(sensorKnobs, saved);
-            }
-        }
+        const auto replay = ReplayExposureState(sensorKnobs, m_config.tuneStatePath);
+        const bool replayWrote = replay.wrote;
+        const auto replayAt = replay.startedAt;
+        const bool usingAutoExposure = replay.usingAutoExposure;
         // With usable gain, the AE policy above does not query the current
         // mode. Confirm manual mode on the camera's COM thread before warmup;
         // unknown modes and rounds that wrote controls retain latest detection.

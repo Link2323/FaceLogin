@@ -2,6 +2,7 @@
 #include "auth_pipeline.h"
 #include "../vision/face_align.h"
 #include "performance_affinity.h"
+#include "process_resource_usage.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"
 #include "../common/registry_util.h"
@@ -18,11 +19,8 @@
 #include <sstream>
 #include <thread>
 #include <vector>
-#include <psapi.h>
-#include <tlhelp32.h>
 #include <wtsapi32.h>
 
-#pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "wtsapi32.lib")
 
 namespace facelogin {
@@ -39,44 +37,6 @@ static std::wstring Utf8ToWstr(const std::string& s) {
     std::wstring ws(len - 1, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
     return ws;
-}
-
-struct ProcessResourceUsage {
-    DWORD handles = 0;
-    DWORD threads = 0;
-    double privateMiB = 0.0;
-    double workingSetMiB = 0.0;
-};
-
-static ProcessResourceUsage CurrentProcessResourceUsage() {
-    ProcessResourceUsage usage;
-    GetProcessHandleCount(GetCurrentProcess(), &usage.handles);
-
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snapshot != INVALID_HANDLE_VALUE) {
-        THREADENTRY32 entry{};
-        entry.dwSize = sizeof(entry);
-        if (Thread32First(snapshot, &entry)) {
-            do {
-                if (entry.th32OwnerProcessID == GetCurrentProcessId()) {
-                    ++usage.threads;
-                }
-            } while (Thread32Next(snapshot, &entry));
-        }
-        CloseHandle(snapshot);
-    }
-
-    PROCESS_MEMORY_COUNTERS_EX counters{};
-    counters.cb = sizeof(counters);
-    if (GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
-            sizeof(counters))) {
-        constexpr double kMiB = 1024.0 * 1024.0;
-        usage.privateMiB = static_cast<double>(counters.PrivateUsage) / kMiB;
-        usage.workingSetMiB = static_cast<double>(counters.WorkingSetSize) / kMiB;
-    }
-    return usage;
 }
 
 // Decide whether the service should preload models immediately. At the sign-in
@@ -125,6 +85,7 @@ FaceService::FaceService() {
 }
 
 FaceService::~FaceService() {
+    m_residency.Stop();
     // Learner first: its Stop() flushes pending template updates through the
     // hooks, which take m_storeLock — both must still be alive here.
     if (m_learner) m_learner->Stop();
@@ -259,7 +220,7 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
                 FACELOGIN_INFO(L"Session LOGON: session=%lu → UserLoggedIn=1",
                               evt->dwSessionId);
                 WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
-                pService->RequestModelUnload(L"session logon");
+                pService->m_residency.RequestUnload(L"session logon");
             } else if (eventType == WTS_SESSION_LOGOFF) {
                 FACELOGIN_INFO(L"Session LOGOFF: session=%lu → UserLoggedIn=0",
                               evt->dwSessionId);
@@ -268,13 +229,13 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
                 // credential provider no longer reads it (cold-boot auto-
                 // trigger removed 2026-08; recognition waits for input).
                 WriteRegDword(REGVAL_USER_LOGGED_IN, 0);
-                pService->RequestModelLoad(L"session logoff");
+                pService->m_residency.RequestLoad(L"session logoff");
             } else if (eventType == WTS_SESSION_LOCK) {
                 // The queued model request logs itself ("Model load
                 // requested: session lock") — no extra line here.
-                pService->RequestModelLoad(L"session lock");
+                pService->m_residency.RequestLoad(L"session lock");
             } else if (eventType == WTS_SESSION_UNLOCK) {
-                pService->RequestModelUnload(L"session unlock");
+                pService->m_residency.RequestUnload(L"session unlock");
             } else {
                 // Connect/disconnect and remote-session events are not part of
                 // the active-console face-auth lifecycle.
@@ -543,14 +504,19 @@ bool FaceService::Initialize() {
                        m_config.camera_device.empty() ? L"" : L" (configured device)");
     }
 
-    if (!StartModelWorker()) {
+    AuthenticationResidency::Loaders loaders;
+    loaders.models = [this](ModelLoadFailure& failure) { return LoadInferenceModels(failure); };
+    loaders.worker = [this](const AppConfig& config, std::wstring& error) {
+        return LoadAuthenticationWorker(config, error);
+    };
+    if (!m_residency.Start(m_isServiceMode, m_config, std::move(loaders))) {
         FACELOGIN_ERROR(L"Failed to start model lifecycle worker");
         return false;
     }
 
     const bool preload = !m_isServiceMode || ShouldPreloadModelsAtStartup();
     if (preload) {
-        RequestModelLoad(L"service startup / sign-in screen");
+        m_residency.RequestLoad(L"service startup / sign-in screen");
     } else {
         FACELOGIN_INFO(L"Unlocked desktop detected at startup — models remain unloaded until lock");
     }
@@ -566,7 +532,7 @@ bool FaceService::Initialize() {
 // Session-aware model residency
 // ============================================================================
 
-std::shared_ptr<FaceService::InferenceModels>
+std::shared_ptr<InferenceModels>
 FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
     failureReason = ModelLoadFailure::None;
     auto models = std::make_shared<InferenceModels>();
@@ -625,75 +591,6 @@ FaceService::LoadInferenceModels(ModelLoadFailure& failureReason) {
     return models;
 }
 
-bool FaceService::StartModelWorker() {
-    try {
-        m_modelWorkerThread = std::thread(&FaceService::ModelWorkerLoop, this);
-        return true;
-    } catch (const std::exception& e) {
-        FACELOGIN_ERROR(L"Model worker start failed: %hs", e.what());
-        return false;
-    }
-}
-
-void FaceService::RequestModelLoad(const wchar_t* reason) {
-    bool queued = false;
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        if (m_modelStopRequested) return;
-        m_modelsWanted = true;
-        if (m_modelState == ModelState::Unloaded ||
-            m_modelState == ModelState::Failed) {
-            if (!m_modelLoadRequested) {
-                m_modelLoadRequested = true;
-                queued = true;
-            }
-        }
-    }
-    m_modelCv.notify_all();
-    if (queued) FACELOGIN_INFO(L"Model load requested: %s", reason);
-}
-
-void FaceService::RequestModelUnload(const wchar_t* reason) {
-    bool queued = false;
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        if (m_modelStopRequested) return;
-        queued = m_modelsWanted || m_modelState != ModelState::Unloaded;
-        m_modelsWanted = false;
-        m_modelLoadRequested = false;
-    }
-    m_modelCv.notify_all();
-    if (queued) FACELOGIN_INFO(L"Model unload requested: %s", reason);
-}
-
-void FaceService::BeginModelUse() {
-    std::lock_guard<std::mutex> lock(m_modelMutex);
-    ++m_activeModelUsers;
-}
-
-void FaceService::EndModelUse() {
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        if (m_activeModelUsers > 0) --m_activeModelUsers;
-    }
-    m_modelCv.notify_all();
-}
-
-std::shared_ptr<FaceService::InferenceModels> FaceService::AcquireModelsForAuth(
-    ipc::AuthDeadline deadline) {
-    // AUTH_REQUEST is the fail-safe if WTS_SESSION_LOCK was delayed or missed.
-    RequestModelLoad(L"AUTH_REQUEST fallback");
-
-    std::unique_lock<std::mutex> lock(m_modelMutex);
-    m_modelCv.wait_until(lock, deadline, [this]() {
-        return m_modelState == ModelState::Ready ||
-               m_modelState == ModelState::Failed ||
-               m_modelState == ModelState::Stopping ||
-               !m_modelsWanted;
-    });
-    return m_modelState == ModelState::Ready ? m_models : nullptr;
-}
-
 std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
     const AppConfig& appConfig, std::wstring& errorMessage) {
     auth_worker::WorkerConfig workerConfig;
@@ -708,196 +605,6 @@ std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
     auto worker = std::make_shared<AuthWorkerClient>(std::move(workerConfig));
     if (!worker->Start(errorMessage)) return {};
     return worker;
-}
-
-std::shared_ptr<AuthWorkerClient> FaceService::AcquireAuthWorkerForAuth(
-    ipc::AuthDeadline deadline) {
-    // AUTH_REQUEST is the fail-safe if WTS_SESSION_LOCK was delayed or missed.
-    RequestModelLoad(L"AUTH_REQUEST worker fallback");
-
-    std::unique_lock<std::mutex> lock(m_modelMutex);
-    m_modelCv.wait_until(lock, deadline, [this]() {
-        return m_modelState == ModelState::Ready ||
-               m_modelState == ModelState::Failed ||
-               m_modelState == ModelState::Stopping ||
-               !m_modelsWanted;
-    });
-    return m_modelState == ModelState::Ready ? m_authWorker : nullptr;
-}
-
-void FaceService::MarkAuthWorkerConsumed(bool preloadReplacement) {
-    std::shared_ptr<AuthWorkerClient> consumed;
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        consumed = std::move(m_authWorker);
-        if (m_modelState != ModelState::Stopping) {
-            m_modelState = ModelState::Unloaded;
-            if (preloadReplacement && m_modelsWanted && !m_modelStopRequested) {
-                m_modelLoadRequested = true;
-            }
-        }
-    }
-    // The supervisor exchange has already terminated the child (failure
-    // paths inside Authenticate(); the success path reaps right after the
-    // AUTH_SUCCESS ACK). Reset outside the lifecycle lock so the Job close
-    // cannot block a WTS handler or model state transition.
-    consumed.reset();
-    m_modelCv.notify_all();
-}
-
-void FaceService::ModelWorkerLoop() {
-    for (;;) {
-        std::shared_ptr<InferenceModels> modelsToRelease;
-        std::shared_ptr<AuthWorkerClient> workerToRelease;
-
-        std::unique_lock<std::mutex> lock(m_modelMutex);
-        m_modelCv.wait(lock, [this]() {
-            const bool canUnload = !m_modelsWanted &&
-                m_modelState != ModelState::Unloaded &&
-                m_modelState != ModelState::Loading &&
-                m_activeModelUsers == 0;
-            return m_modelStopRequested || m_modelLoadRequested || canUnload;
-        });
-
-        if (m_modelStopRequested) {
-            if (m_isServiceMode) workerToRelease = std::move(m_authWorker);
-            else modelsToRelease = std::move(m_models);
-            m_modelState = ModelState::Stopping;
-            m_modelCv.notify_all();
-            lock.unlock();
-            modelsToRelease.reset();
-            workerToRelease.reset();
-            return;
-        }
-
-        if (!m_modelsWanted && m_modelState != ModelState::Loading &&
-            m_activeModelUsers == 0) {
-            if (m_isServiceMode) workerToRelease = std::move(m_authWorker);
-            else modelsToRelease = std::move(m_models);
-            m_modelState = ModelState::Unloaded;
-            m_modelLoadFailure.store(ModelLoadFailure::None);
-            m_modelCv.notify_all();
-            lock.unlock();
-            modelsToRelease.reset();
-            workerToRelease.reset();
-            const auto usage = CurrentProcessResourceUsage();
-            if (m_isServiceMode) {
-                FACELOGIN_INFO(L"Authentication worker released (unlocked idle state)");
-            } else {
-                FACELOGIN_INFO(L"Inference models released (unlocked idle state; handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
-                               usage.handles, usage.privateMiB, usage.workingSetMiB);
-            }
-            continue;
-        }
-
-        if (!m_modelLoadRequested || !m_modelsWanted) continue;
-
-        m_modelLoadRequested = false;
-        m_modelState = ModelState::Loading;
-        m_modelCv.notify_all();
-        lock.unlock();
-
-        const auto loadStart = std::chrono::steady_clock::now();
-        ModelLoadFailure loadFailure = ModelLoadFailure::None;
-        std::shared_ptr<InferenceModels> loaded;
-        std::shared_ptr<AuthWorkerClient> loadedWorker;
-        std::wstring workerError;
-        AppConfig workerConfigSnapshot;
-        uint64_t workerConfigGeneration = 0;
-
-        // A pending replacement is always one-shot in service mode. Stop the
-        // previous child before opening a new one so it cannot retain a camera
-        // graph or model heap beside the replacement.
-        if (m_isServiceMode) {
-            lock.lock();
-            workerToRelease = std::move(m_authWorker);
-            workerConfigSnapshot = m_config;
-            workerConfigGeneration = m_workerConfigGeneration;
-            lock.unlock();
-            workerToRelease.reset();
-        }
-        try {
-            if (m_isServiceMode) {
-                loadedWorker = LoadAuthenticationWorker(workerConfigSnapshot, workerError);
-            }
-            else loaded = LoadInferenceModels(loadFailure);
-        } catch (const std::exception& e) {
-            if (m_isServiceMode) {
-                FACELOGIN_ERROR(L"Authentication worker launcher threw: %hs", e.what());
-            } else {
-                FACELOGIN_ERROR(L"Model loader threw: %hs", e.what());
-            }
-            workerError = L"认证工作进程启动异常";
-        }
-
-        bool published = false;
-        bool wantedAfterLoad = false;
-        lock.lock();
-        if (m_modelStopRequested) {
-            m_modelState = ModelState::Stopping;
-        } else if (m_isServiceMode && loadedWorker && m_modelsWanted) {
-            m_authWorker = loadedWorker;
-            m_modelState = ModelState::Ready;
-            m_modelLoadFailure.store(ModelLoadFailure::None);
-            m_workerLoadError.clear();
-            m_loadedWorkerConfigGeneration = workerConfigGeneration;
-            published = true;
-        } else if (!m_isServiceMode && loaded && m_modelsWanted) {
-            m_models = loaded;
-            m_modelState = ModelState::Ready;
-            m_modelLoadFailure.store(ModelLoadFailure::None);
-            published = true;
-        } else if (!m_modelsWanted) {
-            m_modelState = ModelState::Unloaded;
-            m_modelLoadFailure.store(ModelLoadFailure::None);
-        } else {
-            m_modelState = ModelState::Failed;
-            m_modelLoadFailure.store(loadFailure);
-            if (m_isServiceMode) {
-                m_workerLoadError = workerError.empty()
-                    ? L"认证工作进程启动失败，请使用密码登录"
-                    : workerError;
-            }
-        }
-        wantedAfterLoad = m_modelsWanted;
-        m_modelCv.notify_all();
-        lock.unlock();
-
-        const double loadMs = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - loadStart).count();
-        if (published) {
-            const auto usage = CurrentProcessResourceUsage();
-            if (m_isServiceMode) {
-                FACELOGIN_INFO(L"Authentication worker ready in %.0f ms (parent handles=%lu, private=%.1f MiB, working_set=%.1f MiB, threads=%lu)",
-                               loadMs, usage.handles, usage.privateMiB,
-                               usage.workingSetMiB, usage.threads);
-            } else {
-                FACELOGIN_INFO(L"Inference models ready in %.0f ms (handles=%lu, private=%.1f MiB, working_set=%.1f MiB)",
-                               loadMs, usage.handles, usage.privateMiB, usage.workingSetMiB);
-            }
-        } else {
-            loaded.reset();
-            loadedWorker.reset();
-            if (m_isServiceMode) {
-                FACELOGIN_INFO(L"Authentication worker load not published (wanted=%d, %.0f ms)",
-                               wantedAfterLoad ? 1 : 0, loadMs);
-            } else {
-                FACELOGIN_INFO(L"Inference model load not published (wanted=%d, %.0f ms)",
-                               wantedAfterLoad ? 1 : 0, loadMs);
-            }
-        }
-    }
-}
-
-void FaceService::StopModelWorker() {
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        m_modelStopRequested = true;
-        m_modelsWanted = false;
-        m_modelLoadRequested = false;
-    }
-    m_modelCv.notify_all();
-    if (m_modelWorkerThread.joinable()) m_modelWorkerThread.join();
 }
 
 void FaceService::Run() {
@@ -949,34 +656,9 @@ void FaceService::Run() {
         }
         else if (request == ipc::MSG_CONFIG_RELOAD) {
             AppConfig reloadedConfig = LoadConfig(m_dataDir);
-            // CONFIG_RELOAD must not wake intentionally-unloaded models on an
-            // unlocked desktop. In service mode every camera/model setting is
-            // part of the child construction snapshot, so request a fresh
-            // worker when the lock screen is active. A generation prevents a
-            // child that was already loading from being acknowledged as the
-            // newly configured backend.
-            bool waitForConfiguredWorker = false;
-            uint64_t requiredWorkerGeneration = 0;
-            {
-                std::lock_guard<std::mutex> lock(m_modelMutex);
-                m_config = std::move(reloadedConfig);
-                m_matchThreshold = m_config.match_threshold;
-                m_antiSpoofThreshold = m_config.anti_spoof_threshold;
-                if (m_isServiceMode) {
-                    ++m_workerConfigGeneration;
-                    requiredWorkerGeneration = m_workerConfigGeneration;
-                    if (m_modelsWanted && m_modelState != ModelState::Stopping) {
-                        m_modelLoadRequested = true;
-                        waitForConfiguredWorker = true;
-                    }
-                } else {
-                    if (m_modelsWanted && m_modelState == ModelState::Failed) {
-                        m_modelLoadRequested = true;
-                        waitForConfiguredWorker = true;
-                    }
-                }
-            }
-            m_modelCv.notify_all();
+            m_config = std::move(reloadedConfig);
+            m_matchThreshold = m_config.match_threshold;
+            m_antiSpoofThreshold = m_config.anti_spoof_threshold;
             if (m_learner) {
                 LearningConfig learning;
                 learning.enabled = m_config.ema_learning;
@@ -987,32 +669,7 @@ void FaceService::Run() {
                 m_learner->UpdateConfig(learning);
             }
 
-            bool modelStateOk = true;
-            if (waitForConfiguredWorker) {
-                std::unique_lock<std::mutex> lock(m_modelMutex);
-                m_modelCv.wait(lock, [this, requiredWorkerGeneration]() {
-                    return m_modelState == ModelState::Ready ||
-                           m_modelState == ModelState::Failed ||
-                           m_modelState == ModelState::Stopping ||
-                           !m_modelsWanted;
-                });
-                if (m_isServiceMode && m_modelState == ModelState::Ready &&
-                    m_loadedWorkerConfigGeneration < requiredWorkerGeneration) {
-                    // The first child was started before CONFIG_RELOAD. Wait
-                    // for the queued replacement, not merely any Ready state.
-                    m_modelCv.wait(lock, [this, requiredWorkerGeneration]() {
-                        return (m_modelState == ModelState::Ready &&
-                                m_loadedWorkerConfigGeneration >= requiredWorkerGeneration) ||
-                               m_modelState == ModelState::Failed ||
-                               m_modelState == ModelState::Stopping ||
-                               !m_modelsWanted;
-                    });
-                }
-                modelStateOk = !m_modelsWanted ||
-                    (m_modelState == ModelState::Ready &&
-                     (!m_isServiceMode ||
-                      m_loadedWorkerConfigGeneration >= requiredWorkerGeneration));
-            }
+            const bool modelStateOk = m_residency.ReloadConfig(m_config);
 
             SendControlResponse(modelStateOk
                 ? ipc::MSG_CONFIG_RELOAD_OK
@@ -1095,7 +752,7 @@ void FaceService::Stop() {
     // pipe round simply drops its sample; store access stays serialized by
     // m_storeLock either way.
     if (m_learner) m_learner->Stop();
-    StopModelWorker();
+    m_residency.Stop();
     if (!m_isServiceMode && m_webcamDS) {
         m_webcamDS->Shutdown();
     }
@@ -1258,7 +915,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     AuthWorkerResult workerResult;
     float identityMissDistance = -1.0f;
     LearningSample roundBest;   // best frame of the round, learning candidate
-    // Outlives the ModelUseGuard scope below: the success path reaps the
+    // Outlives the residency-use scope below: the success path reaps the
     // worker only after AUTH_SUCCESS has been delivered to the CP.
     std::shared_ptr<AuthWorkerClient> worker;
 
@@ -1267,36 +924,14 @@ bool FaceService::ProcessWorkerAuthRequest() {
         // request and its terminal response. The worker itself owns all model
         // and camera objects; this guard protects only the parent control
         // channel and lifecycle state.
-        const ModelUseGuard workerUse(*this);
-
-        bool workerNeedsWait = false;
-        {
-            std::lock_guard<std::mutex> lock(m_modelMutex);
-            workerNeedsWait = m_modelState != ModelState::Ready ||
-                !m_authWorker || !m_authWorker->IsReady();
-            if (m_modelState == ModelState::Ready &&
-                (!m_authWorker || !m_authWorker->IsReady())) {
-                // A one-shot worker may have exited after a previous result
-                // before Windows emitted SESSION_UNLOCK. Treat it as unloaded
-                // and let the ordinary lifecycle thread make a fresh one.
-                m_modelState = ModelState::Unloaded;
-                m_modelLoadRequested = true;
-            }
-        }
-        if (workerNeedsWait) {
+        auto backendUse = m_residency.Acquire(authDeadline, [this] {
             SendStatusMessage(L"正在加载模型...");
-        }
-        m_modelCv.notify_all();
-
-        worker = AcquireAuthWorkerForAuth(authDeadline);
+        });
+        worker = backendUse.worker;
         if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
             workerResult.timedOut = true;
         } else if (!worker || !worker->IsReady()) {
-            std::wstring loadError;
-            {
-                std::lock_guard<std::mutex> lock(m_modelMutex);
-                loadError = m_workerLoadError;
-            }
+            const auto& loadError = backendUse.error;
             FACELOGIN_ERROR(L"Authentication worker is not ready");
             workerResult.errorMessage = loadError.empty()
                 ? L"认证工作进程加载失败，请使用密码登录"
@@ -1328,17 +963,17 @@ bool FaceService::ProcessWorkerAuthRequest() {
     // final decrypt or if the public pipe breaks. In those cases preload a
     // fresh worker only when the lifecycle still says the desktop is locked.
     if (workerResult.cancelled) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         return false;
     }
     if (workerResult.timedOut) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         FACELOGIN_INFO(L"Authentication timed out in worker");
         SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
     if (!workerResult.succeeded) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         const std::wstring message = workerResult.errorMessage.empty()
             ? L"认证工作进程执行失败，请使用密码登录"
             : workerResult.errorMessage;
@@ -1352,14 +987,14 @@ bool FaceService::ProcessWorkerAuthRequest() {
         return false;
     }
     if (!lockedIdentity) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         FACELOGIN_ERROR(L"Worker reported success without a parent-bound identity");
         SendAuthErrorMessage(L"身份验证状态异常，请使用密码登录");
         return false;
     }
 
     if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
@@ -1372,14 +1007,14 @@ bool FaceService::ProcessWorkerAuthRequest() {
         LeaveCriticalSection(&m_storeLock);
     }
     if (!credential) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         FACELOGIN_ERROR(L"Authorized identity could not provide a password credential");
         SendAuthErrorMessage(L"账户凭据不可用，请使用密码登录");
         return false;
     }
     if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
         SecureClearMatchPassword(credential);
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
@@ -1398,7 +1033,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     const bool writeOk = SendTerminalMessage(message);
     SecureClearWString(message);
     if (!writeOk) {
-        MarkAuthWorkerConsumed(true);
+        m_residency.WorkerConsumed(true);
         FACELOGIN_WARN(L"Failed to send authentication credentials");
         SecureClearMatchPassword(credential);
         return false;
@@ -1434,7 +1069,7 @@ bool FaceService::ProcessWorkerAuthRequest() {
     // A successful public credential handoff does not speculatively start a
     // second model worker. If Windows rejects the credential and sends another
     // AUTH_REQUEST, the ordinary fallback starts one then.
-    MarkAuthWorkerConsumed(false);
+    m_residency.WorkerConsumed(false);
     WriteRegDword(REGVAL_USER_LOGGED_IN, 1);
     return true;
 }
@@ -1445,26 +1080,18 @@ bool FaceService::ProcessAuthRequest() {
 
     FACELOGIN_INFO(L"Starting face authentication...");
 
-    const ModelUseGuard modelUseGuard(*this);
     const ScopedPerformanceCoreAffinity affinityGuard(GetPerformanceCoreMask());
-
-    bool modelsNeedWait = false;
-    {
-        std::lock_guard<std::mutex> lock(m_modelMutex);
-        modelsNeedWait = m_modelState != ModelState::Ready;
-    }
-    if (modelsNeedWait) {
+    auto backendUse = m_residency.Acquire(authDeadline, [this] {
         SendStatusMessage(L"正在加载模型...");
-    }
-
-    auto models = AcquireModelsForAuth(authDeadline);
+    });
+    auto models = backendUse.models;
     if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
         SendTerminalMessage(ipc::MSG_AUTH_TIMEOUT);
         return false;
     }
     if (!models) {
         FACELOGIN_ERROR(L"Required models not loaded — cannot authenticate");
-        const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
+        const ModelLoadFailure loadFailure = backendUse.failure;
         const wchar_t* loadError = ModelLoadFailureMessage(
             loadFailure == ModelLoadFailure::None ? ModelLoadFailure::Load : loadFailure);
         SendAuthErrorMessage(loadError);
@@ -1477,7 +1104,7 @@ bool FaceService::ProcessAuthRequest() {
     }
     if (!models->antiSpoof->IsInitialized()) {
         FACELOGIN_ERROR(L"Authentication refused: anti-spoof model is unavailable");
-        const ModelLoadFailure loadFailure = m_modelLoadFailure.load();
+        const ModelLoadFailure loadFailure = backendUse.failure;
         const wchar_t* message = ModelLoadFailureMessage(
             loadFailure == ModelLoadFailure::None ? ModelLoadFailure::Load : loadFailure);
         SendAuthErrorMessage(message);

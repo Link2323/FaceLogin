@@ -13,6 +13,11 @@ add_executable(FaceLoginConsole
     main.cpp
     WebviewHost.cpp
     EnrollmentWizard.cpp
+    preview_exposure.cpp
+    preview_frame_encoder.cpp
+    enrollment_capture.cpp
+    enrollment_templates.cpp
+    enrollment_accounts.cpp
     resource.rc
 )
 facelogin_add_version_rc(FaceLoginConsole VFT_APP

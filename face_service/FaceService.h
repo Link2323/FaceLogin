@@ -4,14 +4,11 @@
 #include <string>
 #include <memory>
 #include <atomic>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
 
 #include "../vision/liveness_types.h"
 #include "model_failure.h"
 #include "../vision/onnx_models.h"
-#include "auth_worker_client.h"
+#include "authentication_residency.h"
 #include "template_learner.h"
 #include "../vision/webcam_capture_dshow.h"
 #include "pipe_server.h"
@@ -52,32 +49,6 @@ public:
     static bool Uninstall();
 
 private:
-    struct InferenceModels {
-        std::unique_ptr<OnnxDetector> detector;
-        std::unique_ptr<OnnxRecognizer> recognizer;
-        std::unique_ptr<OnnxAntiSpoof> antiSpoof;
-    };
-
-    enum class ModelState {
-        Unloaded,
-        Loading,
-        Ready,
-        Failed,
-        Stopping,
-    };
-
-    class ModelUseGuard {
-    public:
-        explicit ModelUseGuard(FaceService& service) : m_service(service) {
-            m_service.BeginModelUse();
-        }
-        ~ModelUseGuard() { m_service.EndModelUse(); }
-        ModelUseGuard(const ModelUseGuard&) = delete;
-        ModelUseGuard& operator=(const ModelUseGuard&) = delete;
-    private:
-        FaceService& m_service;
-    };
-
     void Run();          // Main service loop
     void Stop();         // Heavy cleanup; called by the service main thread
     void RequestStop();  // Non-blocking SCM control-handler path
@@ -131,24 +102,9 @@ private:
                                  const wchar_t* expectedAck);
     bool SendAuthErrorMessage(const std::wstring& message);
 
-    // Model residency follows the interactive session: preload all inference
-    // sessions when Windows locks, retain them across failed auth retries, and
-    // release them after unlock. AUTH_REQUEST always requests + waits as a
-    // fallback in case a session notification was missed. A long-lived worker
-    // owns construction/destruction so HandlerEx never performs heavy work.
-    bool StartModelWorker();
-    void ModelWorkerLoop();
-    void StopModelWorker();
-    void RequestModelLoad(const wchar_t* reason);
-    void RequestModelUnload(const wchar_t* reason);
-    std::shared_ptr<InferenceModels> AcquireModelsForAuth(ipc::AuthDeadline deadline);
     std::shared_ptr<InferenceModels> LoadInferenceModels(ModelLoadFailure& failureReason);
-    std::shared_ptr<AuthWorkerClient> AcquireAuthWorkerForAuth(ipc::AuthDeadline deadline);
     std::shared_ptr<AuthWorkerClient> LoadAuthenticationWorker(const AppConfig& config,
-                                                                std::wstring& errorMessage);
-    void MarkAuthWorkerConsumed(bool preloadReplacement);
-    void BeginModelUse();
-    void EndModelUse();
+                                                              std::wstring& errorMessage);
 
     // Service state
     SERVICE_STATUS_HANDLE m_hStatus = nullptr;
@@ -187,34 +143,8 @@ private:
     float m_matchThreshold = 0.30f;
     int m_authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
 
-    // --- Session-aware model residency ---
-    std::shared_ptr<InferenceModels> m_models;
-    // Service mode owns no ONNX or camera objects. It holds only the parent
-    // control object for the short-lived worker; standalone retains the
-    // in-process path for desktop development verification.
-    std::shared_ptr<AuthWorkerClient> m_authWorker;
-    ModelState m_modelState = ModelState::Unloaded;
-    bool m_modelsWanted = false;
-    bool m_modelLoadRequested = false;
-    bool m_modelStopRequested = false;
-    std::wstring m_workerLoadError;
-    // CONFIG_RELOAD may arrive while a child is preloading. A generation lets
-    // the lifecycle thread discard that stale child and acknowledge only the
-    // child that reflects the newly saved camera/model settings.
-    uint64_t m_workerConfigGeneration = 0;
-    uint64_t m_loadedWorkerConfigGeneration = 0;
-    unsigned int m_activeModelUsers = 0;
+    AuthenticationResidency m_residency;
 
-    // Why the last model load failed, at category level: which model failed
-    // an integrity (SHA-256) check vs a plain load error. Lets the lock
-    // screen say "可能被篡改，重新安装" instead of a generic load error so a
-    // tamper is visible, not just logged. Cleared when a complete bundle
-    // loads successfully or the unlocked idle state intentionally drops the
-    // models.
-    std::atomic<ModelLoadFailure> m_modelLoadFailure{ModelLoadFailure::None};
-    std::thread m_modelWorkerThread;
-    std::mutex m_modelMutex;
-    std::condition_variable m_modelCv;
 };
 
 } // namespace facelogin

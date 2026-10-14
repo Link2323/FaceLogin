@@ -2,9 +2,9 @@
 
 #include "session_identity.h"
 #include "service_client.h"
+#include "enrollment_capture.h"
 
 #include <windows.h>
-#include <wincodec.h>
 #include <vector>
 #include <string>
 #include <memory>
@@ -16,14 +16,16 @@
 
 #include "../common/frame_image.h"
 #include "../vision/face_align.h"
-#include "../vision/face_gain_tune.h"
 #include "../vision/liveness_types.h"
 #include "../vision/onnx_models.h"
 #include "../vision/webcam_capture_dshow.h"
-#include "../storage/credential_store.h"
 #include "../common/config_util.h"
 
 namespace facelogin {
+
+class PreviewExposure;
+class PreviewFrameEncoder;
+class EnrollmentAccounts;
 
 // Backend controller for face enrollment.
 // All UI is handled by WebView2 + HTML; this class provides data & actions
@@ -37,28 +39,27 @@ public:
 
     bool StartPreview();
     void StopPreview();
-    int  GetSampleCount() const { return m_samplesCollected.load(); }
+    int  GetSampleCount() const { return m_capture.SampleCount(); }
     std::string GetUsername() const;
     std::string GetUserSid() const;
     std::string GetAccountType() const { return m_identity.accountType; }
-    // Blocking multi-angle capture for one head-yaw position:
+    // Asynchronous multi-angle capture for one head-yaw position:
     //   0 = front (0°), 1 = left (+30°), 2 = right (−30°).
     // Each call collects 5 yaw-gated frames (|yaw − target| ≤ 10°, face ≥ 60px,
-    // detection score ≥ 0.5); JS drives 0 → 1 → 2 in sequence. Angle 0 also
-    // runs the liveness check first. Frames accumulate across calls (flat
-    // m_embeddings, grouped in angle order), so SaveEnrollment can create one
+    // detection score ≥ 0.5); JS drives 0 → 1 → 2 in sequence. Every angle
+    // runs the liveness check first. Samples accumulate inside the capture
+    // session, grouped by angle, so SaveEnrollment can create one
     // face record per angle without ever averaging across angles.
     bool CaptureFaceSamples(int angleIndex);
-    // Cooperative stop: both capture phases check m_capturing between frames,
-    // so the thread exits within one poll interval. No-op when not capturing.
+    // Cooperative cancellation; completion is reported after the worker exits.
     void CancelCapture();
     // Capture progress for the JS UI:
     // {"angle":0,"label":"正面","targetYaw":0,"collected":3,"target":5,
     //  "yaw":12.3,"total":8,"livenessChecking":false,"livenessPassed":true,
     //  "cancelled":false,"done":false}
     std::string GetCaptureStatus();
-    bool IsLivenessPassed() const { return m_livenessPassed; }
-    bool IsLivenessChecking() const { return m_livenessChecking; }
+    bool IsLivenessPassed() const { return m_capture.LivenessPassed(); }
+    bool IsLivenessChecking() const { return m_capture.LivenessChecking(); }
     bool ValidatePassword(const std::wstring& password);
     // Soft quality hint from the LAST save (UTF-8; empty = no hint). Set when
     // the saved angle templates sit closer than the measured cross-angle
@@ -162,40 +163,19 @@ public:
     bool IsPreviewRunning() const { return m_previewRunning; }
 
 private:
-    std::string EncodeJPEGBase64(const FrameImage& frame);
     std::string FacesToJson(const std::vector<facelogin::FaceWithKps>& faces);
 
-    // Driver-facing exposure/gain controls shared by the StartPreview tune and
-    // the streaming watch below.
-    SensorKnobs BuildSensorKnobs();
-    // Preview-streaming exposure watch — called by the frame thread on every
-    // detected face, throttled. While a preview session is open the persisted
-    // manual exposure/gain has no other governor: ambient light drifts
-    // (2026-09-13: tune landed luma 89, worker read 178 washed-out frames 40 s
-    // later), and nothing re-runs the face-priority tune mid-stream. Skips
-    // while a capture is in flight so an enrollment sees one stable domain.
-    // A null detection also permits bounded no-face white-out recovery.
-    void WatchPreviewExposure(const FrameImage& frame,
-                              const OnnxDetector::Detection* det,
-                              unsigned long long frameSequence);
-    // Watch state, frame-thread only (StartPreview initializes before the
-    // thread starts; StopPreview joins before anything else touches them).
-    std::chrono::steady_clock::time_point m_lastExposureWatch{};
-    std::chrono::steady_clock::time_point m_lastExposureTune{};
-    // Single face-box luma readings jitter (face fill ratio, ambient flicker);
-    // a tune only fires on two consecutive out-of-band watch cycles.
-    float m_pendingWatchLuma = -1.0f;
-    FaceTuneRecovery m_exposureRecovery;
+    std::unique_ptr<PreviewExposure> m_previewExposure;
 
     bool SaveEnrollmentImpl(const std::wstring& password,
-                            const std::wstring& label);
+                            const std::wstring& label, bool append = false);
 
     // Camera & face processing
     std::unique_ptr<WebcamCaptureDS>  m_webcam;
     std::unique_ptr<OnnxDetector>   m_onnxDetector;   // SCRFD detection (+5 keypoints)
     std::unique_ptr<OnnxRecognizer> m_onnxRecognizer; // InsightFace recognition
     std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;
-    CredentialStore m_store;
+    std::unique_ptr<EnrollmentAccounts> m_accounts;
 
     // Configuration
     AppConfig m_config;
@@ -205,8 +185,7 @@ private:
     std::thread m_frameThread;
     std::atomic<bool> m_frameRunning{false};
 
-    // WIC factory (created once)
-    IWICImagingFactory* m_wicFactory = nullptr;
+    std::unique_ptr<PreviewFrameEncoder> m_frameEncoder;
 
     // Per-frame caches (produced by frame thread, consumed by JS on UI thread)
     std::mutex  m_frameCacheMutex;
@@ -218,26 +197,7 @@ private:
     // Preview state
     bool m_previewRunning = false;
 
-    // Enrollment state
-    std::vector<std::vector<float>> m_embeddings;
-    std::atomic<int> m_samplesCollected{0};
-    std::atomic<bool> m_capturing{false};
-    // Set together with m_capturing=false by CancelCapture; lets
-    // GetCaptureStatus (and the logs) distinguish a user cancel from a
-    // liveness failure until the next CaptureFaceSamples resets it.
-    std::atomic<bool> m_captureCancelled{false};
-    std::atomic<bool> m_livenessPassed{false};
-    std::atomic<bool> m_livenessChecking{false};
-    std::thread m_captureThread;
-
-    // Multi-angle enrollment state (v1.5): per-angle sample counts (the flat
-    // m_embeddings vector is grouped in angle order), current angle, and the
-    // latest yaw estimate for the live UI readout.
-    std::atomic<int> m_angleSampleCounts[3] = {0, 0, 0};
-    std::atomic<int> m_captureAngle{0};
-    std::atomic<float> m_lastYaw{0.0f};
-    static constexpr int kAngleTargetFrames = 5;
-    static constexpr int kAngleTargets[3] = {0, 30, -30};  // 正面 / 左转 / 右转
+    EnrollmentCapture m_capture;
 
     // Soft pair-spacing hint for the UI (see GetEnrollmentHint).
     std::string m_lastEnrollHint;
