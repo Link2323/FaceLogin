@@ -12,7 +12,7 @@
 
 ## 现行流程与缓存含义
 
-worker 与 standalone 共用 [`AuthPipeline::Run`](../../../face_service/auth_pipeline.cpp)，曝光控制和缓存读写在 [`face_gain_tune.h`](../../../face_service/face_gain_tune.h)。注册预览也使用这套调节器及同一 DataPath 下的 `camera_tune.state`；后续改变保存策略须联查 [`EnrollmentWizard.cpp`](../../../enrollment_app/EnrollmentWizard.cpp) 的预览启动与 `WatchPreviewExposure`。
+worker 与 standalone 共用 [`AuthPipeline::Run`](../../../face_service/auth_pipeline.cpp)，曝光控制和缓存读写在 [`face_gain_tune.h`](../../../vision/face_gain_tune.h)。注册预览也使用这套调节器及同一 DataPath 下的 `camera_tune.state`；后续改变保存策略须联查 [`EnrollmentWizard.cpp`](../../../enrollment_app/EnrollmentWizard.cpp) 的预览启动与 `WatchPreviewExposure`。
 
 ```mermaid
 flowchart TD
@@ -86,7 +86,7 @@ flowchart TD
 
 ### 3. 稳定等待昂贵，但不能直接删掉
 
-[`FaceSettleGate`](../../../face_service/face_gain_tune.h) 已支持提前结束：观测到方向性响应，至少 4 个样本形成持续至少 200 ms 的稳定窗口，并通过漂移检查时，可在 900 ms 前确认。缺少响应证据时，900 ms 是回退等待下限，仍要求稳定；它不是每次写参数都必须睡满的固定延迟。
+[`FaceSettleGate`](../../../vision/face_gain_tune.h) 已支持提前结束：观测到方向性响应，至少 4 个样本形成持续至少 200 ms 的稳定窗口，并通过漂移检查时，可在 900 ms 前确认。缺少响应证据时，900 ms 是回退等待下限，仍要求稳定；它不是每次写参数都必须睡满的固定延迟。
 
 11:49:31 的一次增益恢复读了 40 个样本、耗时 1326 ms，仍未确认稳定；其他轮次有丢脸或取消。缩短等待、把样本耗尽当作稳定，可能使旧帧进入认证或保存未确认设置。应优先减少无用重放和调节，再根据真实响应评估等待参数。
 

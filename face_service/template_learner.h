@@ -2,7 +2,7 @@
 
 #include <windows.h>
 
-#include "credential_store.h"
+#include "../storage/credential_store.h"
 
 #include <atomic>
 #include <chrono>

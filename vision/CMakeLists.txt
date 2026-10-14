@@ -1,0 +1,27 @@
+# Shared by service, enrollment and diagnostics. Keep capture independent of
+# ONNX Runtime so camera-only tools do not acquire inference dependencies.
+add_library(facelogin_camera STATIC
+    webcam_capture_dshow.cpp
+    webcam_capture_dshow.h
+    camera_types.h
+    exposure_warmup.h
+)
+target_include_directories(facelogin_camera PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(facelogin_camera
+    PUBLIC facelogin_common
+    PRIVATE strmiids ole32 oleaut32
+)
+
+add_library(facelogin_inference STATIC
+    onnx_models.cpp
+    onnx_models.h
+    face_align.h
+    face_gain_tune.h
+    liveness_types.h
+)
+target_include_directories(facelogin_inference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(facelogin_inference PUBLIC facelogin_common onnxruntime::onnxruntime)
+
+set_target_properties(facelogin_camera facelogin_inference PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+)

@@ -49,7 +49,11 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 目录：`enrollment_app/`
 
-`FaceLoginConsole.exe` 是管理员运行的 Win32 + WebView2 应用。`EnrollmentWizard` 负责摄像头、检测/PAD、身份、密码验证和持久化；`WebviewHost` 把后端通过 `IDispatch` 暴露给嵌入的 `index.html`。
+`FaceLoginConsole.exe` 是管理员运行的 Win32 + WebView2 应用。`EnrollmentWizard` 负责预览、采样和录入流程，协调身份检查、配置与数据库更新；`WebviewHost` 把后端通过 `IDispatch` 暴露给嵌入的 `index.html`。
+
+注册端的 Windows 会话查询与密码验证集中在 `session_identity.*`；`service_client.*` 管理数据库重载、配置重载和学习状态查询的管道连接、等待及 ACK；`log_viewer.*` 管理四个固定日志来源的读取、旧 UTF-16 兼容和清空。这三者组成 `facelogin_enrollment_support` 静态库，供 Console 与独立测试使用，不依赖 WebView2、相机或推理模型。
+
+预览与注册使用 [`vision/`](../../vision/) 的相机和推理库，凭据保存与人脸管理使用 [`storage/`](../../storage/) 的数据库库。注册程序通过链接目标复用它们，不再包含或编译 `face_service/` 的内部文件。
 
 控制台 UI 线程由 WebView2 初始化为 STA。DirectShow 预览必须复用该 COM 公寓，不能再次请求 MTA，否则会得到 `RPC_E_CHANGED_MODE` 并使预览在模型初始化前失败。服务 worker 则在其自己的 MTA 中运行。 预览与解锁共用 `WebcamCaptureDS`（face exposure tune 在其调用链上），两侧曝光行为一致；预览分辨率 1280×720、worker 640×480，驱动 AE 为传感器级测光不受分辨率影响。
 
@@ -57,13 +61,12 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 ### 账号身份
 
-构造/刷新身份时依次使用：
+`session_identity.*` 在构造时读取身份快照，账号变化检测与密码验证时重新查询当前会话。身份来源为：
 
 1. `GetUserNameW` 获取 SAM 用户名。
 2. `GetUserNameExW(NameUserPrincipal)` 获取 UPN。
-3. `GetUserNameExW(NameSamCompatible)` 获取 `DOMAIN\User`。
-4. `LookupAccountNameW` 获取 SID。
-5. IdentityStore 注册表缓存作为 MSA UPN 回退。
+3. UPN 不可用时，仅从当前进程令牌的已启用 MSA 身份组解析邮箱，不使用机器级 IdentityStore 缓存。
+4. `LookupAccountNameW` 优先按 UPN、再按 SAM 用户名获取身份快照中的 SID；人脸追加授权和账号记录修复另行读取当前进程令牌的用户 SID。
 
 检测 MSA ↔ local 变化时必须保留已有脸并正确更新/清除 UPN。人脸录入要求账户具有 Windows 或 MSA 密码。
 
@@ -73,7 +76,7 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 1. SCRFD bbox + 5 点和 yaw 门控。
 2. 双 MiniFAS PAD。
-3. 收集该角度的 512-D embedding。
+3. 收集该角度的 128-D SFace embedding。
 4. 做角度内一致性检查。
 5. 独立 `AddFace` 保存一条记录。
 
@@ -125,6 +128,7 @@ Credential Provider 改动：
 
 Enrollment 改动：
 
+- 构建 `FaceLoginConsole`；服务控制通信和日志改动还需构建、运行 `EnrollmentSupportTest`（独立测试管道、临时日志目录）及 `IpcProtocolTest`
 - 管理员启动与提权
 - 预览/锁屏摄像头释放
 - 三角度采集与一致性拒绝

@@ -1,6 +1,6 @@
 # `users.dat` 持久化契约
 
-本文定义 FaceLogin 凭据数据库 V6 契约。实现事实源是 [`face_service/credential_store.h`](../../face_service/credential_store.h) 和 [`face_service/credential_store.cpp`](../../face_service/credential_store.cpp)。不要根据本文单独重写解析器；修改格式时必须同步所有消费者。
+本文定义 FaceLogin 凭据数据库 V6 契约。实现事实源是 [`storage/credential_store.h`](../../storage/credential_store.h) 和 [`storage/credential_store.cpp`](../../storage/credential_store.cpp)。不要根据本文单独重写解析器；修改格式时必须同步所有消费者。
 
 ## 位置与安全属性
 
@@ -94,7 +94,7 @@
 
 格式或语义变化时至少同步检查：
 
-- `face_service/credential_store.h/cpp`
+- `storage/credential_store.h/cpp`
 - `credential_provider/FaceLoginProvider.cpp` 的 header 读取
 - `enrollment_app/EnrollmentWizard.*`
 - 安装/升级/卸载是否保留或清除用户数据

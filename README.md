@@ -137,6 +137,8 @@ flowchart TB
 ```
 FaceLogin/
 ├── common/                 # 公共库（日志、IPC协议、DPAPI、配置）
+├── vision/                 # 共用相机采集、模型推理与曝光控制
+├── storage/                # 共用凭据数据库与人脸匹配
 ├── credential_provider/    # Windows 凭据提供程序 COM DLL
 ├── face_service/           # 人脸识别 Windows 服务
 ├── enrollment_app/         # 人脸录入控制台（WebView2 GUI）

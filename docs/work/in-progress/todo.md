@@ -23,3 +23,9 @@ C++ 的生产 worker、standalone 和 `ModelIntegrityTest` 已共同使用 `comm
 `ResolveSecureDataDir` 的白名单目前只在服务端执行；Credential Provider 与 Enrollment 仍直接读取 `DataPath`。安装器默认将其设为安装目录且注册表 ACL 已受保护，当前没有已知绕过，但三组件的规则不一致。
 
 建议：在保留 Credential Provider 的 ProgramData 空值回退语义下，让三组件共用相同的受信路径解析与测试。
+
+## 开发说明
+
+### C — 清理推理接口与离线标定的旧说明
+
+2026-10-14 共享代码迁移时发现：`vision/onnx_models.h` 的预处理注释仍写 640×640，实际 `onnx_models.cpp` 使用 512×512；`tools/threshold_calibration/calibrate.py` 仍描述历史 R50/512-D、0.80 阈值及 640×640 标定口径，不能当作当前 SFace 生产行为的说明。后续应校正头文件注释，并明确离线脚本的历史用途；此次仅迁移文件与引用，保留算法和参数。

@@ -4,7 +4,7 @@ add_executable(LivenessTimingTest
 )
 
 target_include_directories(LivenessTimingTest PRIVATE
-    ${CMAKE_SOURCE_DIR}/face_service
+    ${CMAKE_SOURCE_DIR}/vision
 )
 
 set_target_properties(LivenessTimingTest PROPERTIES

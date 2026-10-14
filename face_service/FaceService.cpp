@@ -1,6 +1,6 @@
 #include "FaceService.h"
 #include "auth_pipeline.h"
-#include "face_align.h"
+#include "../vision/face_align.h"
 #include "performance_affinity.h"
 #include "../common/logger.h"
 #include "../common/ipc_protocol.h"

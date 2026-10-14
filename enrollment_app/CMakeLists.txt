@@ -1,11 +1,19 @@
+add_library(facelogin_enrollment_support STATIC
+    session_identity.cpp
+    service_client.cpp
+    log_viewer.cpp
+)
+target_link_libraries(facelogin_enrollment_support PUBLIC facelogin_common)
+target_include_directories(facelogin_enrollment_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(facelogin_enrollment_support PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+)
+
 add_executable(FaceLoginConsole
     main.cpp
     WebviewHost.cpp
     EnrollmentWizard.cpp
     resource.rc
-    ${CMAKE_SOURCE_DIR}/face_service/webcam_capture_dshow.cpp
-    ${CMAKE_SOURCE_DIR}/face_service/onnx_models.cpp
-    ${CMAKE_SOURCE_DIR}/face_service/credential_store.cpp
 )
 facelogin_add_version_rc(FaceLoginConsole VFT_APP
     "FaceLogin enrollment console" FaceLoginConsole.exe)
@@ -13,10 +21,10 @@ configure_file(version.h.in ${CMAKE_CURRENT_BINARY_DIR}/version.h @ONLY)
 target_include_directories(FaceLoginConsole PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 target_link_libraries(FaceLoginConsole PRIVATE
-    facelogin_common
-
-    onnxruntime::onnxruntime
-    strmiids
+    facelogin_enrollment_support
+    facelogin_camera
+    facelogin_inference
+    facelogin_credential_store
     comctl32
     advapi32
     ole32
@@ -28,7 +36,6 @@ target_link_libraries(FaceLoginConsole PRIVATE
 
 target_include_directories(FaceLoginConsole PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/face_service
     ${CMAKE_CURRENT_SOURCE_DIR}/webview2/include
 )
 

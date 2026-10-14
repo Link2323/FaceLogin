@@ -2,6 +2,8 @@
 
 本文说明 `face_service/` 的进程边界和认证约束。实现入口为 [`FaceService.cpp`](../../face_service/FaceService.cpp)。公共 IPC、worker 私有 IPC 和数据库格式分别以 [`IPC 契约`](../contracts/ipc.md)、[`worker IPC 契约`](../contracts/auth-worker-ipc.md) 和 [`users.dat 契约`](../contracts/users-dat.md) 为准。
 
+服务目录保留生命周期、认证流程、worker、管道和学习调度。相机、模型推理、对齐与曝光控制由共享目录 [`vision/`](../../vision/) 提供；凭据数据库与匹配由 [`storage/`](../../storage/) 提供。服务和注册程序链接同一份静态库实现，各进程仍独立持有实例和运行状态；构建依赖见 [`BUILD.md`](../BUILD.md#c-构建)。
+
 ## 职责与生命周期
 
 服务父进程负责 DataPath、配置、`users.dat`、公开命名管道和身份匹配。锁屏期间异步预载一个 `-auth-worker`，worker 持有 ONNX 模型并在认证请求后打开摄像头，完成一次请求即退出。父进程不持有 ONNX Session，也不会在认证前打开摄像头。

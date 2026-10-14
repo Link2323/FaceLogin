@@ -1,7 +1,7 @@
 #include "template_learner.h"
 
 #include "../common/logger.h"
-#include "face_align.h"
+#include "../vision/face_align.h"
 
 #include <algorithm>
 #include <cmath>

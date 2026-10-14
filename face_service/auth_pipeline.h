@@ -1,8 +1,8 @@
 #pragma once
 
-#include "liveness_types.h"
-#include "face_gain_tune.h"
-#include "onnx_models.h"
+#include "../vision/liveness_types.h"
+#include "../vision/face_gain_tune.h"
+#include "../vision/onnx_models.h"
 #include "../common/frame_image.h"
 #include "../common/ipc_protocol.h"
 

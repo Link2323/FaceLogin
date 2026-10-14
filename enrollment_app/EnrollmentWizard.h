@@ -1,5 +1,8 @@
 #pragma once
 
+#include "session_identity.h"
+#include "service_client.h"
+
 #include <windows.h>
 #include <wincodec.h>
 #include <vector>
@@ -12,12 +15,12 @@
 #include <cstdint>
 
 #include "../common/frame_image.h"
-#include "../face_service/face_align.h"
-#include "../face_service/face_gain_tune.h"
-#include "../face_service/liveness_types.h"
-#include "../face_service/onnx_models.h"
-#include "../face_service/webcam_capture_dshow.h"
-#include "../face_service/credential_store.h"
+#include "../vision/face_align.h"
+#include "../vision/face_gain_tune.h"
+#include "../vision/liveness_types.h"
+#include "../vision/onnx_models.h"
+#include "../vision/webcam_capture_dshow.h"
+#include "../storage/credential_store.h"
 #include "../common/config_util.h"
 
 namespace facelogin {
@@ -37,7 +40,7 @@ public:
     int  GetSampleCount() const { return m_samplesCollected.load(); }
     std::string GetUsername() const;
     std::string GetUserSid() const;
-    std::string GetAccountType() const { return m_accountType; }
+    std::string GetAccountType() const { return m_identity.accountType; }
     // Blocking multi-angle capture for one head-yaw position:
     //   0 = front (0°), 1 = left (+30°), 2 = right (−30°).
     // Each call collects 5 yaw-gated frames (|yaw − target| ≤ 10°, face ≥ 60px,
@@ -184,16 +187,8 @@ private:
     float m_pendingWatchLuma = -1.0f;
     FaceTuneRecovery m_exposureRecovery;
 
-    // Reads <m_dataDir>\log\<logFileName> and returns a JSON array of lines
-    // for the JS log viewer (shared by Service/AuthWorker/CredentialProvider).
-    std::string ReadLogFileLines(const std::wstring& logFileName);
-    // Collapses <m_dataDir>\log\<fileName> to zero length (ClearLog /
-    // ClearFileLog). Missing file counts as success.
-    bool TruncateLogFileByName(const std::wstring& fileName);
-
     bool SaveEnrollmentImpl(const std::wstring& password,
                             const std::wstring& label);
-    static std::wstring GetCurrentProcessUserSid();
 
     // Camera & face processing
     std::unique_ptr<WebcamCaptureDS>  m_webcam;
@@ -247,10 +242,8 @@ private:
     // Soft pair-spacing hint for the UI (see GetEnrollmentHint).
     std::string m_lastEnrollHint;
 
-    std::wstring m_username;
-    std::wstring m_upn;       // UserPrincipalName (e.g. "john@outlook.com") or empty for local
-    std::wstring m_sid;       // Security Identifier string
-    std::string m_accountType; // "local" or "msa"
+    session_identity::SessionIdentity m_identity;
+    EnrollmentServiceClient m_serviceClient;
     std::wstring m_dataDir;
 };
 

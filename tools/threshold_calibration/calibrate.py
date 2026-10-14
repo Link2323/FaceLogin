@@ -4,7 +4,7 @@
 Replicates the C++ auth pipeline (SCRFD gnkps detection -> 5-point Umeyama
 alignment -> w600k_r50 embedding -> L2-normalized Euclidean distance) in
 Python so that the measured distance distributions are directly comparable
-to the hardcoded 0.80 cutoff in face_service/credential_store.h
+to the hardcoded 0.80 cutoff in storage/credential_store.h
 (`EmbeddingThresholdForDim`). The point is to produce same-person /
 other-person / photo distance distributions to justify (or revise) that
 threshold with real data instead of the single-subject sample recorded in
@@ -14,7 +14,7 @@ NUMERICAL FIDELITY IS THE CORE CONSTRAINT. Every normalization constant,
 decode formula, and rounding step mirrors the C++ source bit-for-bit:
 
   - SCRFD input:  BGR, NCHW, (pixel - 127.5) / 128.0, 640x640 stretched resize
-                  (no letterbox). See face_service/onnx_models.cpp:241-252.
+                  (no letterbox). See vision/onnx_models.cpp:241-252.
   - SCRFD output: 9 tensors in grouped order [score_8/16/32, box_8/16/32,
                   lmk5pt_8/16/32]; box/kps are stride-unit distances that the
                   C++ decoder multiplies by stride. See onnx_models.cpp:305-373.
@@ -27,7 +27,7 @@ decode formula, and rounding step mirrors the C++ source bit-for-bit:
                   See onnx_models.cpp:311, 375-398.
   - Alignment:    closed-form Umeyama over all 5 points (NOT cv2
                   estimateAffinePartial2D), target kInsightFaceRef112 at 6
-                  decimals. See face_service/face_align.h:34-78, 139-146.
+                  decimals. See vision/face_align.h:34-78, 139-146.
   - Warp:         hand-written inverse-mapping bilinear with +0.5 round-to-
                   nearest uint8 (NOT cv2.warpAffine, which does not round),
                   half-open boundary >= srcW/srcH -> black, x0+1 clamped to
@@ -67,25 +67,25 @@ import onnxruntime as ort
 # Constants mirrored from C++ (see module docstring for source references).
 # ---------------------------------------------------------------------------
 
-# face_service/onnx_models.cpp:292 — SCRFD input is fixed 640x640.
+# vision/onnx_models.cpp:292 — SCRFD input is fixed 640x640.
 SCRFD_INPUT_SIZE = 512  # production detect input (was 640; 512 validated
 # 2026-08: 60/60 detections, box IoU 0.96, detect time -34% on weak CPUs)
-# face_service/onnx_models.cpp:311, 379.
+# vision/onnx_models.cpp:311, 379.
 SCRFD_SCORE_THRESHOLD = 0.5
 SCRFD_NMS_IOU = 0.5
 # Three strides, two anchors per cell. onnx_models.cpp:330-344.
 SCRFD_STRIDES = (8, 16, 32)
 SCRFD_NUM_ANCHORS = 2
 
-# face_service/onnx_models.cpp:241-252. NOTE the divisor is 128.0, not 127.5.
+# vision/onnx_models.cpp:241-252. NOTE the divisor is 128.0, not 127.5.
 SCRFD_NORM_MEAN = 127.5
 SCRFD_NORM_DIVISOR = 128.0
 
-# face_service/onnx_models.cpp:127-148. Recognizer divisor is 127.5.
+# vision/onnx_models.cpp:127-148. Recognizer divisor is 127.5.
 RECOG_NORM_DIVISOR = 127.5
 RECOG_INPUT_SIZE = 112
 
-# face_service/face_align.h:34-40. InsightFace 112x112 reference template,
+# vision/face_align.h:34-40. InsightFace 112x112 reference template,
 # copied at full 6-decimal precision: left-eye, right-eye, nose, left-mouth,
 # right-mouth.
 INSIGHTFACE_REF_112 = np.array(
@@ -141,7 +141,7 @@ def load_image(path: Path, rotate: int = 0) -> np.ndarray | None:
 
 
 # ---------------------------------------------------------------------------
-# SCRFD detection — faithful port of face_service/onnx_models.cpp:186-428.
+# SCRFD detection — faithful port of vision/onnx_models.cpp:186-428.
 # ---------------------------------------------------------------------------
 
 
@@ -319,7 +319,7 @@ class ScrfdDetector:
 
 
 # ---------------------------------------------------------------------------
-# Alignment — faithful port of face_service/face_align.h:42-146.
+# Alignment — faithful port of vision/face_align.h:42-146.
 # ---------------------------------------------------------------------------
 
 
@@ -414,7 +414,7 @@ def align_face(image_bgr: np.ndarray, kps: np.ndarray) -> np.ndarray | None:
 
 
 # ---------------------------------------------------------------------------
-# Recognizer — faithful port of face_service/onnx_models.cpp:109-178.
+# Recognizer — faithful port of vision/onnx_models.cpp:109-178.
 # ---------------------------------------------------------------------------
 
 

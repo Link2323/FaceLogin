@@ -23,6 +23,6 @@ FaceLogin 是面向 Windows 的人脸登录应用，通过 Credential Provider �
 
 ## 账户兼容性
 
-本地账户和 Microsoft 账户（MSA）支持注册与登录。MSA 身份优先通过 `GetUserNameExW(NameUserPrincipal)` 获取；该 API 不返回 UPN 时，Enrollment 使用 Windows IdentityStore 缓存回退。域账户目前没有正式验证，不承诺支持。
+本地账户和 Microsoft 账户（MSA）支持注册与登录。注册端的会话身份来源与回退约束见 [Windows 客户端：账号身份](../modules/windows-clients.md#账号身份)。域账户目前没有正式验证，不承诺支持。
 
 本地账户使用 `COMPUTERNAME\Username`，MSA 使用 UPN 交给 Windows 认证包。模型切换后的数据库兼容与重录要求见 [`users.dat 契约`](../contracts/users-dat.md) 和 [`SFace 试用说明`](../work/in-progress/sface-trial.md)。

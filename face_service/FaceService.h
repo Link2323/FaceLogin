@@ -8,14 +8,14 @@
 #include <mutex>
 #include <condition_variable>
 
-#include "liveness_types.h"
+#include "../vision/liveness_types.h"
 #include "model_failure.h"
-#include "onnx_models.h"
+#include "../vision/onnx_models.h"
 #include "auth_worker_client.h"
 #include "template_learner.h"
-#include "webcam_capture_dshow.h"
+#include "../vision/webcam_capture_dshow.h"
 #include "pipe_server.h"
-#include "credential_store.h"
+#include "../storage/credential_store.h"
 #include "../common/config_util.h"
 
 namespace facelogin {

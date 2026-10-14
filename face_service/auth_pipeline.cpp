@@ -1,9 +1,9 @@
 #include "auth_pipeline.h"
 
 #include "../common/logger.h"
-#include "exposure_warmup.h"
-#include "face_align.h"
-#include "face_gain_tune.h"
+#include "../vision/exposure_warmup.h"
+#include "../vision/face_align.h"
+#include "../vision/face_gain_tune.h"
 
 #include <algorithm>
 #include <array>

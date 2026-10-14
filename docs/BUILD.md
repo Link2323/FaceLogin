@@ -36,6 +36,18 @@ cmake --build build --config Release --parallel
 
 开发测试从根 CMake 单独构建。
 
+服务和注册程序通过静态库复用共享实现：`vision/` 提供 `facelogin_camera`（DirectShow）与 `facelogin_inference`（ONNX Runtime），`storage/` 提供 `facelogin_credential_store`。消费方链接目标即可获得头文件和传递依赖，不再把这些 `.cpp` 加入各自源码清单。相机诊断程序只链接相机库；`AuthPipelineTest` 保留确定性推理替身，不链接真实推理实现。Credential Provider 仅引用存储头文件中的定义，继续使用自己的静态 CRT 构建。
+
+注册端支持模块可独立验证，无需打开相机或启动已安装的服务：
+
+```powershell
+cmake --build build --config Release --target EnrollmentSupportTest IpcProtocolTest --parallel 1
+.\build\tools\enrollment_support\Release\EnrollmentSupportTest.exe
+.\build\tools\ipc_protocol\Release\IpcProtocolTest.exe
+```
+
+`EnrollmentSupportTest` 使用独立命名管道和自动清理的临时日志目录，覆盖服务请求/ACK、拒绝与断开响应，以及日志编码、截尾和正在写入的日志清空。
+
 ## 安装包构建
 
 ### 推荐：一键构建

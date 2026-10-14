@@ -2,7 +2,7 @@
 #include "FaceLoginCredential.h"
 #include "../common/logger.h"
 #include "../common/registry_util.h"
-#include "../face_service/credential_store.h"
+#include "../storage/credential_store.h"
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <fstream>

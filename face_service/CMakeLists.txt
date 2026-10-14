@@ -5,22 +5,18 @@ add_executable(FaceLoginService
     auth_worker.cpp
     auth_worker_client.cpp
     auth_worker_protocol.cpp
-    onnx_models.cpp
     performance_affinity.cpp
     template_learner.cpp
-    webcam_capture_dshow.cpp
     pipe_server.cpp
-    credential_store.cpp
 )
 
 facelogin_add_version_rc(FaceLoginService VFT_APP
     "FaceLogin authentication service" FaceLoginService.exe)
 
 target_link_libraries(FaceLoginService PRIVATE
-    facelogin_common
-
-    onnxruntime::onnxruntime
-    strmiids
+    facelogin_camera
+    facelogin_inference
+    facelogin_credential_store
     advapi32
     ole32
 )

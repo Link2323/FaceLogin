@@ -23,6 +23,8 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 | `credential_provider/` | 由 LogonUI 加载的 Credential Provider COM DLL |
 | `enrollment_app/` | WebView2 注册 GUI（不是 `console/`） |
 | `common/` | 服务、凭据提供器和注册程序共享库 |
+| `vision/` | 服务与注册程序共用的相机采集、推理、对齐和曝光控制 |
+| `storage/` | 服务与注册程序共用的凭据数据库读写与匹配 |
 | `installer/FaceLoginSetup/` | Go/Wails 安装器；`resources/` 是嵌入载荷镜像 |
 | `assets/`、`scripts/` | 图像与模型资源、模型和开发辅助脚本 |
 | `tools/` | 离线分析与标定工具 |
@@ -33,7 +35,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 
 - 构建、依赖和打包流程以 [`docs/BUILD.md`](docs/BUILD.md) 为准。优先使用 `scripts/build_installer.ps1`；版本同步使用 `scripts/bump_version.ps1`。
 - `installer/FaceLoginSetup/resources/` 中的二进制和模型按文件类型被 Git 忽略。打包脚本按白名单复制并清理资源；手工打包前按 `docs/BUILD.md` 核对。安装包需要的 5 个运行时 DLL 来自 `build/face_service/Release/`；Credential Provider 使用静态 CRT，不依赖这些 DLL。
-- `embed.FS` 会嵌入资源目录中的全部文件，打包前清除意外残留。`tools/` 中的离线工具不属于安装载荷。
+- 完整安装器嵌入由 `resources/` 生成的 `payload.zip`，打包前按白名单清除意外残留；slim 卸载器不嵌入载荷。`tools/` 中的离线工具不属于安装载荷。
 - 不编辑 `installer/FaceLoginSetup/frontend/wailsjs/` 下的生成绑定；通过 Wails 命令重新生成。
 - 普通构建和打包复用现有模型文件，不重复下载或量化。只有新克隆缺模型、哈希校验失败或任务明确要求升级时，才运行模型下载脚本。模型来源、哈希和转换规则见 `third_party/models/` 与 [`DEVELOPMENT.md`](DEVELOPMENT.md#sec-models)。
 - 依赖或模型变更时，同步更新适用的许可、来源记录和随包声明；事实源及更新脚本见 `docs/BUILD.md`、`third_party/sources.json`。
@@ -55,7 +57,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 - 按现有同步方式保护共享状态：Win32 临界区、原子变量和事件。注册程序的帧缓存由 `EnrollmentWizard::m_frameCacheMutex` 保护；该模块不用条件变量。
 - 函数以 `bool` 返回成功状态，详细错误通过 `FACELOGIN_ERROR` 记录；不用异常做控制流。
 - 密码保存在 `std::wstring` 中，所有退出路径都要清零；日志绝不记录密码。DPAPI 使用 `CRYPTPROTECT_LOCAL_MACHINE`，凭据绑定本机。
-- 处理 MSA 账户时，UPN 解析和 IdentityStore 缓存回退行为见 [`docs/design/overview.md`](docs/design/overview.md)。无密码 MSA 账户必须被检测并阻止。
+- 处理 MSA 账户时，UPN 解析和当前进程令牌回退行为见 [`docs/modules/windows-clients.md`](docs/modules/windows-clients.md#账号身份)。无密码 MSA 账户必须被检测并阻止。
 - 安装器是 Go 项目，安装与卸载逻辑放在 `installer/FaceLoginSetup/internal/`，参见 [`docs/modules/installer.md`](docs/modules/installer.md)。
 - 一次性验证和下载中间产物在任务结束时清理；正式 `build/` 输出保留。
 

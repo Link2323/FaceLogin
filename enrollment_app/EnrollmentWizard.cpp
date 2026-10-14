@@ -1,167 +1,30 @@
 #include "EnrollmentWizard.h"
+#include "enrollment_text.h"
+#include "log_viewer.h"
 #include "../common/logger.h"
 #include "../common/dpapi_util.h"
-#include "../common/ipc_protocol.h"
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
 #include "../common/frame_image.h"
 #include "../common/model_hashes.h"
 #include "../common/sha256_util.h"
-#include "../face_service/face_gain_tune.h"
+#include "../vision/face_gain_tune.h"
 #include <comdef.h>
 #include <shlobj.h>
 #include <wincodec.h>
-#include <wincred.h>
-#include <sddl.h>
-#include <lmaccess.h>
-#include <lmapibuf.h>
-#include <lmerr.h>
 #include <thread>
 #include <chrono>
 #include <cmath>
 #include <sstream>
 #include <iomanip>
-#include <cmath>
-#include <chrono>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "windowscodecs.lib")
 
 namespace facelogin {
 
-// Helper: convert UTF-8 string to wide string (for config camera_device)
-static std::wstring Utf8ToWstr(const std::string& s) {
-    if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    if (len <= 0) return L"";
-    std::wstring ws(len - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
-    return ws;
-}
-
-// ---------------------------------------------------------------------------
-// Session identity helpers
-//
-// The authoritative UPN source is GetUserNameExW(NameUserPrincipal): it
-// returns the email for Microsoft accounts and fails with ERROR_NONE_MAPPED
-// (1332) for local accounts. On a subset of machines, however, the whole UPN
-// family of name formats fails with 1332 even for a live MSA session
-// (observed on Windows 11 with a local SAM account linked to a Microsoft
-// account: only NameFullyQualifiedDN / NameSamCompatible succeed;
-// UserPrincipal/Display/Canonical/CanonicalEx/SPN/DnsDomain all return 1332).
-// In that case the UPN is empty and every MSA/local decision collapses to
-// "local" — the UI then says "Windows 密码" while the password that actually
-// authenticates is the Microsoft account password (the user-visible symptom
-// we are fixing).
-//
-// Fallback: scan the process token's ENABLED groups for the MSA identity.
-// LSA injects a group SID under the MicrosoftAccount\S-1-11-96-... authority
-// into the token of any session that logged on via a linked Microsoft
-// account, and LookupAccountSidW resolves its name to the email (e.g.
-// "MicrosoftAccount\shi2jun2cheng2@outlook.com"). This is bound to the
-// CURRENT session token, so unlike the machine-wide IdentityStore\LogonCache
-// registry caches it can never carry another user's leftover MSA email — the
-// exact misattribution that produced bug1's perpetual false "账号身份已变更"
-// prompt (docs/todo.md bug1). IdentityStore\LogonCache\Name2Sid and
-// IdentityCRL\StoredIdentities must NOT be re-added as fallbacks.
-// ---------------------------------------------------------------------------
-
-// Primary UPN query. Returns empty on failure (1332 or no secur32).
-static std::wstring GetSessionUpn() {
-    std::wstring upn;
-    HMODULE hSecur32 = LoadLibraryW(L"secur32.dll");
-    if (!hSecur32) return upn;
-    typedef BOOLEAN (WINAPI *PFN_GetUserNameExW)(int, LPWSTR, PULONG);
-    auto pfn = reinterpret_cast<PFN_GetUserNameExW>(
-        GetProcAddress(hSecur32, "GetUserNameExW"));
-    if (pfn) {
-        ULONG upnSize = 256;
-        std::vector<wchar_t> upnBuf(upnSize);
-        if (pfn(8 /* NameUserPrincipal */, upnBuf.data(), &upnSize)) {
-            upn = upnBuf.data();
-        }
-    }
-    FreeLibrary(hSecur32);
-    return upn;
-}
-
-// Fallback used only when GetSessionUpn() returned empty: scans the current
-// process token's ENABLED groups for the MSA identity LSA injects and returns
-// the email portion. Empty when the session is genuinely local (no MSA group)
-// or the SID cannot be resolved.
-//
-// The S-1-11-96-... prefix (identifier authority 11, first sub-authority 96)
-// is the MicrosoftAccount namespace — used as a cheap filter before the
-// authoritative LookupAccountSidW call. We only consider enabled groups
-// (SE_GROUP_ENABLED) and skip deny-only / disabled groups, since a disabled
-// MSA group does not represent the active logon identity.
-static std::wstring ResolveSessionMsaUpnFromToken() {
-    HANDLE hToken = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        return L"";
-    }
-    std::wstring result;
-    DWORD sz = 0;
-    GetTokenInformation(hToken, TokenGroups, nullptr, 0, &sz);
-    if (sz > 0) {
-        std::vector<BYTE> buf(sz);
-        if (GetTokenInformation(hToken, TokenGroups, buf.data(), sz, &sz)) {
-            auto* tg = reinterpret_cast<TOKEN_GROUPS*>(buf.data());
-            for (DWORD i = 0; i < tg->GroupCount; ++i) {
-                // Only enabled groups represent the active identity; skip
-                // SE_GROUP_USE_FOR_DENY_ONLY and disabled groups.
-                if (!(tg->Groups[i].Attributes & SE_GROUP_ENABLED)) {
-                    continue;
-                }
-                PSID sid = tg->Groups[i].Sid;
-                if (!sid) continue;
-
-                // Cheap filter on the string form: S-1-11-96-... is the
-                // MicrosoftAccount namespace.
-                LPWSTR sidStr = nullptr;
-                if (!ConvertSidToStringSidW(sid, &sidStr)) continue;
-                std::wstring sidStrW = sidStr;
-                LocalFree(sidStr);
-                if (sidStrW.rfind(L"S-1-11-96-", 0) != 0) continue;
-
-                // Authoritative check: domain must be "MicrosoftAccount" and
-                // the name must contain '@' (the email form).
-                wchar_t name[256] = {};
-                wchar_t domain[256] = {};
-                DWORD nameLen = ARRAYSIZE(name);
-                DWORD domainLen = ARRAYSIZE(domain);
-                SID_NAME_USE sidType;
-                if (LookupAccountSidW(nullptr, sid, name, &nameLen,
-                                      domain, &domainLen, &sidType)) {
-                    std::wstring nameW = name;
-                    std::wstring domainW = domain;
-                    if (domainW == L"MicrosoftAccount" &&
-                        nameW.find(L'@') != std::wstring::npos) {
-                        result = nameW;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    CloseHandle(hToken);
-    return result;
-}
-
-// Unified entry point for ALL MSA/local decisions. Try the authoritative
-// GetUserNameExW query first; on 1332/empty fall back to the token MSA group.
-static std::wstring ResolveSessionUpn() {
-    std::wstring upn = GetSessionUpn();
-    if (!upn.empty() && upn.find(L'@') != std::wstring::npos) {
-        return upn;
-    }
-    return ResolveSessionMsaUpnFromToken();
-}
-
-// MSA test used everywhere: UPN non-empty and contains '@'.
-static bool IsMsaUpn(const std::wstring& upn) {
-    return !upn.empty() && upn.find(L'@') != std::wstring::npos;
-}
+using enrollment_detail::Utf8ToWstr;
+using enrollment_detail::WstrToUtf8;
 
 EnrollmentWizard::EnrollmentWizard() {
     std::wstring regData = ReadRegString(REGVAL_DATA_PATH, L"");
@@ -193,107 +56,7 @@ EnrollmentWizard::EnrollmentWizard() {
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                      IID_PPV_ARGS(&m_wicFactory));
 
-    // --- Gather user identity ---
-    {
-        wchar_t username[256] = {};
-        DWORD size = ARRAYSIZE(username);
-        if (!GetUserNameW(username, &size)) {
-            DWORD err = GetLastError();
-            FACELOGIN_ERROR(L"GetUserNameW FAILED: err=%lu", err);
-            username[0] = L'\0';
-        }
-        m_username = username;
-    }
-
-    // Get UPN (UserPrincipalName) — the ONLY trusted source of the current
-    // session's identity. GetUserNameExW(NameUserPrincipal) returns the email
-    // UPN for Microsoft accounts and fails with ERROR_NONE_MAPPED for local
-    // accounts, so m_upn stays empty for local users.
-    //
-    // NOTE: machine-wide registry fallbacks (IdentityCRL\StoredIdentities,
-    // IdentityStore\LogonCache\Name2Sid) used to live here and adopted ANY
-    // cached MSA email without verifying it belongs to the current user. On
-    // machines with a leftover MSA identity (a previous user profile, or an
-    // MSA later converted to local) that mislabeled local accounts as MSA and
-    // poisoned the stored record — producing a perpetual false
-    // "账号身份已变更" prompt (docs/todo.md bug1). Never re-add an
-    // unattributed cache lookup.
-    //
-    // ResolveSessionUpn() additionally falls back to the process-token MSA
-    // group when GetUserNameExW fails (see comment at its definition) — this
-    // machine exhibits exactly that 1332 failure for the whole UPN family.
-    m_upn = ResolveSessionUpn();
-
-    // Determine account type: MSA accounts have a UPN containing '@'
-    m_accountType = "local";
-    if (IsMsaUpn(m_upn)) {
-        m_accountType = "msa";
-    }
-
-    // Get SID via LookupAccountNameW
-    {
-        DWORD sidSize = 0, domainSize = 0;
-        SID_NAME_USE sidType;
-        std::wstring lookupName = m_upn.empty() ? m_username : m_upn;
-
-        LookupAccountNameW(nullptr, lookupName.c_str(),
-                           nullptr, &sidSize, nullptr, &domainSize, &sidType);
-        if (sidSize > 0) {
-            std::vector<BYTE> sidBuf(sidSize);
-            std::vector<wchar_t> domainBuf(domainSize > 0 ? domainSize : 1);
-            if (LookupAccountNameW(nullptr, lookupName.c_str(),
-                                   sidBuf.data(), &sidSize,
-                                   domainBuf.data(), &domainSize, &sidType)) {
-                LPWSTR sidStr = nullptr;
-                if (ConvertSidToStringSidW(reinterpret_cast<PSID>(sidBuf.data()), &sidStr)) {
-                    m_sid = sidStr;
-                    LocalFree(sidStr);
-                }
-            } else {
-                DWORD err = GetLastError();
-                FACELOGIN_WARN(L"LookupAccountNameW(UPN) FAILED: err=%lu", err);
-            }
-        }
-
-        if (m_sid.empty()) {
-            DWORD sidSize2 = 0, domainSize2 = 0;
-            SID_NAME_USE sidType2;
-            LookupAccountNameW(nullptr, m_username.c_str(),
-                               nullptr, &sidSize2, nullptr, &domainSize2, &sidType2);
-            if (sidSize2 > 0) {
-                std::vector<BYTE> sidBuf2(sidSize2);
-                std::vector<wchar_t> domainBuf2(domainSize2 > 0 ? domainSize2 : 1);
-                if (LookupAccountNameW(nullptr, m_username.c_str(),
-                                       sidBuf2.data(), &sidSize2,
-                                       domainBuf2.data(), &domainSize2, &sidType2)) {
-                    LPWSTR sidStr = nullptr;
-                    if (ConvertSidToStringSidW(reinterpret_cast<PSID>(sidBuf2.data()), &sidStr)) {
-                        m_sid = sidStr;
-                        LocalFree(sidStr);
-                    }
-                } else {
-                    DWORD err = GetLastError();
-                    FACELOGIN_WARN(L"LookupAccountNameW(SAM) FAILED: err=%lu", err);
-                }
-            }
-        }
-    }
-
-    // Identity summary — referenced by the MSA-detection verification steps.
-    // SID logs as RID tail only, matching the service binding lines.
-    std::wstring sidLog;
-    if (m_sid.empty()) {
-        sidLog = L"<empty>";
-    } else {
-        const size_t lastDash = m_sid.rfind(L'-');
-        sidLog = L"…-" +
-                 (lastDash == std::wstring::npos ? m_sid : m_sid.substr(lastDash + 1));
-    }
-    FACELOGIN_INFO(L"Session identity: username=%s upn=%s sid=%s accountType=%hs",
-                   m_username.c_str(),
-                   m_upn.empty() ? L"<empty>" : m_upn.c_str(),
-                   sidLog.c_str(),
-                   m_accountType.c_str());
+    m_identity = session_identity::ReadSessionIdentity();
 
     m_webcam     = std::make_unique<WebcamCaptureDS>();
     m_store.SetDataDir(m_dataDir);
@@ -790,7 +553,7 @@ std::string EnrollmentWizard::FacesToJson(
 
 std::string EnrollmentWizard::GetUsername() const {
     // Return UPN for MSA accounts, SAM name for local accounts
-    const std::wstring& display = m_upn.empty() ? m_username : m_upn;
+    const std::wstring& display = m_identity.upn.empty() ? m_identity.username : m_identity.upn;
     int len = WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, nullptr, 0, nullptr, nullptr);
     std::string result(len - 1, ' ');
     WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, &result[0], len, nullptr, nullptr);
@@ -1040,16 +803,6 @@ void EnrollmentWizard::CancelCapture() {
     }
 }
 
-// Helper: convert wstring to UTF-8 string for JS
-static std::string WstrToUtf8(const std::wstring& ws) {
-    if (ws.empty()) return "";
-    int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return "";
-    std::string result(len - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, &result[0], len, nullptr, nullptr);
-    return result;
-}
-
 // Helper: UTF-8 string with JSON escaping — safe to embed directly inside a
 // JSON string literal for the face list and account-change responses. Escapes
 // per RFC 8259: quote, backslash, and the mandatory control characters
@@ -1108,188 +861,17 @@ std::string EnrollmentWizard::GetCaptureStatus() {
     return js.str();
 }
 
-static bool SendControlAck(HANDLE hPipe) {
-    std::wstring ack(ipc::MSG_CONTROL_ACK);
-    ack.push_back(L'\0');
-    const DWORD expected = static_cast<DWORD>(ack.size() * sizeof(wchar_t));
-    DWORD written = 0;
-    return WriteFile(hPipe, ack.c_str(), expected, &written, nullptr) &&
-           written == expected;
-}
-
-// Notify the FaceLogin service to reload the user database after a write and
-// keep the connection alive until the service acknowledges RELOAD_OK. The
-// service accepts connections with an event-driven ConnectNamedPipe and waits
-// for CONTROL_ACK before disconnecting, so both directions have an explicit,
-// bounded delivery handshake.
-static bool NotifyServiceReload() {
-    constexpr DWORD kAttempts = 5;
-    constexpr DWORD kBusyWaitMs = 1000;
-    constexpr DWORD kReplyTimeoutMs = 5000;
-
-    DWORD lastError = ERROR_SUCCESS;
-    for (DWORD attempt = 1; attempt <= kAttempts; ++attempt) {
-        HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_READ | GENERIC_WRITE,
-                                   0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (hPipe == INVALID_HANDLE_VALUE) {
-            lastError = GetLastError();
-            if (lastError == ERROR_PIPE_BUSY) {
-                WaitNamedPipeW(ipc::PIPE_NAME, kBusyWaitMs);
-                continue;
-            }
-            FACELOGIN_ERROR(L"Database reload connection failed (attempt %lu/%lu): %lu",
-                            attempt, kAttempts, lastError);
-            break;
-        }
-
-        DWORD readMode = PIPE_READMODE_MESSAGE;
-        SetNamedPipeHandleState(hPipe, &readMode, nullptr, nullptr);
-
-        std::wstring message(ipc::MSG_RELOAD_DB);
-        message.push_back(L'\0');
-        const DWORD expectedBytes =
-            static_cast<DWORD>(message.size() * sizeof(wchar_t));
-        DWORD written = 0;
-        const BOOL writeOk = WriteFile(hPipe, message.c_str(), expectedBytes,
-                                       &written, nullptr);
-        if (!writeOk || written != expectedBytes) {
-            lastError = writeOk ? ERROR_WRITE_FAULT : GetLastError();
-            FACELOGIN_WARN(L"Database reload write failed (attempt %lu/%lu): %lu",
-                           attempt, kAttempts, lastError);
-            CloseHandle(hPipe);
-            Sleep(50);
-            continue;
-        }
-
-        DWORD bytesAvailable = 0;
-        bool pipeBroken = false;
-        for (DWORD waited = 0; waited < kReplyTimeoutMs; waited += 25) {
-            if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
-                lastError = GetLastError();
-                pipeBroken = true;
-                break;
-            }
-            if (bytesAvailable > 0) break;
-            Sleep(25);
-        }
-
-        if (!pipeBroken && bytesAvailable > 0) {
-            wchar_t responseBuffer[64] = {};
-            DWORD bytesRead = 0;
-            if (ReadFile(hPipe, responseBuffer,
-                         static_cast<DWORD>(sizeof(responseBuffer) - sizeof(wchar_t)),
-                         &bytesRead, nullptr) && bytesRead > 0) {
-                size_t responseLength = bytesRead / sizeof(wchar_t);
-                while (responseLength > 0 &&
-                       responseBuffer[responseLength - 1] == L'\0') {
-                    --responseLength;
-                }
-                const std::wstring response(responseBuffer, responseLength);
-                if (!SendControlAck(hPipe)) {
-                    FACELOGIN_WARN(L"Failed to acknowledge database reload response: %lu",
-                                   GetLastError());
-                }
-                CloseHandle(hPipe);
-                if (response == ipc::MSG_RELOAD_OK) {
-                    FACELOGIN_INFO(L"Service confirmed database reload");
-                    return true;
-                }
-                FACELOGIN_ERROR(L"Service rejected database reload: %s",
-                                response.c_str());
-                return false;
-            }
-            lastError = GetLastError();
-        } else if (!pipeBroken) {
-            lastError = ERROR_TIMEOUT;
-        }
-
-        FACELOGIN_WARN(L"Database reload acknowledgement failed (attempt %lu/%lu): %lu",
-                       attempt, kAttempts, lastError);
-        CloseHandle(hPipe);
-        Sleep(50);
-    }
-
-    FACELOGIN_ERROR(L"users.dat was saved but the service did not confirm reload: %lu",
-                    lastError);
-    return false;
-}
-
 std::string EnrollmentWizard::GetUserSid() const {
-    return WstrToUtf8(m_sid);
+    return WstrToUtf8(m_identity.sid);
 }
 
 bool EnrollmentWizard::ValidatePassword(const std::wstring& password) {
-    // The MSA/local decision MUST come from the live session identity
-    // (ResolveSessionUpn), never from the stored record: a registry fallback
-    // used to pollute the stored UPN with another account's email
-    // (docs/todo.md bug1), which routed local users into the MSA path below
-    // and made the account refresh loop impossible to complete.
-    std::wstring sessionUpn = ResolveSessionUpn();
-    bool isMsa = IsMsaUpn(sessionUpn);
-
-    if (isMsa) {
-        // MSA: domain=NULL routes through CloudAP for an online validation of
-        // the CURRENT password. (LogonUserW with domain="." would validate
-        // against only the local account database — i.e. the STALE cached MSA
-        // credential, not the user's current Microsoft password.) INTERACTIVE
-        // also refreshes the cached credential when it succeeds (NETWORK
-        // never caches).
-        HANDLE hToken = nullptr;
-        BOOL ok = LogonUserW(sessionUpn.c_str(), nullptr, password.c_str(),
-                             LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken);
-        if (ok && hToken) {
-            CloseHandle(hToken);
-            FACELOGIN_INFO(L"ValidatePassword: MSA online validation OK (%s)", sessionUpn.c_str());
-            return true;
-        }
-        DWORD err = GetLastError();
-        FACELOGIN_WARN(L"ValidatePassword: MSA interactive logon failed for %s (err=%lu)",
-                       sessionUpn.c_str(), err);
-        return false;
-    }
-
-    // Local account: validate against the local SAM database (reliable offline).
-    HANDLE hToken = nullptr;
-    BOOL ok = LogonUserW(m_username.c_str(), L".", password.c_str(),
-                         LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &hToken);
-    if (ok && hToken) {
-        CloseHandle(hToken);
-        return true;
-    }
-    FACELOGIN_WARN(L"ValidatePassword: local logon failed for %s (err=%lu)",
-                   m_username.c_str(), GetLastError());
-    return false;
+    return session_identity::ValidatePassword(m_identity, password);
 }
 
 bool EnrollmentWizard::SaveEnrollment(const std::wstring& password,
                                       const std::wstring& label) {
     return SaveEnrollmentImpl(password, label);
-}
-
-// Returns the SID of the currently logged-on session identity (the process
-// token's user), used to authorize face-management operations for the current
-// logged-on account.
-std::wstring EnrollmentWizard::GetCurrentProcessUserSid() {
-    HANDLE hToken = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        return L"";
-    }
-    std::wstring result;
-    DWORD sz = 0;
-    GetTokenInformation(hToken, TokenUser, nullptr, 0, &sz);
-    if (sz > 0) {
-        std::vector<BYTE> buf(sz);
-        if (GetTokenInformation(hToken, TokenUser, buf.data(), sz, &sz)) {
-            auto* tu = reinterpret_cast<TOKEN_USER*>(buf.data());
-            LPWSTR sidStr = nullptr;
-            if (ConvertSidToStringSidW(tu->User.Sid, &sidStr)) {
-                result = sidStr;
-                LocalFree(sidStr);
-            }
-        }
-    }
-    CloseHandle(hToken);
-    return result;
 }
 
 bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
@@ -1341,12 +923,12 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
     // Multi-angle re-enrollment REPLACES old faces (not appends) so it never
     // overflows per-account; single-angle append and new-account creation are
     // checked below.
-    size_t existingIdx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+    size_t existingIdx = m_store.FindUserIndex(m_identity.sid, m_identity.upn, m_identity.username);
     const bool accountExists = existingIdx < m_store.GetUsers().size();
     if (accountExists) {
         if (multiAngle) {
             // Multi-angle re-enrollment: clear old faces, keep account identity.
-            if (!m_store.ClearFacesForAccount(m_sid)) {
+            if (!m_store.ClearFacesForAccount(m_identity.sid)) {
                 FACELOGIN_ERROR(L"Failed to clear existing faces for multi-angle re-enrollment");
                 return false;
             }
@@ -1362,7 +944,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
                 FACELOGIN_ERROR(L"Not enough face slots: %s has %zu face(s), "
                                L"need %zu more (max %zu per account). "
                                L"Delete unused faces or re-enroll with multi-angle to replace all.",
-                               m_username.c_str(), currentFaces, groups.size(),
+                               m_identity.username.c_str(), currentFaces, groups.size(),
                                facelogin::kMaxFacesPerUser);
                 return false;
             }
@@ -1442,7 +1024,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
         // so an appended face is not labeled with the generic 脸N.
         std::wstring groupLabel = label;
         if (multiAngle || groupLabel.empty()) groupLabel = g.label;
-        size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+        size_t idx = m_store.FindUserIndex(m_identity.sid, m_identity.upn, m_identity.username);
         uint32_t newFaceId = 0;
         if (idx >= m_store.GetUsers().size()) {
             // First face for this account — protect the password now.
@@ -1454,10 +1036,10 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
                 reinterpret_cast<const uint8_t*>(password.c_str()),
                 static_cast<UINT>(password.size() * sizeof(wchar_t)));
             if (protectedPassword.empty()) { FACELOGIN_ERROR(L"DPAPI encryption failed"); return false; }
-            if (!m_store.AddFace(m_username, m_upn, m_sid, protectedPassword, ef,
+            if (!m_store.AddFace(m_identity.username, m_identity.upn, m_identity.sid, protectedPassword, ef,
                                  groupLabel, &newFaceId,
                                  static_cast<float>(kAngleTargets[g.angle]), 0.0f)) {
-                FACELOGIN_ERROR(L"Failed to create enrollment for %s", m_username.c_str());
+                FACELOGIN_ERROR(L"Failed to create enrollment for %s", m_identity.username.c_str());
                 return false;
             }
         } else {
@@ -1465,20 +1047,20 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
             // argument here, so the stored password is preserved.
             if (m_store.GetUsers()[idx].faces.size() >= facelogin::kMaxFacesPerUser) {
                 FACELOGIN_ERROR(L"Cannot append: %s already has %zu faces (max %zu)",
-                                m_username.c_str(), m_store.GetUsers()[idx].faces.size(),
+                                m_identity.username.c_str(), m_store.GetUsers()[idx].faces.size(),
                                 facelogin::kMaxFacesPerUser);
                 return false;
             }
-            if (!m_store.AddFace(m_username, m_upn, m_sid, {}, ef, groupLabel,
+            if (!m_store.AddFace(m_identity.username, m_identity.upn, m_identity.sid, {}, ef, groupLabel,
                                  &newFaceId,
                                  static_cast<float>(kAngleTargets[g.angle]), 0.0f)) {
-                FACELOGIN_ERROR(L"Failed to append face for %s", m_username.c_str());
+                FACELOGIN_ERROR(L"Failed to append face for %s", m_identity.username.c_str());
                 return false;
             }
         }
         FACELOGIN_INFO(L"Enrollment saved for: %s (face #%u, emb=%zu-D, angle=%ls, "
                        L"nominalYaw=%d)",
-                       m_username.c_str(), newFaceId, ef.size(), g.label,
+                       m_identity.username.c_str(), newFaceId, ef.size(), g.label,
                        kAngleTargets[g.angle]);
     }
 
@@ -1492,7 +1074,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
     // block: the enrollment itself is valid.
     m_lastEnrollHint.clear();
     if (groups.size() > 1) {
-        size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+        size_t idx = m_store.FindUserIndex(m_identity.sid, m_identity.upn, m_identity.username);
         if (idx < m_store.GetUsers().size()) {
             const auto& faces = m_store.GetUsers()[idx].faces;
             float minPair = -1.0f;
@@ -1526,7 +1108,7 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
         }
     }
 
-    const bool reloadConfirmed = NotifyServiceReload();
+    const bool reloadConfirmed = m_serviceClient.ReloadDatabase();
 
     // Capture buffer consumed — reset it so the next capture starts clean.
     // Without this, a re-capture of the same angle would see the leftover
@@ -1545,12 +1127,12 @@ bool EnrollmentWizard::SaveEnrollmentImpl(const std::wstring& password,
 
 int EnrollmentWizard::GetFaceCount() {
     m_store.LoadDatabase();
-    return static_cast<int>(m_store.GetFaceCount(m_sid));
+    return static_cast<int>(m_store.GetFaceCount(m_identity.sid));
 }
 
 std::string EnrollmentWizard::GetFacesJson() {
     m_store.LoadDatabase();
-    size_t idx = m_store.FindUserIndex(m_sid, m_upn, m_username);
+    size_t idx = m_store.FindUserIndex(m_identity.sid, m_identity.upn, m_identity.username);
     if (idx >= m_store.GetUsers().size()) return "[]";
 
     std::ostringstream js;
@@ -1570,10 +1152,10 @@ bool EnrollmentWizard::SaveEnrollmentAppend(const std::wstring& label) {
     // The appended face belongs to the logged-on session owner — the session
     // token SID must match the enrolled account. No password is required for
     // an append because the stored password is retained.
-    std::wstring tokenSid = GetCurrentProcessUserSid();
-    if (tokenSid.empty() || tokenSid != m_sid) {
+    std::wstring tokenSid = session_identity::GetCurrentProcessUserSid();
+    if (tokenSid.empty() || tokenSid != m_identity.sid) {
         FACELOGIN_ERROR(L"Face append refused: token SID %s != enrolled SID %s",
-                        tokenSid.c_str(), m_sid.c_str());
+                        tokenSid.c_str(), m_identity.sid.c_str());
         return false;
     }
     return SaveEnrollmentImpl(L"", label);
@@ -1582,30 +1164,30 @@ bool EnrollmentWizard::SaveEnrollmentAppend(const std::wstring& label) {
 bool EnrollmentWizard::DeleteFace(int faceId) {
     if (faceId <= 0) return false;
     m_store.LoadDatabase();
-    if (!m_store.DeleteFace(m_sid, static_cast<uint32_t>(faceId))) return false;
+    if (!m_store.DeleteFace(m_identity.sid, static_cast<uint32_t>(faceId))) return false;
     if (!m_store.SaveDatabase()) return false;
-    return NotifyServiceReload();
+    return m_serviceClient.ReloadDatabase();
 }
 
 bool EnrollmentWizard::ClearAllFaces() {
     m_store.LoadDatabase();
-    if (!m_store.ClearAllFaces(m_sid)) return false;
+    if (!m_store.ClearAllFaces(m_identity.sid)) return false;
     if (!m_store.SaveDatabase()) return false;
-    return NotifyServiceReload();
+    return m_serviceClient.ReloadDatabase();
 }
 
 bool EnrollmentWizard::RenameFace(int faceId, const std::wstring& label) {
     if (faceId <= 0) return false;
     m_store.LoadDatabase();
-    if (!m_store.RenameFace(m_sid, static_cast<uint32_t>(faceId), label)) return false;
+    if (!m_store.RenameFace(m_identity.sid, static_cast<uint32_t>(faceId), label)) return false;
     if (!m_store.SaveDatabase()) return false;
-    return NotifyServiceReload();
+    return m_serviceClient.ReloadDatabase();
 }
 
 // Detect a stale account-type record (symmetric MSA ↔ local). We never trust
-// m_upn/m_accountType here — they are derived from the session at construction
+// m_identity.upn/m_identity.accountType here — they are derived from the session at construction
 // and could be empty for local accounts; instead we re-query the CURRENT
-// session identity with ResolveSessionUpn() (docs/todo.md bug1):
+// session identity with session_identity::ResolveSessionUpn() (docs/todo.md bug1):
 //   UPN contains '@'  → current account is MSA
 //   empty (after fallback)  → current account is local
 // Then compare against the stored record (matched by SID, which Windows keeps
@@ -1617,14 +1199,14 @@ int EnrollmentWizard::GetAccountTypeChanged() {
     // Determine the CURRENT session's account type via the authoritative
     // query used everywhere else (docs/todo.md bug1). Empty (after fallback)
     // means no MSA identity → local account.
-    std::wstring curUpn = ResolveSessionUpn();
-    bool sessionIsMsa = IsMsaUpn(curUpn);
+    std::wstring curUpn = session_identity::ResolveSessionUpn();
+    bool sessionIsMsa = session_identity::IsMsaUpn(curUpn);
 
     // Match the current identity against stored records (same priority as
     // FindUserIndex: SID > UPN > username).
     m_store.LoadDatabase();
-    std::wstring tokenSid = GetCurrentProcessUserSid();
-    size_t idx = m_store.FindUserIndex(tokenSid, m_upn, m_username);
+    std::wstring tokenSid = session_identity::GetCurrentProcessUserSid();
+    size_t idx = m_store.FindUserIndex(tokenSid, m_identity.upn, m_identity.username);
     if (idx >= m_store.GetUsers().size()) return 0;  // not enrolled → normal first-time flow
 
     const auto& rec = m_store.GetUsers()[idx];
@@ -1656,13 +1238,13 @@ std::string EnrollmentWizard::CheckAccountTypeChanged() {
     // Attach the face count so the prompt can say "你已录入 N 张人脸", and for
     // state 2 the current MSA email so the prompt can show what will be written.
     m_store.LoadDatabase();
-    std::wstring tokenSid = GetCurrentProcessUserSid();
-    size_t idx = m_store.FindUserIndex(tokenSid, m_upn, m_username);
+    std::wstring tokenSid = session_identity::GetCurrentProcessUserSid();
+    size_t idx = m_store.FindUserIndex(tokenSid, m_identity.upn, m_identity.username);
     size_t faces = (idx < m_store.GetUsers().size()) ? m_store.GetUsers()[idx].faces.size() : 0;
 
     if (state == 2) {
         // Re-derive the current MSA email (same authoritative query).
-        std::wstring curUpn = ResolveSessionUpn();
+        std::wstring curUpn = session_identity::ResolveSessionUpn();
         return "{\"state\":2,\"faces\":" + std::to_string(faces) +
                ",\"upn\":\"" + WstrToUtf8Escaped(curUpn) + "\"}";
     }
@@ -1695,9 +1277,9 @@ bool EnrollmentWizard::RefreshAccountIdentity(const std::wstring& password) {
         return false;
     }
 
-    std::wstring tokenSid = GetCurrentProcessUserSid();
+    std::wstring tokenSid = session_identity::GetCurrentProcessUserSid();
     m_store.LoadDatabase();
-    size_t idx = m_store.FindUserIndex(tokenSid, m_upn, m_username);
+    size_t idx = m_store.FindUserIndex(tokenSid, m_identity.upn, m_identity.username);
     if (idx >= m_store.GetUsers().size()) {
         FACELOGIN_WARN(L"RefreshAccountIdentity: record vanished before update");
         return false;
@@ -1708,11 +1290,11 @@ bool EnrollmentWizard::RefreshAccountIdentity(const std::wstring& password) {
     //   state 2 (local→MSA): write the current MSA email (session UPN).
     std::wstring newUpn;
     if (state == 2) {
-        newUpn = ResolveSessionUpn();
+        newUpn = session_identity::ResolveSessionUpn();
     }
     // state 1 → newUpn stays empty (local account).
 
-    if (!m_store.UpdateAccountIdentity(idx, m_username, newUpn, tokenSid, protectedPassword)) {
+    if (!m_store.UpdateAccountIdentity(idx, m_identity.username, newUpn, tokenSid, protectedPassword)) {
         FACELOGIN_ERROR(L"RefreshAccountIdentity: identity update failed");
         return false;
     }
@@ -1721,9 +1303,9 @@ bool EnrollmentWizard::RefreshAccountIdentity(const std::wstring& password) {
         return false;
     }
 
-    const bool reloadConfirmed = NotifyServiceReload();
+    const bool reloadConfirmed = m_serviceClient.ReloadDatabase();
     FACELOGIN_INFO(L"RefreshAccountIdentity: refreshed identity of %s (UPN=%s%s, faces preserved)",
-                   m_username.c_str(),
+                   m_identity.username.c_str(),
                    newUpn.empty() ? L"<cleared>" : newUpn.c_str(),
                    state == 2 ? L", MSA" : L", local");
     return reloadConfirmed;
@@ -1748,9 +1330,9 @@ bool EnrollmentWizard::ClearStaleAccountUpn() {
         return false;
     }
 
-    std::wstring tokenSid = GetCurrentProcessUserSid();
+    std::wstring tokenSid = session_identity::GetCurrentProcessUserSid();
     m_store.LoadDatabase();
-    size_t idx = m_store.FindUserIndex(tokenSid, m_upn, m_username);
+    size_t idx = m_store.FindUserIndex(tokenSid, m_identity.upn, m_identity.username);
     if (idx >= m_store.GetUsers().size()) {
         FACELOGIN_WARN(L"ClearStaleAccountUpn: record vanished before update");
         return false;
@@ -1772,7 +1354,7 @@ bool EnrollmentWizard::ClearStaleAccountUpn() {
         return false;
     }
 
-    const bool reloadConfirmed = NotifyServiceReload();
+    const bool reloadConfirmed = m_serviceClient.ReloadDatabase();
     FACELOGIN_INFO(L"ClearStaleAccountUpn: cleared stale MSA UPN for %s (faces=%zu, password untouched)",
                    rec.username.c_str(), rec.faces.size());
     return reloadConfirmed;
@@ -1781,13 +1363,13 @@ bool EnrollmentWizard::ClearStaleAccountUpn() {
 bool EnrollmentWizard::AutoRepairEmptyUpnOnStartup() {
     // Re-derive the current session's MSA identity (GetUserNameExW + token
     // fallback). Only proceed when we actually have an MSA email to write.
-    std::wstring curUpn = ResolveSessionUpn();
-    if (!IsMsaUpn(curUpn)) {
+    std::wstring curUpn = session_identity::ResolveSessionUpn();
+    if (!session_identity::IsMsaUpn(curUpn)) {
         // Local session (or detection inconclusive) — nothing to repair.
         return false;
     }
 
-    std::wstring tokenSid = GetCurrentProcessUserSid();
+    std::wstring tokenSid = session_identity::GetCurrentProcessUserSid();
     if (tokenSid.empty()) {
         FACELOGIN_WARN(L"AutoRepairEmptyUpnOnStartup: could not resolve current session SID, skipping");
         return false;
@@ -1821,7 +1403,7 @@ bool EnrollmentWizard::AutoRepairEmptyUpnOnStartup() {
         FACELOGIN_ERROR(L"AutoRepairEmptyUpnOnStartup: save failed");
         return false;
     }
-    return NotifyServiceReload();
+    return m_serviceClient.ReloadDatabase();
 }
 
 // ============================================================================
@@ -1860,67 +1442,8 @@ std::string EnrollmentWizard::GetConfig() const {
     return ConfigToJson(m_config);
 }
 
-// Learning-observability query. Unlike the log views (which read files to
-// stay off the single-instance pipe), this needs live learner state, so it
-// takes the public pipe for one short request/response round trip. The view
-// throttles to one query per 10s for the same reason.
 std::string EnrollmentWizard::GetLearningStatus() {
-    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0,
-                               nullptr, OPEN_EXISTING, 0, nullptr);
-    if (hPipe == INVALID_HANDLE_VALUE) {
-        return "{\"error\":\"Service not running\"}";
-    }
-    std::string result = "{\"error\":\"Service did not respond\"}";
-    DWORD written = 0;
-    std::wstring msg(ipc::MSG_LEARNING_STATUS);
-    msg.push_back(L'\0');
-    const DWORD expectedBytes = static_cast<DWORD>(msg.size() * sizeof(wchar_t));
-    if (WriteFile(hPipe, msg.c_str(), expectedBytes, &written, nullptr) &&
-        written == expectedBytes) {
-        // The service assembles the response synchronously — no model or
-        // worker work happens on this path — so a short bounded wait is
-        // enough (mirrors SetConfig's handshake shape).
-        DWORD bytesAvailable = 0;
-        for (DWORD waited = 0; waited < 3000; waited += 50) {
-            if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
-                break;
-            }
-            if (bytesAvailable > 0) break;
-            Sleep(50);
-        }
-        if (bytesAvailable > 0) {
-            std::wstring response;
-            wchar_t buffer[8192];
-            DWORD bytesRead = 0;
-            // Message-mode pipe: a message larger than the read buffer
-            // returns ERROR_MORE_DATA with a partial chunk; keep reading
-            // until ReadFile reports the message complete.
-            for (;;) {
-                const BOOL ok = ReadFile(hPipe, buffer,
-                                         static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t)),
-                                         &bytesRead, nullptr);
-                if (ok || GetLastError() == ERROR_MORE_DATA) {
-                    response.append(buffer, bytesRead / sizeof(wchar_t));
-                    if (ok) break;
-                    continue;
-                }
-                response.clear();
-                break;
-            }
-            while (!response.empty() && response.back() == L'\0') {
-                response.pop_back();
-            }
-            if (!response.empty()) {
-                if (!SendControlAck(hPipe)) {
-                    FACELOGIN_WARN(L"Failed to acknowledge learning status response: %lu",
-                                   GetLastError());
-                }
-                result = WstrToUtf8(response);
-            }
-        }
-    }
-    CloseHandle(hPipe);
-    return result;
+    return m_serviceClient.QueryLearningStatus();
 }
 
 bool EnrollmentWizard::SetConfig(const std::string& json) {
@@ -1944,57 +1467,7 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
     // Notify the service and require an explicit acknowledgement. Saving a
     // file is not enough: if the service cannot load the mandatory PAD model,
     // the UI must not claim that authentication settings are active.
-    bool reloadConfirmed = false;
-    HANDLE hPipe = CreateFileW(ipc::PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                               OPEN_EXISTING, 0, nullptr);
-    if (hPipe != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        std::wstring msg(ipc::MSG_CONFIG_RELOAD);
-        msg.push_back(L'\0');
-        const DWORD expectedBytes = static_cast<DWORD>(msg.size() * sizeof(wchar_t));
-        BOOL writeOk = WriteFile(hPipe, msg.c_str(), expectedBytes, &written, nullptr);
-
-        if (writeOk && written == expectedBytes) {
-            DWORD bytesAvailable = 0;
-            // A service-mode CONFIG_RELOAD can replace a preloaded worker so
-            // the selected camera backend takes effect before acknowledging.
-            // Allow its bounded startup handshake to complete.
-            for (DWORD waited = 0; waited < 25000; waited += 50) {
-                if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
-                    break;
-                }
-                if (bytesAvailable > 0) break;
-                Sleep(50);
-            }
-
-            if (bytesAvailable > 0) {
-                wchar_t responseBuffer[64] = {};
-                DWORD bytesRead = 0;
-                if (ReadFile(hPipe, responseBuffer,
-                             static_cast<DWORD>(sizeof(responseBuffer) - sizeof(wchar_t)),
-                             &bytesRead, nullptr) && bytesRead > 0) {
-                    size_t responseLength = bytesRead / sizeof(wchar_t);
-                    while (responseLength > 0 && responseBuffer[responseLength - 1] == L'\0') {
-                        responseLength--;
-                    }
-                    std::wstring response(responseBuffer, responseLength);
-                    if (!SendControlAck(hPipe)) {
-                        FACELOGIN_WARN(L"Failed to acknowledge configuration reload response: %lu",
-                                       GetLastError());
-                    }
-                    reloadConfirmed = (response == ipc::MSG_CONFIG_RELOAD_OK);
-                    if (!reloadConfirmed) {
-                        FACELOGIN_ERROR(L"Service rejected configuration reload: %s",
-                                        response.c_str());
-                    }
-                }
-            }
-        }
-        CloseHandle(hPipe);
-    } else {
-        FACELOGIN_ERROR(L"Configuration saved but service is unavailable for reload: %lu",
-                        GetLastError());
-    }
+    const bool reloadConfirmed = m_serviceClient.ReloadConfig();
 
     FACELOGIN_INFO(L"Configuration updated: thr=%.2f antiSpoof=%.3f rotation=%d",
                   m_config.match_threshold, m_config.anti_spoof_threshold,
@@ -2020,183 +1493,30 @@ bool EnrollmentWizard::RestartPreview() {
 // ============================================================================
 
 std::string EnrollmentWizard::GetLogLines() {
-    // The "Console" source reads console.log from disk, exactly like the
-    // Service/AuthWorker/CP sources read their files — one mechanism for all
-    // four. (It used to return the in-memory ring buffer; the file view is
-    // equivalent because the Logger writes every line through immediately.)
-    return ReadLogFileLines(L"console.log");
+    return ReadEnrollmentLog(m_dataDir, EnrollmentLogSource::Console);
 }
 
 std::string EnrollmentWizard::GetServiceLogLines() {
-    return ReadLogFileLines(L"service.log");
+    return ReadEnrollmentLog(m_dataDir, EnrollmentLogSource::Service);
 }
 
 std::string EnrollmentWizard::GetAuthWorkerLogLines() {
-    return ReadLogFileLines(L"auth_worker.log");
+    return ReadEnrollmentLog(m_dataDir, EnrollmentLogSource::AuthWorker);
 }
 
 std::string EnrollmentWizard::GetCredentialProviderLogLines() {
-    return ReadLogFileLines(L"credential_provider.log");
+    return ReadEnrollmentLog(m_dataDir, EnrollmentLogSource::CredentialProvider);
 }
 
-// Truncate the active file of a file-based log source ("service", "worker",
-// "cp" — same names the log-source dropdown uses). See
-// TruncateLogFileByName for why this is safe against live writers.
 bool EnrollmentWizard::ClearFileLog(const std::wstring& source) {
-    std::wstring fileName;
-    if (source == L"service") fileName = L"service.log";
-    else if (source == L"worker") fileName = L"auth_worker.log";
-    else if (source == L"cp") fileName = L"credential_provider.log";
-    else return false;
-    return TruncateLogFileByName(fileName);
-}
-
-// Collapse <m_dataDir>\log\<fileName> to zero length. Safe against the live
-// writers because the common Logger opens its file with FILE_APPEND_DATA
-// (the kernel writes every record at the file's CURRENT end) and shares
-// read/write, so collapsing the file to zero length just moves the append
-// point — the next log line lands at offset 0, no holes, no corruption.
-// Rotated <stem>.YYYY-MM-DD.log files are never shown in the viewer and are
-// left untouched. A missing file counts as success (nothing to clear).
-bool EnrollmentWizard::TruncateLogFileByName(const std::wstring& fileName) {
-    std::wstring logPath = m_dataDir + L"\\log\\" + fileName;
-    HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return GetLastError() == ERROR_FILE_NOT_FOUND;
-    }
-    SetFilePointer(hFile, 0, nullptr, FILE_BEGIN);
-    bool ok = SetEndOfFile(hFile) != 0;
-    CloseHandle(hFile);
-    return ok;
-}
-
-std::string EnrollmentWizard::ReadLogFileLines(const std::wstring& logFileName) {
-    // Read the log file directly — avoids pipe message size limits.
-    // Log files are UTF-8 without BOM; files from pre-UTF-8 builds were
-    // UTF-16LE and are detected (BOM or 0x00 bytes — impossible in UTF-8)
-    // for a graceful fallback while such files still exist.
-    std::wstring logPath = m_dataDir + L"\\log\\" + logFileName;
-    HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_READ,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        return "[\"" + WstrToUtf8(logFileName) + " not available\"]";
-    }
-
-    DWORD fileSize = GetFileSize(hFile, nullptr);
-    if (fileSize == INVALID_FILE_SIZE || fileSize < 2) {
-        CloseHandle(hFile);
-        // Empty file (e.g. just cleared via ClearFileLog) renders as a blank
-        // viewer, matching the Console source after ClearLog — no placeholder.
-        return "[]";
-    }
-
-    // Cap at ~256KB of raw bytes, reading from the END — the viewer cares
-    // about the most recent lines, and a day of logging can exceed the cap.
-    DWORD capSize = fileSize;
-    if (capSize > 256 * 1024) capSize = 256 * 1024;
-    bool truncated = (capSize < fileSize);
-    if (truncated &&
-        SetFilePointer(hFile, static_cast<LONG>(fileSize - capSize),
-                       nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER) {
-        CloseHandle(hFile);
-        return "[\"Failed to read " + WstrToUtf8(logFileName) + "\"]";
-    }
-
-    std::vector<char> buf(capSize);
-    DWORD bytesRead = 0;
-    if (!ReadFile(hFile, buf.data(), capSize, &bytesRead, nullptr) || bytesRead < 2) {
-        CloseHandle(hFile);
-        return "[\"Failed to read " + WstrToUtf8(logFileName) + "\"]";
-    }
-    CloseHandle(hFile);
-
-    bool utf16 = (unsigned char)buf[0] == 0xFF && (unsigned char)buf[1] == 0xFE;
-    if (!utf16) {
-        for (DWORD i = 0; i < bytesRead; i++) {
-            if (buf[i] == '\0') { utf16 = true; break; }
-        }
-    }
-
-    std::string text;
-    if (utf16) {
-        // Legacy UTF-16LE file — decode to UTF-8, then share the byte-level
-        // line parsing below.
-        // A mid-file cut can land mid-UTF-16-character; legacy files are
-        // near-pure ASCII (high byte 0x00), so a leading 0x00 before a
-        // non-zero byte marks a one-byte misalignment — drop it before
-        // pairing the bytes into wide chars.
-        if (bytesRead >= 2 && (unsigned char)buf[0] == 0x00 && (unsigned char)buf[1] != 0x00) {
-            buf.erase(buf.begin());
-            bytesRead--;
-        }
-        int wlen = bytesRead / sizeof(wchar_t);
-        std::wstring wide(wlen, L'\0');
-        memcpy(&wide[0], buf.data(), wlen * sizeof(wchar_t));
-        if (!wide.empty() && wide.front() == 0xFEFF)
-            wide.erase(wide.begin());
-        int need = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
-                                       static_cast<int>(wide.size()),
-                                       nullptr, 0, nullptr, nullptr);
-        if (need > 0) {
-            text.resize(need);
-            WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
-                                static_cast<int>(wide.size()),
-                                &text[0], need, nullptr, nullptr);
-        }
-    } else {
-        text.assign(buf.data(), bytesRead);
-    }
-
-    // When the tail cut landed mid-line, the first line in `text` is a
-    // partial line cut mid-write — drop it so the viewer never shows a
-    // garbled fragment. (No newline at all means the whole cap window is one
-    // fragment of a single huge line; show nothing rather than garbage.)
-    if (truncated) {
-        size_t nl = text.find('\n');
-        if (nl == std::string::npos) text.clear();
-        else text.erase(0, nl + 1);
-    }
-
-    // Parse lines: each log line ends with \r\n. Bytes pass through verbatim
-    // (the file is UTF-8); only JSON metacharacters are escaped.
-    std::ostringstream ss;
-    ss << "[";
-    bool first = true;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        // Find end of line
-        size_t lineStart = pos;
-        while (pos < text.size() && text[pos] != '\r' && text[pos] != '\n') pos++;
-        size_t lineLen = pos - lineStart;
-        // Skip \r\n
-        while (pos < text.size() && (text[pos] == '\r' || text[pos] == '\n')) pos++;
-        if (lineLen == 0) continue;
-
-        if (!first) ss << ",";
-        first = false;
-        ss << "\"";
-        for (size_t i = 0; i < lineLen; i++) {
-            char ch = text[lineStart + i];
-            if (ch == '\\') ss << "\\\\";
-            else if (ch == '"') ss << "\\\"";
-            else ss << ch;
-        }
-        ss << "\"";
-    }
-    ss << "]";
-    return ss.str();
+    if (source == L"service") return ClearEnrollmentLog(m_dataDir, EnrollmentLogSource::Service);
+    if (source == L"worker") return ClearEnrollmentLog(m_dataDir, EnrollmentLogSource::AuthWorker);
+    if (source == L"cp") return ClearEnrollmentLog(m_dataDir, EnrollmentLogSource::CredentialProvider);
+    return false;
 }
 
 void EnrollmentWizard::ClearLog() {
-    // Console clears like the file sources now: truncate today's console.log
-    // (the append-mode writers land their next line at the new end). The
-    // in-memory ring is cleared as well — the UI no longer reads it, but this
-    // keeps Logger state and the disk file consistent.
-    Logger::Instance().ClearLogs();
-    TruncateLogFileByName(L"console.log");
+    ClearEnrollmentLog(m_dataDir, EnrollmentLogSource::Console);
 }
 
 } // namespace facelogin
