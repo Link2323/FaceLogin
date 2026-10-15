@@ -15,7 +15,3 @@ target_link_libraries(AuthPipelineTest PRIVATE
 target_include_directories(AuthPipelineTest PRIVATE
     ${CMAKE_SOURCE_DIR}/face_service
 )
-
-set_target_properties(AuthPipelineTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

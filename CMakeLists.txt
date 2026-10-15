@@ -32,6 +32,12 @@ add_compile_definitions(
 
 # Global compiler options
 if(MSVC)
+    # CRT linkage is dynamic (/MD[d]) tree-wide; set once here instead of
+    # per-target boilerplate. This variable initializes the target property
+    # at target creation, so it must precede every add_subdirectory below.
+    # credential_provider overrides this to the static CRT (/MT) — see the
+    # rationale in its CMakeLists.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     add_compile_options(/W4 /WX- /MP)
     # VS 18 (VS 2026): /MP used to orphan cl.exe at zero CPU while the MSBuild
     # Tracker was enabled. With TrackFileAccess=false + ErrorReporting=None

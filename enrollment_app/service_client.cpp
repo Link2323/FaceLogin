@@ -24,6 +24,94 @@ static bool SendControlAck(HANDLE hPipe) {
            written == expected;
 }
 
+// Outcome of one request/response round trip. The empty string is never a
+// legitimate reply on these message types, so `ok` false always means the
+// exchange failed with `response` empty and `error` holding the Windows
+// error for the caller's retry/context logging; `ok` true hands the
+// response to the caller for interpretation.
+struct RequestAckOutcome {
+    bool ok = false;
+    std::wstring response;
+    DWORD error = ERROR_SUCCESS;
+};
+
+// One request/response round trip on a connected public pipe: write the
+// request, poll up to replyTimeoutMs for the reply, read the complete
+// response message, then acknowledge with CONTROL_ACK so the service can
+// disconnect. Callers own the handle (message mode, retries, closing).
+static RequestAckOutcome RequestAckRoundTrip(HANDLE hPipe,
+                                              const std::wstring& request,
+                                              DWORD replyTimeoutMs,
+                                              DWORD pollStepMs,
+                                              const wchar_t* ackContext) {
+    RequestAckOutcome outcome;
+
+    std::wstring message(request);
+    message.push_back(L'\0');
+    const DWORD expectedBytes =
+        static_cast<DWORD>(message.size() * sizeof(wchar_t));
+    DWORD written = 0;
+    if (!WriteFile(hPipe, message.c_str(), expectedBytes, &written, nullptr)) {
+        outcome.error = GetLastError();
+        return outcome;
+    }
+    if (written != expectedBytes) {
+        outcome.error = ERROR_WRITE_FAULT;
+        return outcome;
+    }
+
+    DWORD bytesAvailable = 0;
+    bool pipeBroken = false;
+    for (DWORD waited = 0; waited < replyTimeoutMs; waited += pollStepMs) {
+        if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
+            outcome.error = GetLastError();
+            pipeBroken = true;
+            break;
+        }
+        if (bytesAvailable > 0) break;
+        Sleep(pollStepMs);
+    }
+    if (pipeBroken) return outcome;
+    if (bytesAvailable == 0) {
+        outcome.error = ERROR_TIMEOUT;
+        return outcome;
+    }
+
+    // Message-mode pipe: a message larger than the read buffer returns
+    // ERROR_MORE_DATA with a partial chunk; keep reading until ReadFile
+    // reports the message complete.
+    std::wstring response;
+    wchar_t buffer[4096];
+    DWORD bytesRead = 0;
+    for (;;) {
+        const BOOL ok = ReadFile(hPipe, buffer,
+                                 static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t)),
+                                 &bytesRead, nullptr);
+        if (ok || GetLastError() == ERROR_MORE_DATA) {
+            response.append(buffer, bytesRead / sizeof(wchar_t));
+            if (ok) break;
+            continue;
+        }
+        outcome.error = GetLastError();
+        return outcome;
+    }
+    while (!response.empty() && response.back() == L'\0') {
+        response.pop_back();
+    }
+    if (response.empty()) {
+        outcome.error = ERROR_READ_FAULT;
+        return outcome;
+    }
+
+    if (!SendControlAck(hPipe)) {
+        FACELOGIN_WARN(L"Failed to acknowledge %s response: %lu",
+                       ackContext, GetLastError());
+    }
+    outcome.ok = true;
+    outcome.response = std::move(response);
+    return outcome;
+}
+
 // Notify the FaceLogin service to reload the user database after a write and
 // keep the connection alive until the service acknowledges RELOAD_OK. The
 // service accepts connections with an event-driven ConnectNamedPipe and waits
@@ -52,67 +140,22 @@ bool EnrollmentServiceClient::ReloadDatabase() const {
         DWORD readMode = PIPE_READMODE_MESSAGE;
         SetNamedPipeHandleState(hPipe, &readMode, nullptr, nullptr);
 
-        std::wstring message(ipc::MSG_RELOAD_DB);
-        message.push_back(L'\0');
-        const DWORD expectedBytes =
-            static_cast<DWORD>(message.size() * sizeof(wchar_t));
-        DWORD written = 0;
-        const BOOL writeOk = WriteFile(hPipe, message.c_str(), expectedBytes,
-                                       &written, nullptr);
-        if (!writeOk || written != expectedBytes) {
-            lastError = writeOk ? ERROR_WRITE_FAULT : GetLastError();
-            FACELOGIN_WARN(L"Database reload write failed (attempt %lu/%lu): %lu",
-                           attempt, kAttempts, lastError);
-            CloseHandle(hPipe);
-            Sleep(50);
-            continue;
-        }
-
-        DWORD bytesAvailable = 0;
-        bool pipeBroken = false;
-        for (DWORD waited = 0; waited < kReplyTimeoutMs; waited += 25) {
-            if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
-                lastError = GetLastError();
-                pipeBroken = true;
-                break;
-            }
-            if (bytesAvailable > 0) break;
-            Sleep(25);
-        }
-
-        if (!pipeBroken && bytesAvailable > 0) {
-            wchar_t responseBuffer[64] = {};
-            DWORD bytesRead = 0;
-            if (ReadFile(hPipe, responseBuffer,
-                         static_cast<DWORD>(sizeof(responseBuffer) - sizeof(wchar_t)),
-                         &bytesRead, nullptr) && bytesRead > 0) {
-                size_t responseLength = bytesRead / sizeof(wchar_t);
-                while (responseLength > 0 &&
-                       responseBuffer[responseLength - 1] == L'\0') {
-                    --responseLength;
-                }
-                const std::wstring response(responseBuffer, responseLength);
-                if (!SendControlAck(hPipe)) {
-                    FACELOGIN_WARN(L"Failed to acknowledge database reload response: %lu",
-                                   GetLastError());
-                }
-                CloseHandle(hPipe);
-                if (response == ipc::MSG_RELOAD_OK) {
-                    FACELOGIN_INFO(L"Service confirmed database reload");
-                    return true;
-                }
-                FACELOGIN_ERROR(L"Service rejected database reload: %s",
-                                response.c_str());
-                return false;
-            }
-            lastError = GetLastError();
-        } else if (!pipeBroken) {
-            lastError = ERROR_TIMEOUT;
-        }
-
-        FACELOGIN_WARN(L"Database reload acknowledgement failed (attempt %lu/%lu): %lu",
-                       attempt, kAttempts, lastError);
+        RequestAckOutcome outcome =
+            RequestAckRoundTrip(hPipe, ipc::MSG_RELOAD_DB, kReplyTimeoutMs, 25,
+                                L"database reload");
         CloseHandle(hPipe);
+        if (outcome.ok) {
+            if (outcome.response == ipc::MSG_RELOAD_OK) {
+                FACELOGIN_INFO(L"Service confirmed database reload");
+                return true;
+            }
+            FACELOGIN_ERROR(L"Service rejected database reload: %s",
+                            outcome.response.c_str());
+            return false;
+        }
+        lastError = outcome.error;
+        FACELOGIN_WARN(L"Database reload round trip failed (attempt %lu/%lu): %lu",
+                       attempt, kAttempts, lastError);
         Sleep(50);
     }
 
@@ -131,113 +174,42 @@ std::string EnrollmentServiceClient::QueryLearningStatus() const {
     if (hPipe == INVALID_HANDLE_VALUE) {
         return "{\"error\":\"Service not running\"}";
     }
-    std::string result = "{\"error\":\"Service did not respond\"}";
-    DWORD written = 0;
-    std::wstring msg(ipc::MSG_LEARNING_STATUS);
-    msg.push_back(L'\0');
-    const DWORD expectedBytes = static_cast<DWORD>(msg.size() * sizeof(wchar_t));
-    if (WriteFile(hPipe, msg.c_str(), expectedBytes, &written, nullptr) &&
-        written == expectedBytes) {
-        // The service assembles the response synchronously — no model or
-        // worker work happens on this path — so a short bounded wait is
-        // enough (mirrors SetConfig's handshake shape).
-        DWORD bytesAvailable = 0;
-        for (DWORD waited = 0; waited < 3000; waited += 50) {
-            if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
-                break;
-            }
-            if (bytesAvailable > 0) break;
-            Sleep(50);
-        }
-        if (bytesAvailable > 0) {
-            std::wstring response;
-            wchar_t buffer[8192];
-            DWORD bytesRead = 0;
-            // Message-mode pipe: a message larger than the read buffer
-            // returns ERROR_MORE_DATA with a partial chunk; keep reading
-            // until ReadFile reports the message complete.
-            for (;;) {
-                const BOOL ok = ReadFile(hPipe, buffer,
-                                         static_cast<DWORD>(sizeof(buffer) - sizeof(wchar_t)),
-                                         &bytesRead, nullptr);
-                if (ok || GetLastError() == ERROR_MORE_DATA) {
-                    response.append(buffer, bytesRead / sizeof(wchar_t));
-                    if (ok) break;
-                    continue;
-                }
-                response.clear();
-                break;
-            }
-            while (!response.empty() && response.back() == L'\0') {
-                response.pop_back();
-            }
-            if (!response.empty()) {
-                if (!SendControlAck(hPipe)) {
-                    FACELOGIN_WARN(L"Failed to acknowledge learning status response: %lu",
-                                   GetLastError());
-                }
-                result = WstrToUtf8(response);
-            }
-        }
-    }
+    // The service assembles the response synchronously — no model or worker
+    // work happens on this path — so a short bounded wait is enough.
+    RequestAckOutcome outcome =
+        RequestAckRoundTrip(hPipe, ipc::MSG_LEARNING_STATUS, 3000, 50,
+                            L"learning status");
     CloseHandle(hPipe);
-    return result;
+    if (!outcome.ok) {
+        return "{\"error\":\"Service did not respond\"}";
+    }
+    return WstrToUtf8(outcome.response);
 }
 
 bool EnrollmentServiceClient::ReloadConfig() const {
-    bool reloadConfirmed = false;
     HANDLE hPipe = CreateFileW(m_pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                OPEN_EXISTING, 0, nullptr);
-    if (hPipe != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        std::wstring msg(ipc::MSG_CONFIG_RELOAD);
-        msg.push_back(L'\0');
-        const DWORD expectedBytes = static_cast<DWORD>(msg.size() * sizeof(wchar_t));
-        BOOL writeOk = WriteFile(hPipe, msg.c_str(), expectedBytes, &written, nullptr);
-
-        if (writeOk && written == expectedBytes) {
-            DWORD bytesAvailable = 0;
-            // A service-mode CONFIG_RELOAD can replace a preloaded worker so
-            // the selected camera backend takes effect before acknowledging.
-            // Allow its bounded startup handshake to complete.
-            for (DWORD waited = 0; waited < 25000; waited += 50) {
-                if (!PeekNamedPipe(hPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr)) {
-                    break;
-                }
-                if (bytesAvailable > 0) break;
-                Sleep(50);
-            }
-
-            if (bytesAvailable > 0) {
-                wchar_t responseBuffer[64] = {};
-                DWORD bytesRead = 0;
-                if (ReadFile(hPipe, responseBuffer,
-                             static_cast<DWORD>(sizeof(responseBuffer) - sizeof(wchar_t)),
-                             &bytesRead, nullptr) && bytesRead > 0) {
-                    size_t responseLength = bytesRead / sizeof(wchar_t);
-                    while (responseLength > 0 && responseBuffer[responseLength - 1] == L'\0') {
-                        responseLength--;
-                    }
-                    std::wstring response(responseBuffer, responseLength);
-                    if (!SendControlAck(hPipe)) {
-                        FACELOGIN_WARN(L"Failed to acknowledge configuration reload response: %lu",
-                                       GetLastError());
-                    }
-                    reloadConfirmed = (response == ipc::MSG_CONFIG_RELOAD_OK);
-                    if (!reloadConfirmed) {
-                        FACELOGIN_ERROR(L"Service rejected configuration reload: %s",
-                                        response.c_str());
-                    }
-                }
-            }
-        }
-        CloseHandle(hPipe);
-    } else {
+    if (hPipe == INVALID_HANDLE_VALUE) {
         FACELOGIN_ERROR(L"Configuration saved but service is unavailable for reload: %lu",
                         GetLastError());
+        return false;
     }
-
-    return reloadConfirmed;
+    // A service-mode CONFIG_RELOAD can replace a preloaded worker so the
+    // selected camera backend takes effect before acknowledging. Allow its
+    // bounded startup handshake to complete.
+    RequestAckOutcome outcome =
+        RequestAckRoundTrip(hPipe, ipc::MSG_CONFIG_RELOAD, 25000, 50,
+                            L"configuration reload");
+    CloseHandle(hPipe);
+    if (!outcome.ok) {
+        return false;
+    }
+    if (outcome.response != ipc::MSG_CONFIG_RELOAD_OK) {
+        FACELOGIN_ERROR(L"Service rejected configuration reload: %s",
+                        outcome.response.c_str());
+        return false;
+    }
+    return true;
 }
 
 } // namespace facelogin

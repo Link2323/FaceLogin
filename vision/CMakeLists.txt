@@ -1,9 +1,6 @@
 # Sensor state persistence has no camera or inference dependency.
 add_library(facelogin_tune_state STATIC tune_state.cpp tune_state.h)
 target_include_directories(facelogin_tune_state PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-set_target_properties(facelogin_tune_state PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)
 
 # Shared by service, enrollment and diagnostics. Keep capture independent of
 # ONNX Runtime so camera-only tools do not acquire inference dependencies.
@@ -28,7 +25,3 @@ add_library(facelogin_inference STATIC
 )
 target_include_directories(facelogin_inference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(facelogin_inference PUBLIC facelogin_common facelogin_tune_state onnxruntime::onnxruntime)
-
-set_target_properties(facelogin_camera facelogin_inference PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

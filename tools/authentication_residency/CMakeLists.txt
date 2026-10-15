@@ -6,6 +6,3 @@ add_executable(AuthenticationResidencyTest
 )
 target_link_libraries(AuthenticationResidencyTest PRIVATE facelogin_common onnxruntime::onnxruntime)
 target_include_directories(AuthenticationResidencyTest PRIVATE ${CMAKE_SOURCE_DIR}/face_service)
-set_target_properties(AuthenticationResidencyTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

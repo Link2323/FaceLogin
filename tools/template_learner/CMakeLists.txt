@@ -12,7 +12,3 @@ target_link_libraries(TemplateLearnerTest PRIVATE
 target_include_directories(TemplateLearnerTest PRIVATE
     ${CMAKE_SOURCE_DIR}/face_service
 )
-
-set_target_properties(TemplateLearnerTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

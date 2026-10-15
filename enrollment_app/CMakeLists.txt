@@ -20,9 +20,6 @@ add_library(facelogin_enrollment_support STATIC
 )
 target_link_libraries(facelogin_enrollment_support PUBLIC facelogin_common)
 target_include_directories(facelogin_enrollment_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-set_target_properties(facelogin_enrollment_support PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)
 
 add_executable(FaceLoginConsole
     main.cpp
@@ -80,7 +77,6 @@ target_link_libraries(FaceLoginConsole PRIVATE
 # WebView2Loader is statically linked (WebView2LoaderStatic.lib) — no DLL needed
 
 set_target_properties(FaceLoginConsole PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
     WIN32_EXECUTABLE TRUE
 )
 

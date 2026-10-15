@@ -4,7 +4,3 @@ add_executable(IpcProtocolTest
 )
 
 target_link_libraries(IpcProtocolTest PRIVATE facelogin_common)
-
-set_target_properties(IpcProtocolTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

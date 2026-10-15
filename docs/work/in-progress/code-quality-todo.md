@@ -24,10 +24,10 @@
 | 3 | C | 陈旧引用与缩进错位清理（onnx_models.h 注释部分已登记于 [`todo.md`](todo.md)「清理推理接口与离线标定的旧说明」） | 见下文 | 已完成（2026-10-15） |
 | 4 | C | 魔法数字具名化 | 见下文 | 已完成（2026-10-15） |
 | 5 | B | 拆分 `AuthPipeline::Run` | `face_service/auth_pipeline.cpp:45-439` | 未开始 |
-| 6 | C | CMake MSVC runtime 样板收口 | 根及各模块 `CMakeLists.txt` | 未开始 |
+| 6 | C | CMake MSVC runtime 样板收口 | 根及各模块 `CMakeLists.txt` | 已完成（2026-10-15） |
 | 7 | B | dispId 单表化与凭据字段 ID 具名 | `enrollment_app/WebviewHost.cpp`、`credential_provider/` | 未开始 |
 | 8 | B | pipe_client 管道对测 | `credential_provider/pipe_client.cpp` | 未开始 |
-| 9 | C | service_client 提取 request-ack 辅助函数 | `enrollment_app/service_client.cpp` | 未开始 |
+| 9 | C | service_client 提取 request-ack 辅助函数 | `enrollment_app/service_client.cpp` | 已完成（2026-10-15） |
 | 10 | A | 相机后端接口化（仅在确需 Media Foundation 或多相机差异时实施） | `vision/`、`face_service/auth_worker.cpp:336-355` | 未开始 |
 | 11 | C | app.js 模块化（优先级最低） | `enrollment_app/app.js` | 未开始 |
 | 12 | C | 同步原语不一致：收敛或在文档豁免 | `face_service/authentication_residency.cpp` | 未开始 |
@@ -99,6 +99,17 @@ credential_provider 目前几乎零自动化覆盖。照 `tools/enrollment_suppo
 ## 完成记录
 
 完成后在此按日期登记（日期、条目号、改动摘要、验证方式与结果），并同步更新上表状态。
+
+### 2026-10-15 — #6、#9（第一梯队补充）
+
+**#6 CMake MSVC runtime 样板收口**：根 `CMakeLists.txt` 在 `add_subdirectory` 之前统一 `set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")`（附 CP 例外指引注释）；移除 6 个主模块与 12 个 tools 子目录共 21 处逐目标样板；`credential_provider/CMakeLists.txt` 保留 /MT 覆盖并补一行指向其 rationale 注释块。
+
+- 验证：改动前后各工程 vcxproj 的 `RuntimeLibrary` 逐一比对一致（CP 为 MultiThreaded(D)，其余 MultiThreaded(D)DLL，含 build 目录历史残留的 ExposureReviewRepro/StaleReplayRepro 也不受影响——它们不在当前 CMake 源中）；Release 与 Debug 全目标构建通过；产物级复核 `FaceLoginService.exe` 导入 VCRUNTIME140/MSVCP140、CP DLL 无任何 CRT DLL 导入；CTest `check` 11/11 通过。
+
+**#9 service_client 提取 request-ack 辅助函数**：新增 `RequestAckRoundTrip`（写请求 → 轮询等待 → 读完整消息模式消息 → 回 CONTROL_ACK，返回 `RequestAckOutcome{ok, response, error}`），`ReloadDatabase`/`QueryLearningStatus`/`ReloadConfig` 三段 50-90 行近似复制收拢为对它的调用，保留各自的消息常量、超时（5s/3s/25s）、轮询步长与结果解释。
+
+- 顺带统一了三处此前不一致的细节：响应读取统一走 ERROR_MORE_DATA 循环与 4096 宽字符缓冲（原来只有 QueryLearningStatus 处理长消息，另两处单次 64 宽字符读取）；空响应统一记 ERROR_READ_FAULT 进入失败路径（原来 ReloadDatabase 会把成功读 0 字节误记为 GetLastError 的旧值）； PeekNamedPipe 失败统一按管道断开处理。差异均在原代码的边缘失败路径，正常往返语义不变。
+- 验证：`EnrollmentSupportTest`（管道级对测，覆盖三种请求的接受/拒绝/对端断开/服务缺失及 CONTROL_ACK 断言）通过；CTest `check` 11/11 通过。属 IPC 边缘路径微调，未做 GUI 实测，理由：对端协议行为未变，测试已覆盖往返时序。
 
 ### 2026-10-15 — #1、#3、#4（第一梯队）
 

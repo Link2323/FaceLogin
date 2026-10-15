@@ -5,7 +5,3 @@ add_executable(ExposureWarmupTest
 )
 
 target_link_libraries(ExposureWarmupTest PRIVATE facelogin_camera)
-
-set_target_properties(ExposureWarmupTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

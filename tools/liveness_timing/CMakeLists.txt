@@ -6,7 +6,3 @@ add_executable(LivenessTimingTest
 target_include_directories(LivenessTimingTest PRIVATE
     ${CMAKE_SOURCE_DIR}/vision
 )
-
-set_target_properties(LivenessTimingTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)
