@@ -1,9 +1,10 @@
+// Embedded page SHA-256: @ENROLLMENT_PAGE_SHA256@
 #include <windows.h>
 #include <commctrl.h>
 #include "resource.h"
 
 // Face icon resource
-IDI_ENROLLMENT_ICON ICON "..\\assets\\facelogin.ico"
+IDI_ENROLLMENT_ICON ICON "@CMAKE_SOURCE_DIR@/assets/facelogin.ico"
 
 // ============================================================================
 // Page 1: Face Capture — 560 x 370
@@ -43,4 +44,4 @@ END
 // ============================================================================
 // HTML resource — embedded index.html
 // ============================================================================
-IDR_INDEX_HTML RCDATA "index.html"
+IDR_INDEX_HTML RCDATA "@CMAKE_CURRENT_BINARY_DIR@/index.html"

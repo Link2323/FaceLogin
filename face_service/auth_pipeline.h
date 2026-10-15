@@ -86,6 +86,9 @@ struct AuthPipelineResult {
     std::wstring errorMessage;
 };
 
+struct PreparedAuthFrames;
+namespace auth_diagnostics { struct ExposureTimingProfile; }
+
 class AuthPipeline {
 public:
     AuthPipeline(OnnxDetector& detector,
@@ -97,6 +100,12 @@ public:
     AuthPipelineResult Run();
 
 private:
+    bool PrepareFrames(PreparedAuthFrames& prepared,
+                       auth_diagnostics::ExposureTimingProfile& exposureTiming,
+                       const SensorKnobs& sensorKnobs,
+                       const std::function<bool()>& interrupted,
+                       const decltype(AuthPipelineCallbacks::grabFrame)& grabFrame);
+
     OnnxDetector& m_detector;
     OnnxRecognizer& m_recognizer;
     OnnxAntiSpoof& m_antiSpoof;

@@ -36,6 +36,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 - 构建、依赖和打包流程以 [`docs/BUILD.md`](docs/BUILD.md) 为准。优先使用 `scripts/build_installer.ps1`；版本同步使用 `scripts/bump_version.ps1`。
 - `installer/FaceLoginSetup/resources/` 中的二进制和模型按文件类型被 Git 忽略。打包脚本按白名单复制并清理资源；手工打包前按 `docs/BUILD.md` 核对。安装包需要的 5 个运行时 DLL 来自 `build/face_service/Release/`；Credential Provider 使用静态 CRT，不依赖这些 DLL。
 - 完整安装器嵌入由 `resources/` 生成的 `payload.zip`，打包前按白名单清除意外残留；slim 卸载器不嵌入载荷。`tools/` 中的离线工具不属于安装载荷。
+- 注册页面修改 `enrollment_app/index.html.in`、`styles.css` 和 `app.js`；CMake 合成并嵌入页面，不编辑 `build/enrollment_app/index.html`。构建与验证见 `docs/BUILD.md`。
 - 不编辑 `installer/FaceLoginSetup/frontend/wailsjs/` 下的生成绑定；通过 Wails 命令重新生成。
 - 普通构建和打包复用现有模型文件，不重复下载或量化。只有新克隆缺模型、哈希校验失败或任务明确要求升级时，才运行模型下载脚本。模型来源、哈希和转换规则见 `third_party/models/` 与 [`DEVELOPMENT.md`](DEVELOPMENT.md#sec-models)。
 - 依赖或模型变更时，同步更新适用的许可、来源记录和随包声明；事实源及更新脚本见 `docs/BUILD.md`、`third_party/sources.json`。

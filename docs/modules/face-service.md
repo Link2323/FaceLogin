@@ -53,7 +53,9 @@ AUTH_REQUEST → worker 打开相机并认证 → 父进程匹配 SID、构造�
 
 每轮已有的 embedding 范数日志附带 `Binding capture sequence`：记录实际绑定尝试次数、相邻尝试重复序号次数及首末序号，用于区分持续身份不匹配和重复读取相机旧缓冲帧；不记录画面或向量。
 
-预热与传感器控制实现见 `exposure_warmup.h`、`face_gain_tune.h` 和 `auth_pipeline.cpp`。曝光探针的使用方法见 [`BUILD.md`](../BUILD.md)。
+认证准备阶段位于 `face_service/auth_frame_preparation.*`，集中处理曝光重放、预热异步检测、种子帧过期与调节；`auth_pipeline.cpp` 保留截止时间和身份/PAD 主循环。准备阶段使用主流程传入的中断检查，不重置预算。异步检测对象同时持有输入帧和 future，退出时先等待检测结束再释放帧；调节恢复状态在整轮认证期间保持固定地址。帧采集节奏由 `auth_frame_stream.*` 管理：计入证据的帧采集间隔至少 60 ms，序号严格递增；身份 Retry 和其他丢弃帧不推进锚点。主循环在身份/连续性检查通过后、预取下一帧前推进锚点，保持 PAD 与下一帧检测重叠。
+
+预热与传感器控制实现见 `exposure_warmup.h`、`face_gain_tune.h` 和 `auth_pipeline.cpp`。状态类型与文件读写集中在 `vision/tune_state.*`；`face_gain_tune.h` 保留设备重放与调节策略。认证的传感器诊断快照由 `auth_pipeline_diagnostics.h` 封装，在原相机线程读取且不参与调节判断。曝光探针的使用方法见 [`BUILD.md`](../BUILD.md)。
 
 当前落带参数和已确认调节进度的保存发生在最终身份/PAD 判断前；参数的有效性以曝光测量和稳定依据为准，认证失败本身不否定参数有效，认证成功也不保证参数适合下一轮的新光照。环境切换记录、重复恢复的待验证机制及后续提速候选见 [曝光问题与解锁提速方向](../work/in-progress/exposure-issues-and-speedups.md)。
 

@@ -80,6 +80,63 @@ inline double ElapsedMs(std::chrono::steady_clock::time_point start) {
         std::chrono::steady_clock::now() - start).count();
 }
 
+// Diagnostic snapshots are read on the camera's COM thread, never used for tuning.
+class ExposureSnapshot {
+public:
+    void ReadOnce(const SensorKnobs& sensorKnobs,
+                  const std::function<bool(long&, bool&)>& readExposureState,
+                  ExposureTimingProfile& profile) {
+        if (readDone) return;
+        profile.phase = ExposureTimingProfile::Trigger;
+        const auto queryAt = std::chrono::steady_clock::now();
+        if (readExposureState) {
+            const auto exposureAt = std::chrono::steady_clock::now();
+            const bool ok = readExposureState(
+                exposure, manual);
+            auto& c = profile.calls[ExposureTimingProfile::Trigger]
+                                          [ExposureTimingProfile::ExposureState];
+            const double ms = ElapsedMs(exposureAt);
+            ++c.count;
+            if (!ok) ++c.failed;
+            c.totalMs += ms;
+            c.maxMs = std::max(c.maxMs, ms);
+            haveExposure = haveMode = ok;
+        } else {
+            haveExposure = sensorKnobs.exposureGet &&
+                sensorKnobs.exposureGet(exposure);
+        }
+        haveGain = sensorKnobs.gainGet &&
+            sensorKnobs.gainGet(gain);
+        if (!readExposureState) {
+            haveMode = sensorKnobs.exposureIsManual &&
+                sensorKnobs.exposureIsManual(manual);
+        }
+        profile.triggerQueryMs = ElapsedMs(queryAt);
+        readDone = true;
+    }
+
+    std::wstring Text() const {
+        wchar_t knobsText[96] = L"knobs n/a";
+        if (haveExposure || haveGain) {
+            wchar_t expPart[48] = L"exposure n/a";
+            wchar_t gainPart[40] = L"gain n/a";
+            if (haveExposure) {
+                _snwprintf_s(expPart, _TRUNCATE, L"exposure %ld (%s)", exposure,
+                             haveMode ? (manual ? L"manual" : L"auto") : L"mode n/a");
+            }
+            if (haveGain) _snwprintf_s(gainPart, _TRUNCATE, L"gain %ld", gain);
+            _snwprintf_s(knobsText, _TRUNCATE, L"%s, %s", expPart, gainPart);
+        }
+        return knobsText;
+    }
+
+private:
+    bool readDone = false;
+    long exposure = 0, gain = 0;
+    bool manual = false;
+    bool haveExposure = false, haveGain = false, haveMode = false;
+};
+
 inline SensorKnobs ProfileSensorKnobs(const SensorKnobs& original,
                               ExposureTimingProfile& profile) {
     const auto wrap = [&profile](auto callback, ExposureTimingProfile::Operation op) {

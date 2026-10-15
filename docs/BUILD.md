@@ -34,9 +34,16 @@ cmake --build build --config Release --parallel
 | `FaceLoginCredentialProvider` | `build/credential_provider/Release/FaceLoginCredentialProvider.dll` |
 | `FaceLoginConsole` | `installer/FaceLoginSetup/resources/FaceLoginConsole.exe` |
 
-开发测试从根 CMake 单独构建。
+开发测试从根 CMake 单独构建。无硬件自动化回归使用统一入口：
 
-服务和注册程序通过静态库复用共享实现：`vision/` 提供 `facelogin_camera`（DirectShow）与 `facelogin_inference`（ONNX Runtime），`storage/` 提供 `facelogin_credential_store`。消费方链接目标即可获得头文件和传递依赖，不再把这些 `.cpp` 加入各自源码清单。相机诊断程序只链接相机库；`AuthPipelineTest` 保留确定性推理替身，不链接真实推理实现。Credential Provider 仅引用存储头文件中的定义，继续使用自己的静态 CRT 构建。
+```powershell
+cmake --build build --config Release --target check --parallel 1
+```
+
+`check` 先构建再通过 CTest 运行 10 个自动化测试，失败返回非零。只重跑已构建测试可用 `ctest --test-dir build -C Release --output-on-failure -L automated`。相机探针、标定、GUI 与锁屏实测不纳入此目标；普通产品构建和安装器打包不会运行测试。
+
+
+服务和注册程序通过静态库复用共享实现：`vision/` 提供 `facelogin_camera`（DirectShow）与 `facelogin_inference`（ONNX Runtime），`storage/` 提供 `facelogin_credential_store`。曝光状态文件读写由独立的 `facelogin_tune_state` 静态库提供，不依赖相机或推理。消费方链接目标即可获得头文件和传递依赖，不再把这些 `.cpp` 加入各自源码清单。相机诊断程序只链接相机库；`AuthPipelineTest` 保留确定性推理替身，不链接真实推理实现。Credential Provider 仅引用存储头文件中的定义，继续使用自己的静态 CRT 构建。
 
 注册端支持模块可独立验证，无需打开相机或启动已安装的服务：
 
@@ -80,7 +87,7 @@ SFace 自 2026-10-04 起使用清理 initializer graph inputs 的规范化 FP32 
 
 开发验证与打包分开：安装器 Go 代码变更后在 `installer/FaceLoginSetup/` 单独运行 `go test ./...`，C++ 测试按目标显式构建和运行。
 
-改动 `enrollment_app/index.html` 时须先重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
+注册页面源文件为 `enrollment_app/index.html.in`、`styles.css` 和 `app.js`；CMake 合成为 `build/enrollment_app/index.html`，由生成的 `resource.rc` 嵌入 EXE，不增加运行期资源文件。修改任一源文件后须重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
 
 ### 资源白名单
 

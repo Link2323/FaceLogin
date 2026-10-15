@@ -2,6 +2,8 @@ add_executable(FaceLoginService
     main.cpp
     FaceService.cpp
     auth_pipeline.cpp
+    auth_frame_preparation.cpp
+    auth_frame_stream.cpp
     authentication_residency.cpp
     auth_worker.cpp
     auth_worker_client.cpp

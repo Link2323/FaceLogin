@@ -1,3 +1,15 @@
+# Assemble a single embedded page without runtime asset dependencies.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/styles.css"
+    "${CMAKE_CURRENT_SOURCE_DIR}/app.js"
+)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/styles.css" ENROLLMENT_CSS)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/app.js" ENROLLMENT_JS)
+configure_file(index.html.in ${CMAKE_CURRENT_BINARY_DIR}/index.html @ONLY)
+# RC inputs must change with the page even when MSBuild file tracking is disabled.
+file(SHA256 "${CMAKE_CURRENT_BINARY_DIR}/index.html" ENROLLMENT_PAGE_SHA256)
+configure_file(resource.rc.in ${CMAKE_CURRENT_BINARY_DIR}/resource.rc @ONLY)
+
 add_library(facelogin_enrollment_support STATIC
     session_identity.cpp
     service_client.cpp
@@ -18,7 +30,7 @@ add_executable(FaceLoginConsole
     enrollment_capture.cpp
     enrollment_templates.cpp
     enrollment_accounts.cpp
-    resource.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 )
 facelogin_add_version_rc(FaceLoginConsole VFT_APP
     "FaceLogin enrollment console" FaceLoginConsole.exe)

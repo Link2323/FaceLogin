@@ -57,9 +57,9 @@ inline constexpr size_t kMaxUsers = 5;
 // rejects when the account already has this many faces.
 inline constexpr size_t kMaxFacesPerUser = 3;
 
-// Sentinel for "this face predates V5 and has no nominal angle". Any value
-// outside the physical ±90° range means invalid; 1000 is what V4-upgraded
-// records carry and what serialization round-trips. Validity predicate:
+// Sentinel for an in-memory face with no nominal angle. Any value
+// outside the physical ±90° range means invalid; 1000 is preserved by
+// serialization round-trips. Validity predicate:
 // IsValidNominalAngle in face_align.h (physical angle domain).
 inline constexpr float kNominalAngleInvalid = 1000.0f;
 
@@ -72,8 +72,7 @@ inline constexpr float kNominalAngleInvalid = 1000.0f;
 // (kAngleTargets: 正面 0/0, 左转 +30/0, 右转 -30/0), not a measured average —
 // a fixed target keeps the ±25° learning cones of the three slots disjoint
 // even when the user under-turned (docs/progressive-learning-v2.md §3).
-// Records loaded from a V4 file (and in-memory faces added without angles)
-// carry kNominalAngleInvalid; the learner's cone gate treats that as "no cone
+// In-memory faces added without angles carry kNominalAngleInvalid; the learner's cone gate treats that as "no cone
 // information" (pass) until re-enrollment.
 struct FaceRecord {
     uint32_t           id = 0;

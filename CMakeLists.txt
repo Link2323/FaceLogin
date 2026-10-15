@@ -80,3 +80,21 @@ add_development_tool(tools/auth_pipeline AuthPipelineTest)
 add_development_tool(tools/exposure_warmup ExposureWarmupTest)
 add_development_tool(tools/face_gain_tune FaceGainTuneTest)
 add_development_tool(tools/enrollment_support EnrollmentSupportTest)
+
+# Hardware-free regression suite. Camera probes remain explicit manual targets.
+enable_testing()
+set(FACELOGIN_AUTOMATED_TESTS
+    AuthWorkerProtocolTest CredentialStoreTest TemplateLearnerTest
+    ModelIntegrityTest IpcProtocolTest LivenessTimingTest AuthPipelineTest
+    ExposureWarmupTest FaceGainTuneTest EnrollmentSupportTest
+)
+foreach(test_target IN LISTS FACELOGIN_AUTOMATED_TESTS)
+    add_test(NAME ${test_target} COMMAND $<TARGET_FILE:${test_target}>)
+    set_tests_properties(${test_target} PROPERTIES TIMEOUT 120 LABELS "automated")
+endforeach()
+add_custom_target(check
+    COMMAND ${CMAKE_CTEST_COMMAND} -C $<CONFIG> --output-on-failure -L automated
+    DEPENDS ${FACELOGIN_AUTOMATED_TESTS}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+)

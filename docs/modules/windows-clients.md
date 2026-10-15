@@ -101,7 +101,7 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 ### WebView2 边界
 
-- `index.html` 编译进 `FaceLoginConsole.exe`，修改后必须重建 C++ 目标。
+- `index.html.in`、`styles.css`、`app.js` 在 CMake 配置时合成单个 `index.html`，编译进 `FaceLoginConsole.exe`；修改任一源文件后必须重建 C++ 目标。
 - JS 桥接的 dispId 清单以 `WebviewHost.cpp` 为准，不在文档复制。
 - 日志页四个日志来源直接读文件；"学习状态"视图是唯一走公共管道的查询（`LEARNING_STATUS`，响应为单条 JSON 内存快照，服务重启清零），客户端按 10s 节流——公共管道单实例，不得演变成高频轮询。
 - 禁用右键菜单和开发者工具。
@@ -142,4 +142,4 @@ Enrollment 改动：
 - 三角度采集与一致性拒绝
 - 本地账号、MSA、空密码账户拒绝录入
 - 保存、热重载、删除/重命名人脸
-- 修改 `index.html` 后确认实际重建并嵌入新 UI
+- 修改页面模板、样式或脚本后确认实际重建并嵌入新 UI

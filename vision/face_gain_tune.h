@@ -3,6 +3,7 @@
 #include "../common/frame_image.h"
 #include "../common/logger.h"
 #include "onnx_models.h"
+#include "tune_state.h"
 
 #include <algorithm>
 #include <chrono>
@@ -164,15 +165,6 @@ inline bool PreferAutoExposureWithoutGain(const SensorKnobs& knobs,
 // Persisted last settled sensor combo (not necessarily in the target band)
 // ---------------------------------------------------------------------------
 
-struct TuneKnobState {
-    bool hasExposure = false;
-    long exposure = 0;
-    bool hasGain = false;
-    long gain = 0;
-    bool hasExposureMode = false;
-    bool exposureManual = false;
-};
-
 struct FaceTuneRecovery {
     bool pending = false;
     bool attempted = false;
@@ -203,45 +195,6 @@ inline bool SameTuneKnobState(const TuneKnobState& a, const TuneKnobState& b) {
         a.hasGain == b.hasGain && (!a.hasGain || a.gain == b.gain) &&
         a.hasExposureMode == b.hasExposureMode &&
         (!a.hasExposureMode || a.exposureManual == b.exposureManual);
-}
-
-// ASCII "exposure=<v>" / "gain=<v>" with optional "exposure_manual=0|1".
-// Old two-line states retain their value-only replay behavior. Missing or
-// unknown mode data never turns an AE observation into a manual-mode claim.
-// Persistence is best-effort; measured tuning stays the authority.
-inline bool LoadTuneKnobState(const std::wstring& path, TuneKnobState& out) {
-    out = TuneKnobState{};
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path.c_str(), L"rt") != 0 || !f) return false;
-    char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        long v = 0;
-        if (sscanf_s(line, " exposure = %ld", &v) == 1) {
-            out.exposure = v;
-            out.hasExposure = true;
-        } else if (sscanf_s(line, " gain = %ld", &v) == 1) {
-            out.gain = v;
-            out.hasGain = true;
-        } else if (sscanf_s(line, " exposure_manual = %ld", &v) == 1 &&
-                   (v == 0 || v == 1)) {
-            out.hasExposureMode = true;
-            out.exposureManual = v == 1;
-        }
-    }
-    fclose(f);
-    return out.hasExposure || out.hasGain;
-}
-
-inline bool SaveTuneKnobState(const std::wstring& path, const TuneKnobState& state) {
-    if (!state.hasExposure && !state.hasGain) return false;
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path.c_str(), L"wt") != 0 || !f) return false;
-    bool written = true;
-    if (state.hasExposure) written = fprintf(f, "exposure=%ld\n", state.exposure) >= 0 && written;
-    if (state.hasGain) written = fprintf(f, "gain=%ld\n", state.gain) >= 0 && written;
-    if (state.hasExposureMode)
-        written = fprintf(f, "exposure_manual=%d\n", state.exposureManual ? 1 : 0) >= 0 && written;
-    return fclose(f) == 0 && written;
 }
 
 inline bool SaveTuneKnobState(const std::wstring& path, const SensorKnobs& knobs) {

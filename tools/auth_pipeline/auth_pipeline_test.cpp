@@ -15,6 +15,8 @@ std::atomic<float> g_padScore{1.0f};
 std::atomic<int> g_minDetectLuma{0};
 std::atomic<bool> g_smallBacklitFace{false};
 std::atomic<unsigned int> g_detectCalls{0};
+std::atomic<int> g_detectionDelayMs{0};
+std::atomic<unsigned int> g_activeDetections{0};
 int g_lastEmbeddingMarker = 0;
 int g_failures = 0;
 
@@ -39,7 +41,13 @@ bool OnnxAntiSpoof::Initialize(const std::wstring&, const std::wstring&) {
 }
 
 std::optional<OnnxDetector::Detection> OnnxDetector::DetectLargestFace(const FrameImage& frame) {
+    ++g_activeDetections;
+    struct DetectionFinished {
+        ~DetectionFinished() { --g_activeDetections; }
+    } finished;
     ++g_detectCalls;
+    if (const int delay = g_detectionDelayMs.load(); delay > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
     if (frame.size() == 0 ||
         frame(frame.nr() / 2, frame.nc() / 2).red < g_minDetectLuma.load()) return std::nullopt;
     if (g_smallBacklitFace.load())
@@ -205,6 +213,34 @@ void TestCancelDuringIdentityRetry() {
         }, [&] { return Clock::now() - start >= std::chrono::milliseconds(300); });
     Check(result.cancelled && !result.succeeded && result.errorMessage.empty(),
           "cancellation wins over identity failure and joins inference work");
+}
+
+void TestPacingSkipsStaleFramesAndRetainsRetryAnchor() {
+    g_padScore = 1.0f;
+    // Warmup: 1,2. After counting 2, duplicate 2 and backward 1 must be
+    // discarded. Identity retries 3 once; the same uncounted 3 remains usable.
+    const std::vector<unsigned long long> sequences{1, 2, 2, 1, 3, 3, 4};
+    size_t grabs = 0;
+    std::vector<int> bindings;
+    const auto result = Run(true,
+        [&](const std::vector<float>&, unsigned int, float, float, float) {
+            bindings.push_back(g_lastEmbeddingMarker);
+            return BindingDecision{bindings.size() == 2 ? BindingDecisionKind::Retry
+                                                       : BindingDecisionKind::Accept, {}};
+        }, [] { return false; }, [] { return false; }, ipc::AUTH_TIMEOUT_SECONDS,
+        [] { return false; }, [&](AuthPipelineCallbacks& callbacks, AuthPipelineConfig&) {
+            callbacks.grabFrame = [&](FrameImage& frame, unsigned long long& seq) {
+                seq = grabs < sequences.size() ? sequences[grabs] : grabs;
+                ++grabs;
+                frame = FrameImage(160, 160);
+                for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(80, 80, 80);
+                frame(0, 0) = RgbPixel(static_cast<unsigned char>(seq), 80, 80);
+                return true;
+            };
+        });
+    Check(result.succeeded && bindings == std::vector<int>({2, 3, 3, 4}),
+          "counted-frame dedup rejects stale/backward sequences but Retry does not advance the anchor");
+    Check(grabs == sequences.size(), "frame pacing consumes exactly the expected fresh/retry frames");
 }
 
 void TestFrozenCameraHonorsTimeout() {
@@ -523,7 +559,32 @@ void TestManualWarmupSeed(SeedScene scene = SeedScene::Manual, int rotation = 0,
                 static_cast<int>(scene), rotation, fastUnlock, firstMarker, bindings, result.succeeded);
 }
 
+// Exit while SCRFD still owns its input. Preparation must join before Run
+// returns, and neither cancellation nor expiry may produce identity evidence.
+void TestPendingWarmupExit(bool expireDeadline) {
+    g_detectCalls = 0;
+    g_detectionDelayMs = 100;
+    unsigned int bindings = 0;
+    const auto result = Run(true,
+        [&](const std::vector<float>&, unsigned int, float, float, float) {
+            ++bindings;
+            return BindingDecision{BindingDecisionKind::Accept, {}};
+        }, [&] { return !expireDeadline && g_detectCalls.load() > 0; },
+        [] { return false; }, ipc::AUTH_TIMEOUT_SECONDS,
+        [] { return false; }, [&](AuthPipelineCallbacks&, AuthPipelineConfig& config) {
+            if (expireDeadline) config.authDeadline = ipc::MakeAuthDeadline(30);
+        });
+    Check(g_detectCalls > 0 && g_activeDetections == 0,
+          "pending warmup detection is joined before the pipeline returns");
+    Check(!result.succeeded && bindings == 0 &&
+          (expireDeadline ? result.timedOut : result.cancelled),
+          "pending warmup exit preserves the shared deadline/cancel terminal state");
+    g_detectionDelayMs = 0;
+}
+
 void TestWarmupSeeds() {
+    TestPendingWarmupExit(false);
+    TestPendingWarmupExit(true);
     for (auto scene : {SeedScene::Manual, SeedScene::Auto, SeedScene::UnknownMode,
                        SeedScene::Drift, SeedScene::Dark, SeedScene::Bright,
                        SeedScene::Expired, SeedScene::ControlWrite, SeedScene::PadFailure,
@@ -564,6 +625,7 @@ int main(int argc, char** argv) {
     TestIdentityRejectRemainsTerminal();
     TestInvalidPadRemainsTerminal();
     TestCancelDuringIdentityRetry();
+    TestPacingSkipsStaleFramesAndRetainsRetryAnchor();
     TestFrozenCameraHonorsTimeout();
     TestFrozenCameraHonorsDisconnect();
     TestPreparationConsumesAuthBudget();

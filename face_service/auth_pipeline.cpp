@@ -1,8 +1,9 @@
 #include "auth_pipeline.h"
 #include "auth_pipeline_diagnostics.h"
+#include "auth_frame_preparation.h"
+#include "auth_frame_stream.h"
 
 #include "../common/logger.h"
-#include "../vision/exposure_warmup.h"
 #include "../vision/face_align.h"
 #include "../vision/face_gain_tune.h"
 
@@ -91,331 +92,17 @@ AuthPipelineResult AuthPipeline::Run() {
             return grabbed;
         };
 
-        // Software-pipelined frame supply: while PAD(N) runs on its async
-        // thread, the main thread grabs and detects frame N+1 into a single
-        // prefetch slot, so PAD / embedding / binding IPC hide inside the
-        // next frame's capture+detection time. Per-frame verdict logic and
-        // ordering are unchanged; only the schedule moves.
-        struct Prefetch {
-            bool valid = false;
-            FrameImage frame;                       // already rotated
-            unsigned long long seq = 0;
-            std::optional<OnnxDetector::Detection> det;
-            std::chrono::steady_clock::time_point grabWall{};
-        };
-
-        // Pre-run SCRFD during exposure warmup: the warmup loop only consumes
-        // mean luma, so an async thread can detect the newest sample for
-        // free. When the gate opens, a frame + detection from warmup seeds the
-        // prefetch slot, removing the first serial grab+detect from the
-        // critical path. The seed is a real, distinct, rotated camera frame
-        // and the first counted frame has no pacing anchor yet, so no
-        // invariant is touched. Seeds older than 400 ms (slow dark-room
-        // convergence) are discarded and the loop grabs fresh exactly like
-        // the legacy behavior.
-        constexpr double kSeedMaxAgeMs = 400.0;
-        constexpr float kSeedFaceLumaDrift = 10.0f;
-        Prefetch seed;
-        FrameImage seedFrame;
-        // The future joins on every exit, including cancellation. Declare it
-        // after its input so that the frame outlives the async detector.
-        std::future<std::optional<OnnxDetector::Detection>> seedFuture;
-        unsigned long long seedSeq = 0;
-        std::chrono::steady_clock::time_point seedWall{};
-
-        // Replay the persisted last-good sensor combo BEFORE the warmup:
-        // the driver intermittently forgets its manual UVC controls across
-        // the idle power-down (2026-09-13), and without the replay every
-        // such round starts at the driver default and pays the full
-        // settle-loop tune. A replayed gain lands instantly; a replayed
-        // exposure settles inside the warmup window. Equal values are never
-        // re-written, so an intact driver pays nothing.
-        const auto replay = ReplayExposureState(sensorKnobs, m_config.tuneStatePath);
-        const bool replayWrote = replay.wrote;
-        const auto replayAt = replay.startedAt;
-        const bool usingAutoExposure = replay.usingAutoExposure;
-        // With usable gain, the AE policy above does not query the current
-        // mode. Confirm manual mode on the camera's COM thread before warmup;
-        // unknown modes and rounds that wrote controls retain latest detection.
-        bool manualExposure = false;
-        const bool stableSeedMode = usingAutoExposure ||
-            (!replayWrote && sensorKnobs.exposureIsManual &&
-             sensorKnobs.exposureIsManual(manualExposure) && manualExposure);
-        exposureTiming.preparationMs = ElapsedMs(replayAt);
-
-        // Let auto-exposure settle before the first PAD frame. Adaptive gate
-        // (see exposure_warmup.h): sample the mean luma of distinct frames
-        // and proceed once a 2-sample window is stable, or at the 10-sample
-        // cap. A settled scene opens the gate after two distinct frames —
-        // already stricter than the legacy 3-iteration discard, which usually
-        // completed before the camera's first frame — while slow-converging
-        // scenes (cold start, dark room) wait for real stability instead of
-        // proceeding with under-exposed frames. Failed grabs and duplicate
-        // buffered frames (same frame sequence) don't count as samples;
-        // maxAttempts bounds a dead camera. Mean luma is rotation-invariant,
-        // so warmup frames skip RotateFrame. The 10 ms poll pace keeps the
-        // alignment waste to a fresh 30 fps frame at ~5 ms average.
-        const ExposureWarmupConfig warmupConfig;
-        ExposureWarmup warmup(warmupConfig);
-        const auto warmupStart = std::chrono::steady_clock::now();
-        unsigned long long lastSeq = 0;
-        bool haveLastSeq = false;
-        for (int attempts = 0; attempts < warmupConfig.maxAttempts; ++attempts) {
-            if (interrupted()) {
-                return result;
-            }
-            FrameImage warmFrame;
-            unsigned long long seq = 0;
-            if (!grabFrame(warmFrame, seq) || (haveLastSeq && seq == lastSeq)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            const auto previousWarmSeq = lastSeq;
-            const bool hadPreviousWarm = haveLastSeq;
-            haveLastSeq = true;
-            lastSeq = seq;
-            if (seedFuture.valid() &&
-                seedFuture.wait_for(std::chrono::seconds(0))
-                    == std::future_status::ready) {
-                auto seedDet = seedFuture.get();
-                seed = Prefetch{ true, std::move(seedFrame), seedSeq,
-                                 std::move(seedDet), seedWall };
-            }
-            const bool gateOpened = warmup.Feed(MeanLuma(warmFrame));
-            // A completed detection from the preceding sample already belongs
-            // to this stable two-frame window. Keep it when the exposure mode
-            // is known and face luma agrees, rather than start another
-            // detection and move the first
-            // counted frame's pacing anchor forward by one camera period.
-            // An unstable/capped window, control write, missing face or older
-            // sample keeps the original latest/pending detection path.
-            bool reuseCompleted = gateOpened && warmup.Settled() &&
-                stableSeedMode && !replayWrote && hadPreviousWarm &&
-                seed.valid && seed.det && seed.seq == previousWarmSeq &&
-                ElapsedMs(seed.grabWall) <= kSeedMaxAgeMs;
-            if (reuseCompleted) {
-                FrameImage latest = warmFrame;
-                RotateFrame(latest, m_config.cameraRotation);
-                const GainTuneConfig bounds;
-                const float olderLuma = FaceBoxLuma(seed.frame, *seed.det);
-                const float latestLuma = FaceBoxLuma(latest, *seed.det);
-                reuseCompleted = olderLuma >= bounds.minFaceLuma &&
-                    olderLuma <= bounds.maxFaceLuma &&
-                    latestLuma >= bounds.minFaceLuma &&
-                    latestLuma <= bounds.maxFaceLuma &&
-                    std::fabs(latestLuma - olderLuma) <= kSeedFaceLumaDrift;
-            }
-            exposureTiming.reusedCompletedSeed = reuseCompleted;
-            if (!seedFuture.valid() && !reuseCompleted) {
-                seedFrame = warmFrame;               // luma already sampled; copy for detection
-                RotateFrame(seedFrame, m_config.cameraRotation);
-                seedSeq = seq;
-                seedWall = std::chrono::steady_clock::now();
-                seedFuture = std::async(std::launch::async, [this, &seedFrame] {
-                    return m_detector.DetectLargestFace(seedFrame);
-                });
-            }
-            if (gateOpened) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        const auto gateAt = std::chrono::steady_clock::now();
-        exposureTiming.gateReached = true;
-        FACELOGIN_INFO(L"Exposure warmup: %d samples, %.0f ms%s",
-                       warmup.Samples(),
-                       std::chrono::duration<double, std::milli>(
-                           std::chrono::steady_clock::now() - warmupStart).count(),
-                       warmup.Settled() ? L" — stable" : L" — cap reached, proceeding");
-
-        // Only the log consumes this snapshot. Read on the camera's current
-        // COM thread while the outstanding SCRFD runs on its existing async
-        // thread; do not add concurrent sensor calls or reuse it for tuning.
-        long diagnosticExposure = 0, diagnosticGain = 0;
-        bool diagnosticManual = false;
-        bool haveDiagnosticExposure = false, haveDiagnosticGain = false;
-        bool haveDiagnosticMode = false, diagnosticReadDone = false;
-        const auto readDiagnosticKnobs = [&] {
-            exposureTiming.phase = ExposureTimingProfile::Trigger;
-            const auto queryAt = std::chrono::steady_clock::now();
-            if (m_callbacks.readExposureState) {
-                const auto exposureAt = std::chrono::steady_clock::now();
-                const bool ok = m_callbacks.readExposureState(
-                    diagnosticExposure, diagnosticManual);
-                auto& c = exposureTiming.calls[ExposureTimingProfile::Trigger]
-                                              [ExposureTimingProfile::ExposureState];
-                const double ms = ElapsedMs(exposureAt);
-                ++c.count;
-                if (!ok) ++c.failed;
-                c.totalMs += ms;
-                c.maxMs = std::max(c.maxMs, ms);
-                haveDiagnosticExposure = haveDiagnosticMode = ok;
-            } else {
-                haveDiagnosticExposure = sensorKnobs.exposureGet &&
-                    sensorKnobs.exposureGet(diagnosticExposure);
-            }
-            haveDiagnosticGain = sensorKnobs.gainGet &&
-                sensorKnobs.gainGet(diagnosticGain);
-            if (!m_callbacks.readExposureState) {
-                haveDiagnosticMode = sensorKnobs.exposureIsManual &&
-                    sensorKnobs.exposureIsManual(diagnosticManual);
-            }
-            exposureTiming.triggerQueryMs = ElapsedMs(queryAt);
-            diagnosticReadDone = true;
-        };
-        // If replay wrote a knob, defer the snapshot until after its existing
-        // settle/re-measure path, so the log cannot describe pre-write state.
-        if (!replayWrote && seedFuture.valid()) {
-            readDiagnosticKnobs();
-            exposureTiming.triggerQueriesBeforeSeedWait = true;
-        }
-
-        const auto seedWaitAt = std::chrono::steady_clock::now();
-        if (seedFuture.valid()) {
-            // Consume the same outstanding frame/detection, waiting only for
-            // the work left after any early diagnostic queries.
-            auto seedDet = seedFuture.get();
-            seed = Prefetch{ true, std::move(seedFrame), seedSeq,
-                             std::move(seedDet), seedWall };
-        }
-        exposureTiming.seedWaitMs = ElapsedMs(seedWaitAt);
-        if (interrupted()) return result;
-        exposureTiming.warmupSeedSeq = seed.valid ? seed.seq : 0;
-        exposureTiming.warmupSeedAgeMs = seed.valid ? ElapsedMs(seed.grabWall) : -1.0;
-        if (seed.valid && std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - seed.grabWall).count()
-                              > kSeedMaxAgeMs) {
-            seed = Prefetch{};                      // stale seed: grab fresh like the legacy loop
-        }
-
-        // Face-priority gain tune (face_gain_tune.h): the trigger measurement
-        // reuses the seed's detection, so bright scenes — the common case —
-        // pay one bbox luma pass and zero extra inference. In-band rounds
-        // take the early return, which also refreshes the persisted combo;
-        // only an actual tune invalidates the seed frame.
-        FaceTuneRecovery tuneRecovery;
-        GainTuneConfig tuneCfg;
-        tuneCfg.persistPath = m_config.tuneStatePath;
-        if (!tuneCfg.persistPath.empty()) tuneCfg.recovery = &tuneRecovery;
-        const auto seedRefreshAt = std::chrono::steady_clock::now();
-        if (!seed.valid && !interrupted()) {
-            FrameImage fresh;
-            unsigned long long freshSeq = 0;
-            if (m_callbacks.grabFrame(fresh, freshSeq)) {
-                RotateFrame(fresh, m_config.cameraRotation);
-                auto det = m_detector.DetectLargestFace(fresh);
-                seed = Prefetch{true, std::move(fresh), freshSeq, std::move(det),
-                                std::chrono::steady_clock::now()};
-            }
-        }
-        exposureTiming.seedRefreshMs = ElapsedMs(seedRefreshAt);
-        // A just-applied replay write needs the driver's lag window (the
-        // same ~0.5–1 s family as the tune settle floor) before readings
-        // are trustworthy. Judging the trigger on the pre-settle reading
-        // stacks a second write on top of the replay and mis-flags the gain
-        // knob as dead (2026-09-13 21:59: one 4.3 s round landing
-        // over-bright). Out-of-band readings inside that window get one
-        // re-measure after it instead. (Curve sampling during this window
-        // showed the post-replug sensor is untrustworthy for several
-        // seconds no matter what — delayed jump, not a smooth ramp — so the
-        // window stays fixed and the first re-measure decides.)
-        exposureTiming.phase = ExposureTimingProfile::ReplaySettle;
-        const auto replaySettleAt = std::chrono::steady_clock::now();
-        if (replayWrote && seed.valid && seed.det) {
-            const float lumaNow = FaceBoxLuma(seed.frame, *seed.det);
-            if (lumaNow >= 0.0f &&
-                (lumaNow < tuneCfg.minFaceLuma || lumaNow > tuneCfg.maxFaceLuma ||
-                 detail::CanShortenExposure(lumaNow, sensorKnobs, tuneCfg))) {
-                const auto settleUntil =
-                    replayAt + std::chrono::milliseconds(tuneCfg.settleMs);
-                FrameImage fresh;
-                unsigned long long freshSeq = 0;
-                unsigned long long lastObserved = seed.seq;
-                while (std::chrono::steady_clock::now() < settleUntil) {
-                    if (interrupted()) {
-                        return result;
-                    }
-                    if (m_callbacks.grabFrame(fresh, freshSeq)) {
-                        lastObserved = std::max(lastObserved, freshSeq);
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(15));
-                }
-                seed = Prefetch{};
-                for (int attempt = 0; attempt < tuneCfg.maxGrabAttempts; ++attempt) {
-                    if (interrupted()) {
-                        return result;
-                    }
-                    if (m_callbacks.grabFrame(fresh, freshSeq) && freshSeq > lastObserved) {
-                        RotateFrame(fresh, m_config.cameraRotation);
-                        auto det = m_detector.DetectLargestFace(fresh);
-                        // A lost face must replace the old detection too, so
-                        // white-out recovery can run instead of using stale luma.
-                        seed = Prefetch{true, std::move(fresh), freshSeq, std::move(det),
-                                        std::chrono::steady_clock::now()};
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-            }
-        }
-        exposureTiming.replaySettleMs = ElapsedMs(replaySettleAt);
-        // Post-mortem diagnostic (2026-09-19 17:45:46): a round that failed
-        // with face luma 18 / identity distance 0.989 left NO tune log at all
-        // because its trigger frame had no face to measure. One line here
-        // states the trigger decision and the knob state so "why was tuning
-        // skipped" is always answerable from the log alone.
-        exposureTiming.phase = ExposureTimingProfile::Trigger;
-        const auto triggerAt = std::chrono::steady_clock::now();
-        {
-            if (!diagnosticReadDone) readDiagnosticKnobs();
-            float triggerLuma = -1.0f;
-            if (seed.valid && seed.det) triggerLuma = FaceBoxLuma(seed.frame, *seed.det);
-            wchar_t knobsText[96] = L"knobs n/a";
-            if (haveDiagnosticExposure || haveDiagnosticGain) {
-                wchar_t expPart[48] = L"exposure n/a";
-                wchar_t gainPart[40] = L"gain n/a";
-                if (haveDiagnosticExposure) {
-                    _snwprintf_s(expPart, _TRUNCATE, L"exposure %ld (%s)", diagnosticExposure,
-                                 haveDiagnosticMode ? (diagnosticManual ? L"manual" : L"auto") : L"mode n/a");
-                }
-                if (haveDiagnosticGain) _snwprintf_s(gainPart, _TRUNCATE, L"gain %ld", diagnosticGain);
-                _snwprintf_s(knobsText, _TRUNCATE, L"%s, %s", expPart, gainPart);
-            }
-            FACELOGIN_INFO(L"Exposure tune trigger: %s, face luma %.0f — %s",
-                           seed.valid ? (seed.det ? L"face" : L"no face")
-                                      : L"no fresh frame",
-                           triggerLuma, knobsText);
-        }
-        exposureTiming.triggerMs = ElapsedMs(triggerAt);
-        exposureTiming.phase = ExposureTimingProfile::Tune;
-        const auto tuneAt = std::chrono::steady_clock::now();
-        bool darkRecoveryAttempted = false;
-        if (seed.valid && seed.det) {
-            const float faceLuma = FaceBoxLuma(seed.frame, *seed.det);
-            if (faceLuma >= 0.0f) {
-                const int tuneSteps = TuneFaceExposure(
-                    faceLuma, sensorKnobs, m_callbacks.grabFrame,
-                    m_detector, interrupted,
-                    m_config.cameraRotation, tuneCfg);
-                if (tuneSteps > 0) seed = Prefetch{};
-            }
-        } else if (seed.valid &&
-                   (IsSceneWhiteout(seed.frame) || IsSceneDark(seed.frame, tuneCfg))) {
-            // Recovery precedes all PAD/identity frames. Never reuse a seed
-            // after this path: controls or the camera stream may have moved.
-            darkRecoveryAttempted = IsSceneDark(seed.frame, tuneCfg);
-            TuneFaceExposure(sensorKnobs, m_callbacks.grabFrame,
-                             m_detector, interrupted,
-                             m_config.cameraRotation, tuneCfg);
-            seed = Prefetch{};
-        }
-        exposureTiming.tuneMs = ElapsedMs(tuneAt);
-        if (interrupted()) return result;
+        PreparedAuthFrames prepared;
+        if (!PrepareFrames(prepared, exposureTiming, sensorKnobs, interrupted, grabFrame))
+            return result;
+        auto& tuneCfg = prepared.tuneConfig;
+        auto& tuneRecovery = prepared.tuneRecovery;
+        auto& darkRecoveryAttempted = prepared.darkRecoveryAttempted;
 
         const auto statusAt = std::chrono::steady_clock::now();
         m_callbacks.reportStatus(L"正在识别...");
         exposureTiming.statusMs = ElapsedMs(statusAt);
-        exposureTiming.gateToLoopMs = ElapsedMs(gateAt);
+        exposureTiming.gateToLoopMs = ElapsedMs(prepared.gateAt);
         exposureTiming.phase = ExposureTimingProfile::Loop;
         // No per-round echo of the PAD threshold/check counts here: the
         // active config (threshold included) is logged once per load by
@@ -451,17 +138,6 @@ AuthPipelineResult AuthPipeline::Run() {
         long boundFaceWidth = 0;
         float boundFaceLuma = -1.0f;
 
-        // Pacing invariant (explicit, auditable, stricter than the legacy
-        // implicit "sleep 60 + processing time"): consecutive COUNTED frames
-        // are grabbed >= 60 ms apart with strictly increasing camera sequence
-        // numbers. Discarded frames (empty embedding / Retry / IoU skip) never
-        // move the anchor, so later grabs automatically satisfy the guard.
-        std::chrono::steady_clock::time_point lastCountedWall{};
-        unsigned long long lastCountedSeq = 0;
-        bool haveLastCounted = false;
-        double minCountedGrabIntervalMs = 0.0;
-        bool haveMinInterval = false;
-
         // Pre-binding exposure correction budget (2026-09-19 17:45:46
         // post-mortem): the pre-loop tune needs a face to measure, so a
         // trigger frame without one (late walk-up, dark-face miss) or
@@ -474,60 +150,16 @@ AuthPipelineResult AuthPipeline::Run() {
         // bound the worst case; a face that stays out of band after them
         // proceeds exactly like the legacy loop.
         int lateTuneBudget = 2;
-        const bool sensorKnobsWired = !usingAutoExposure &&
+        const bool sensorKnobsWired = !prepared.usingAutoExposure &&
             (static_cast<bool>(sensorKnobs.exposureSet) ||
              static_cast<bool>(sensorKnobs.gainSet));
 
-        // Returns false on interruption, window expiry or grab failure.
-        // The caller re-checks interrupted() to preserve timeout/cancel results.
-        // Failed grabs keep the legacy 30 ms
-        // retry pace outside this helper's loop.
-        const auto grabWithPacing = [&](Prefetch& out) {
-            for (;;) {
-                if (interrupted() || m_callbacks.isClientDisconnected()) return false;
-                // A stalled camera can keep returning the last buffered frame.
-                // Keep the outer loop's deadlines active during dedup/pacing.
-                const auto waitNow = std::chrono::steady_clock::now();
-                if (timing.WindowExpired(waitNow)) {
-                    return false;
-                }
-                if (haveLastCounted) {
-                    const auto deadline = lastCountedWall + std::chrono::milliseconds(60);
-                    if (std::chrono::steady_clock::now() < deadline) {
-                        std::this_thread::sleep_until(deadline);
-                        continue;                   // re-check cancel after waking
-                    }
-                }
-                FrameImage frame;
-                unsigned long long seq = 0;
-                if (!grabFrame(frame, seq)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                    return false;
-                }
-                // Defensive dedup: the 60 ms guard guarantees a fresh 30 fps
-                // frame mathematically, but a stale buffered frame would
-                // silently violate the strictly-increasing-sequence invariant.
-                if (haveLastCounted && seq <= lastCountedSeq) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    continue;
-                }
-                // Anchor the guard at the GRAB (acquisition), not after
-                // detection: the invariant is acquisition spacing, and a
-                // post-detect anchor would serialize each frame's SCRFD run
-                // on top of the guard wait (measured 27–50 ms/frame p50–max
-                // on the dev machine). Detection of the next frame must fit
-                // inside the 60 ms window; where it doesn't (slow machines,
-                // ~153 ms on the 1360P) the wait shrinks to zero and
-                // detection itself becomes the pacing floor — never worse.
-                const auto grabWall = std::chrono::steady_clock::now();
-                RotateFrame(frame, m_config.cameraRotation);
-                auto det = m_detector.DetectLargestFace(frame);
-                out = Prefetch{ true, std::move(frame), seq, std::move(det), grabWall };
-                return true;
-            }
-        };
+        AuthFrameStream frames(m_detector, m_config.cameraRotation, grabFrame, [&] {
+            return interrupted() || m_callbacks.isClientDisconnected() ||
+                timing.WindowExpired(std::chrono::steady_clock::now());
+        });
 
-        Prefetch next = std::move(seed);            // warmup SCRFD pre-run seed, if fresh
+        AuthFrame next = std::move(prepared.seed);            // warmup SCRFD pre-run seed, if fresh
         while (totalChecked < totalChecks) {
             if (interrupted()) {
                 return result;
@@ -549,15 +181,15 @@ AuthPipelineResult AuthPipeline::Run() {
             }
 
             if (!next.valid) {
-                if (!grabWithPacing(next)) {
+                if (!frames.Grab(next)) {
                     if (interrupted()) {
                         return result;
                     }
                     continue;                       // grab failure: legacy 30 ms pace already served
                 }
             }
-            Prefetch cur = std::move(next);
-            next = Prefetch{};
+            AuthFrame cur = std::move(next);
+            next = AuthFrame{};
 
             if (!cur.det) {
                 if (totalChecked == 0 && sensorKnobsWired && !darkRecoveryAttempted &&
@@ -726,17 +358,7 @@ AuthPipelineResult AuthPipeline::Run() {
             // not the stale N-1 anchor. Optimistic update is safe because
             // every path from here that skips counting frame N (invalid PAD
             // score, cancel) terminates the loop outright.
-            if (haveLastCounted) {
-                const double intervalMs = std::chrono::duration<double, std::milli>(
-                    cur.grabWall - lastCountedWall).count();
-                if (!haveMinInterval || intervalMs < minCountedGrabIntervalMs) {
-                    minCountedGrabIntervalMs = intervalMs;
-                    haveMinInterval = true;
-                }
-            }
-            lastCountedWall = cur.grabWall;
-            lastCountedSeq = cur.seq;
-            haveLastCounted = true;
+            frames.AdvanceAnchor(cur);
 
             // Overlap window: PAD(N) is running while the main thread
             // produces frame N+1's capture+detection. The +1 accounts for
@@ -744,8 +366,8 @@ AuthPipelineResult AuthPipeline::Run() {
             // it would be the last frame. A wasted prefetch (this frame later
             // fails on an invalid PAD score) costs CPU only, never latency.
             if (totalChecked + 1 < totalChecks) {
-                Prefetch candidate;
-                if (grabWithPacing(candidate)) {
+                AuthFrame candidate;
+                if (frames.Grab(candidate)) {
                     next = std::move(candidate);
                 } else if (interrupted()) {
                     // Cancellation or timeout must abort before frame N is counted.
@@ -774,9 +396,9 @@ AuthPipelineResult AuthPipeline::Run() {
                             totalChecked, score, timing.PassCount());
         }
 
-        if (haveMinInterval) {
+        if (const auto minInterval = frames.MinimumIntervalMs()) {
             FACELOGIN_INFO(L"Anti-spoof frame pacing: min grab interval %.1f ms over %d counted frames (guard 60 ms)",
-                           minCountedGrabIntervalMs, totalChecked);
+                           *minInterval, totalChecked);
         }
 
         const bool livenessPassed = !failFastEmpty && !failFastAttack &&
