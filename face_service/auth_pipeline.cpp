@@ -20,6 +20,11 @@ using auth_diagnostics::ExposureTimingProfile;
 using auth_diagnostics::NormLog;
 using auth_diagnostics::ProfileSensorKnobs;
 
+// Pacing between discarded auth frames (no face, bad grab, retry). This is
+// the legacy 30 ms grab-loop pace and counts against the shared 5 s auth
+// budget; changing it invalidates the measured unlock baselines.
+static constexpr auto kDiscardRetryPace = std::chrono::milliseconds(30);
+
 // Mean luma over the face bbox — the capture condition that dominates
 // identity-match distance (dark chips shift embeddings; the exposure
 // governor, face_gain_tune.h, owns keeping this in band). Diagnostic
@@ -202,7 +207,7 @@ AuthPipelineResult AuthPipeline::Run() {
                     if (interrupted()) return result;
                     continue; // discard all pre-write/no-face evidence
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                std::this_thread::sleep_for(kDiscardRetryPace);
                 continue;
             }
 
@@ -294,7 +299,7 @@ AuthPipelineResult AuthPipeline::Run() {
                                                                &preNorm);
                 if (embedding.empty()) {
                     scoreFuture.get();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    std::this_thread::sleep_for(kDiscardRetryPace);
                     continue;
                 }
                 normLog.add(preNorm, cur.seq);
@@ -320,7 +325,7 @@ AuthPipelineResult AuthPipeline::Run() {
                         identityRetryTimedOut = true;
                         break;
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    std::this_thread::sleep_for(kDiscardRetryPace);
                     continue;
                 }
                 if (decision.kind == BindingDecisionKind::Reject) {
@@ -348,7 +353,7 @@ AuthPipelineResult AuthPipeline::Run() {
                 if (uni > 0.0 && inter / uni < 0.35) {
                     scoreFuture.get();
                     FACELOGIN_WARN(L"Face position discontinuity during anti-spoof — frame skipped");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    std::this_thread::sleep_for(kDiscardRetryPace);
                     continue;
                 }
             }

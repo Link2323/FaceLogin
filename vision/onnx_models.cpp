@@ -639,14 +639,20 @@ float MiniFasEvaluator::Predict(const FrameImage& image,
 
 OnnxAntiSpoof::~OnnxAntiSpoof() = default;
 
+// Box-expansion multipliers from the MiniFAS reference implementation: the
+// SCRFD face box is scaled by this factor before the crop is resized to the
+// PAD model input. Per-model values, not tunables.
+static constexpr float kMiniFasV2CropScale = 2.7f;
+static constexpr float kMiniFasV1SeCropScale = 4.0f;
+
 bool OnnxAntiSpoof::Initialize(const std::wstring& miniFasV2Path,
                                const std::wstring& miniFasV1SePath) {
     m_initialized = false;
     m_miniFasV2 = std::make_unique<MiniFasEvaluator>();
     m_miniFasV1Se = std::make_unique<MiniFasEvaluator>();
 
-    const bool v2Ready = m_miniFasV2->Initialize(miniFasV2Path, 2.7f);
-    const bool v1SeReady = m_miniFasV1Se->Initialize(miniFasV1SePath, 4.0f);
+    const bool v2Ready = m_miniFasV2->Initialize(miniFasV2Path, kMiniFasV2CropScale);
+    const bool v1SeReady = m_miniFasV1Se->Initialize(miniFasV1SePath, kMiniFasV1SeCropScale);
     if (!v2Ready || !v1SeReady) {
         FACELOGIN_ERROR(L"Dual MiniFAS PAD initialization failed (V2=%s, V1SE=%s)",
                         v2Ready ? L"ready" : L"failed",

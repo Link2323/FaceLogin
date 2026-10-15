@@ -181,9 +181,10 @@ bool EnrollmentAccounts::SaveTemplates(const std::vector<EnrollmentTemplate>& te
 }
 
 std::string EnrollmentAccounts::BuildAngleHint() const {
-    // Cross-angle pair-spacing observation (soft hint, docs/
-    // progressive-learning-v2.md red line 3): the learned minimum cross-angle
-    // same-person pair distance is 0.681. Angles recorded closer than 0.68
+    // Cross-angle pair-spacing observation (soft hint,
+    // docs/work/in-progress/progressive-learning-v2.md red line 3): the
+    // learned minimum cross-angle same-person pair distance is 0.681.
+    // Angles recorded closer than 0.68
     // mean the user under-turned — the slots overlap, coverage shrinks, and
     // the landing-clarity gate will reject many learning frames. Hint, never
     // block: the enrollment itself is valid.

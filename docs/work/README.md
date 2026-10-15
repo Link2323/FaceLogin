@@ -8,6 +8,7 @@
 - [`in-progress/unlock-performance.md`](in-progress/unlock-performance.md)：手动曝光稳定帧复用、首帧计时与解锁性能验证。
 - [`in-progress/exposure-issues-and-speedups.md`](in-progress/exposure-issues-and-speedups.md)：曝光环境切换、重复调节与缓存重放的待验证机制、提速优先级及验收条件。
 - [`in-progress/todo.md`](in-progress/todo.md)：跨模块工程待办。
+- [`in-progress/code-quality-todo.md`](in-progress/code-quality-todo.md)：2026-10-15 全库质量评估结论与 12 项改善建议及完成情况。
 - [`in-progress/unlock-flow-security-todo.md`](in-progress/unlock-flow-security-todo.md)：解锁流程安全与稳定性问题。
 - [`in-progress/progressive-learning-v2.md`](in-progress/progressive-learning-v2.md)：R50 阶段方案已定稿；等待 SFace 独立验证后再决定是否重新启用。
 

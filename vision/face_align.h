@@ -183,8 +183,8 @@ inline float EstimateYawDeg(const float kps[10]) {
 // eye line → r > r0 → pitch > 0. k = 1.86 matches yaw: the same
 // protrusion/interocular geometry drives both small-angle sensitivities.
 // kAngleTargets write nominalPitch = 0, so only the CONSISTENCY of this
-// estimator with itself matters for the ±25° learning cone (docs/
-// progressive-learning-v2.md §3), not absolute accuracy.
+// estimator with itself matters for the ±25° learning cone
+// (docs/work/in-progress/progressive-learning-v2.md §3), not absolute accuracy.
 inline float EstimatePitchDeg(const float kps[10]) {
     const float ley = kps[1];              // left eye y
     const float rey = kps[3];              // right eye y

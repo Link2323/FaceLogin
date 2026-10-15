@@ -15,7 +15,7 @@ struct AppConfig {
     int            camera_rotation        = 0;
     // SFace trial forces learning off until model-specific gates are validated.
     // Dormant R50 learning parameters below are retained only for future research.
-    // Template learning (docs/progressive-learning-v2.md). Two independent
+    // Template learning (docs/work/in-progress/progressive-learning-v2.md). Two independent
     // channels: ema_learning = success-path EMA fine-tune of the matched
     // template after each successful auth; failure_learning = the deferred
     // password-labeled channel (§5 — switch exists, mechanism lands later).
@@ -31,7 +31,7 @@ struct AppConfig {
     // Update distance gate: only frames matching THIS close may move a
     // template. The stored value is the CAP — the effective gate is
     // min(user's current-era same-person distance p20, cap), tracked by the
-    // service per account (docs/progressive-learning-v2.md red line 1).
+    // service per account (docs/work/in-progress/progressive-learning-v2.md red line 1).
     // Cap rationale (2026-09-04 final form, widened 2026-09-05 for the
     // console slider): 0.65 default keeps a margin below the 0.681 minimum
     // measured cross-angle distance while covering the YY environment-drift

@@ -381,7 +381,7 @@ function loadSettings() {
 
 function onSaveSettings() {
   // Single UI switch drives both learning channels so "off" means templates
-  // are strictly read-only (docs/progressive-learning-v2.md red line 5).
+  // are strictly read-only (docs/work/in-progress/progressive-learning-v2.md red line 5).
   var learning = document.getElementById('cfg-learning').checked;
   // Round-trip the FULL config: UI-managed keys overridden, every other key
   // preserved from the last load (see loadSettings note on partial saves).

@@ -1,7 +1,8 @@
 // Development-only test for TemplateLearner's pose-based update-target
-// selection, gate chain and per-slot learning state (docs/
-// progressive-learning-v2.md §3, 2026-09-05 revision). Runs the real learner
-// thread (kStartDelayMs applies), so each case takes ~2s; total ~55s.
+// selection, gate chain and per-slot learning state
+// (docs/work/in-progress/progressive-learning-v2.md §3, 2026-09-05 revision).
+// Runs the real learner thread (kStartDelayMs applies), so each case takes
+// ~2s; total ~55s.
 
 #include "template_learner.h"
 

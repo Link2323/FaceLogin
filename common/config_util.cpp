@@ -170,7 +170,7 @@ AppConfig ConfigFromJson(const std::string& json) {
     }
     cfg.camera_rotation = rotation;
 
-    // ---- Template learning gates (docs/progressive-learning-v2.md §1/§3).
+    // ---- Template learning gates (docs/work/in-progress/progressive-learning-v2.md §1/§3).
     // Missing keys adopt the calibrated defaults; hand-edited values outside
     // the safe band snap back — the distance gate in particular must stay
     // far below match_threshold or an impostor could poison templates.

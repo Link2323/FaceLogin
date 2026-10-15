@@ -875,6 +875,9 @@ inline bool ConfirmPendingFaceTune(const SensorKnobs& knobs,
 // Conservative white-out evidence: widespread clipping, including every
 // central tile. A bright window around a dark central face must not trigger
 // full-frame metering. This is a recovery heuristic, not an identity signal.
+inline constexpr double kWhiteoutClipLuma = 245.0;    // sample counts as clipped at/above
+inline constexpr int kWhiteoutTileClipPercent = 70;   // tile saturated when >= this % of samples clip
+inline constexpr int kWhiteoutMinTiles = 20;          // of the 5x5 = 25 tiles
 inline bool IsSceneWhiteout(const FrameImage& frame) {
     if (frame.nr() < 5 || frame.nc() < 5) return false;
     int clippedTiles = 0;
@@ -885,15 +888,15 @@ inline bool IsSceneWhiteout(const FrameImage& frame) {
                 for (long x = tx * frame.nc() / 5; x < (tx + 1) * frame.nc() / 5; x += 4) {
                     const auto& p = frame(y, x);
                     ++count;
-                    if (0.299 * p.red + 0.587 * p.green + 0.114 * p.blue >= 245.0) ++clipped;
+                    if (0.299 * p.red + 0.587 * p.green + 0.114 * p.blue >= kWhiteoutClipLuma) ++clipped;
                 }
             }
-            const bool saturated = count > 0 && clipped * 10 >= count * 7;
+            const bool saturated = count > 0 && clipped * 100 >= count * kWhiteoutTileClipPercent;
             if (tx >= 1 && tx <= 3 && ty >= 1 && ty <= 3 && !saturated) return false;
             if (saturated) ++clippedTiles;
         }
     }
-    return clippedTiles >= 20;
+    return clippedTiles >= kWhiteoutMinTiles;
 }
 
 struct WhiteoutSample {

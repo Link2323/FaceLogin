@@ -8,9 +8,9 @@ namespace facelogin {
 // default (secure) policy mirrors that exactly: five valid frames, and
 // every frame must pass. Fast unlock (config fast_unlock=true) counts
 // three frames with every frame binding identity — a user-facing
-// speed/security trade-off, NOT a calibration result (docs/
-// threshold-calibration.md is five-frame; the 3-frame mode was not
-// recalibrated and keeps the same per-frame 0.281 threshold).
+// speed/security trade-off, NOT a calibration result
+// (docs/work/completed/threshold-calibration.md is five-frame; the 3-frame
+// mode was not recalibrated and keeps the same per-frame 0.281 threshold).
 inline int AntiSpoofCheckCount(bool fastUnlock) {
     return fastUnlock ? 3 : 5;
 }

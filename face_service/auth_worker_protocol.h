@@ -18,7 +18,7 @@ inline constexpr uint32_t kProtocolMagic = 0x4B574C46; // "FLWK"
 // low-light stretch deleted 2026-09-13 — the sensor-level exposure
 // governor owns dark scenes now; face-service.md). v5: MatchProbe gained
 // two trailing floats — the frame's yaw/pitch pose estimates (progressive-
-// learning pose-cone gate, docs/progressive-learning-v2.md §3). v4
+// learning pose-cone gate, docs/work/in-progress/progressive-learning-v2.md §3). v4
 // appended the pre-normalization recognizer norm.
 inline constexpr uint16_t kProtocolVersion = 8;
 inline constexpr uint32_t kMaxPayloadBytes = 16 * 1024;

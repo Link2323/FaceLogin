@@ -10,6 +10,13 @@ namespace facelogin {
 static constexpr uint32_t FILE_MAGIC = 0x474F4C46; // "FLOG" in little-endian
 static constexpr uint32_t FILE_VERSION = kCredentialDatabaseVersion;
 
+// FindBestIdentity distance sentinels: candidates start at kInitDistance;
+// a distance at or above kNoFaceDistance means "no comparable face".
+// kAmbiguousRatioLimit is the best/second-best rejection gate.
+static constexpr float kInitDistance = 1e10f;
+static constexpr float kNoFaceDistance = 1e9f;
+static constexpr float kAmbiguousRatioLimit = 0.75f;
+
 // Helpers for V6 serialization
 namespace {
 
@@ -548,7 +555,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     // representative distance; accounts are then compared against each other.
     // This keeps two faces of the SAME account from competing and inflating
     // the best/second-best ratio.
-    float bestDist = 1e10f, secondBestDist = 1e10f;
+    float bestDist = kInitDistance, secondBestDist = kInitDistance;
     size_t bestIdx = m_users.size();
     uint32_t bestFaceId = 0;
     std::wstring bestFaceLabel;
@@ -558,7 +565,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
 
     for (size_t i = 0; i < m_users.size(); i++) {
         const auto& faces = m_users[i].faces;
-        float accountBest = 1e10f, accountSecond = 1e10f;
+        float accountBest = kInitDistance, accountSecond = kInitDistance;
         uint32_t accountBestFaceId = 0;
         const std::wstring* accountBestLabel = nullptr;
 
@@ -584,7 +591,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
             }
         }
 
-        if (accountBest >= 1e9f) continue;  // no face with a comparable dimension
+        if (accountBest >= kNoFaceDistance) continue;  // no face with a comparable dimension
         comparableAccounts++;
 
         if (accountBest < bestDist) {
@@ -594,7 +601,7 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
             bestFaceId = accountBestFaceId;
             bestFaceLabel = accountBestLabel ? *accountBestLabel : L"";
             bestSecondFaceDist =
-                (accountSecond < 1e9f) ? accountSecond : -1.0f;
+                (accountSecond < kNoFaceDistance) ? accountSecond : -1.0f;
         } else if (accountBest < secondBestDist) {
             secondBestDist = accountBest;
         }
@@ -625,9 +632,9 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
     // (or between the real user and a noisy impostor).
     // Skip this check when only one account is comparable — there is no
     // second-best to compare against.
-    if (comparableAccounts > 1 && secondBestDist < 1e9f) {
+    if (comparableAccounts > 1 && secondBestDist < kNoFaceDistance) {
         float ratio = bestDist / secondBestDist;
-        if (ratio >= 0.75f) {
+        if (ratio >= kAmbiguousRatioLimit) {
             FACELOGIN_INFO(L"Match rejected: best/second-best ratio too high (%.3f/%.3f=%.3f)",
                           bestDist, secondBestDist, ratio);
             return std::nullopt;
@@ -699,7 +706,7 @@ bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceI
     }
 
     // Swap the candidate in unconditionally, then observe the account's
-    // minimum template-pair distance (docs/progressive-learning-v2.md red
+    // minimum template-pair distance (docs/work/in-progress/progressive-learning-v2.md red
     // line 3, 2026-09-04: observation only — a rejecting sentinel's false
     // positives wedge the whole learning channel on legacy near-pair
     // accounts, and intra-account convergence only shrinks the acceptance

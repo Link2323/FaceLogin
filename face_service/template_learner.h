@@ -30,7 +30,7 @@ struct LearningSample {
     float distance = 0.0f;
     float norm = 0.0f;              // pre-normalization recognizer norm
     // Pose of the probe frame (weak-perspective kps estimate, ±90° physical
-    // range; docs/progressive-learning-v2.md §3 pose-cone gate). The sentinel
+    // range; docs/work/in-progress/progressive-learning-v2.md §3 pose-cone gate). The sentinel
     // matches credential_store.h kNominalAngleInvalid.
     float probeYawDeg = 1000.0f;
     float probePitchDeg = 1000.0f;
@@ -101,7 +101,7 @@ struct LearningFaceStatus {
     int eraRounds = 0;
 };
 
-// Post-auth template EMA fine-tuning (docs/progressive-learning-v2.md §3).
+// Post-auth template EMA fine-tuning (docs/work/in-progress/progressive-learning-v2.md §3).
 //
 // The pipe thread enqueues the round's best sample right after AUTH_SUCCESS
 // delivery; this class owns everything after that, OFF the unlock critical

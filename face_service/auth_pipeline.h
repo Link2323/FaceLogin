@@ -55,8 +55,8 @@ struct AuthPipelineCallbacks {
     // signal; the embedding itself arrives unit-length so the raw norm is
     // unrecoverable downstream). yawDeg/pitchDeg are the weak-perspective
     // pose estimates from the same frame's keypoints (face_align.h) — the
-    // progressive-learning pose-cone gate consumes them (docs/
-    // progressive-learning-v2.md §3).
+    // progressive-learning pose-cone gate consumes them
+    // (docs/work/in-progress/progressive-learning-v2.md §3).
     std::function<BindingDecision(const std::vector<float>&,
                                   unsigned int bindingIndex,
                                   float preNorm,

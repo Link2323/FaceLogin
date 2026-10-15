@@ -78,11 +78,11 @@ private:
     std::string m_inputName;
     std::vector<std::string> m_outputNames;
 
-    // Preprocess: direct resize to 640×640 (no letterbox), BGR planar,
+    // Preprocess: direct resize to 512×512 (no letterbox), BGR planar,
     // normalized to [-1, 1] with (pixel-127.5)/128. Matches the model's
     // native input; insightface SCRFD is exported this way.
-    // Because the resize DISTORTS non-square frames (e.g. 1280×720 → 640×640),
-    // the x and y scales are DIFFERENT. scaleX/scaleY map 640-space back to
+    // Because the resize DISTORTS non-square frames (e.g. 1280×720 → 512×512),
+    // the x and y scales are DIFFERENT. scaleX/scaleY map 512-space back to
     // source pixels: srcX = detX * scaleX, srcY = detY * scaleY.
     std::vector<float> Preprocess(const FrameImage& image,
                                    float& outScaleX, float& outScaleY);

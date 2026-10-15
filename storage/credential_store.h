@@ -71,7 +71,7 @@ inline constexpr float kNominalAngleInvalid = 1000.0f;
 // nominalYaw/nominalPitch (V5): the enrollment POSE TARGET of this slot
 // (kAngleTargets: 正面 0/0, 左转 +30/0, 右转 -30/0), not a measured average —
 // a fixed target keeps the ±25° learning cones of the three slots disjoint
-// even when the user under-turned (docs/progressive-learning-v2.md §3).
+// even when the user under-turned (docs/work/in-progress/progressive-learning-v2.md §3).
 // In-memory faces added without angles carry kNominalAngleInvalid; the learner's cone gate treats that as "no cone
 // information" (pass) until re-enrollment.
 struct FaceRecord {

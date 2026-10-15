@@ -387,7 +387,7 @@ bool FaceService::Initialize() {
     FACELOGIN_INFO(L"Loaded %zu registered user(s)", m_store->GetUserCount());
     LogTemplateNorms(*m_store, L"load");
 
-    // Progressive template learning (docs/progressive-learning-v2.md §3).
+    // Progressive template learning (docs/work/in-progress/progressive-learning-v2.md §3).
     // The learner thread owns all post-auth EMA work; the hooks below
     // serialize CredentialStore access under m_storeLock (single writer).
     InitializeCriticalSection(&m_storeLock);
@@ -495,25 +495,25 @@ void FaceService::Run() {
 
         FACELOGIN_INFO(L"Received request: %s", request.c_str());
 
-            if (request == ipc::MSG_RELOAD_DB) {
-                // Honor LoadDatabase()'s return value: a corrupt users.dat (bad
-                // magic, length fields out of range, truncated read) returns false
-                // and clears the in-memory user list. Reporting success here would
-                // leave the service with an empty database while logging "reloaded",
-                // causing every subsequent auth to fail as "no registered users"
-                // until the service is restarted. Surface the failure instead.
-                bool reloaded = false;
-                {
-                    EnterCriticalSection(&m_storeLock);
-                    reloaded = m_store->LoadDatabase();
-                    LeaveCriticalSection(&m_storeLock);
-                }
-                // Enrollment changed the templates: every era window describes
-                // a gone era — reset (adaptive-gate era boundary,
-                // docs/progressive-learning-v2.md red line 1). Pacing and α
-                // decay survive; only the windows clear.
-                if (m_learner) m_learner->ResetEraWindows();
-                if (reloaded) {
+        if (request == ipc::MSG_RELOAD_DB) {
+            // Honor LoadDatabase()'s return value: a corrupt users.dat (bad
+            // magic, length fields out of range, truncated read) returns false
+            // and clears the in-memory user list. Reporting success here would
+            // leave the service with an empty database while logging "reloaded",
+            // causing every subsequent auth to fail as "no registered users"
+            // until the service is restarted. Surface the failure instead.
+            bool reloaded = false;
+            {
+                EnterCriticalSection(&m_storeLock);
+                reloaded = m_store->LoadDatabase();
+                LeaveCriticalSection(&m_storeLock);
+            }
+            // Enrollment changed the templates: every era window describes
+            // a gone era — reset (adaptive-gate era boundary,
+            // docs/work/in-progress/progressive-learning-v2.md red line 1). Pacing and α
+            // decay survive; only the windows clear.
+            if (m_learner) m_learner->ResetEraWindows();
+            if (reloaded) {
                 SendControlResponse(ipc::MSG_RELOAD_OK);
                 m_pipeServer->Disconnect();
                 FACELOGIN_INFO(L"Database reloaded");
