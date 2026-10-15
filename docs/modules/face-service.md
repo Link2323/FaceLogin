@@ -8,7 +8,7 @@
 
 服务父进程负责 DataPath、配置、`users.dat`、公开命名管道和身份匹配。锁屏期间异步预载一个 `-auth-worker`，worker 持有 ONNX 模型并在认证请求后打开摄像头，完成一次请求即退出。父进程不持有 ONNX Session，也不会在认证前打开摄像头。
 
-`authentication_residency.*` 的 `AuthenticationResidency` 管理生命周期线程、驻留引用、加载失败、认证使用计数与配置版本。会话事件只调用 `RequestLoad/RequestUnload`；认证通过 `Acquire` 使用原始截止时间获取带作用域的使用凭证，凭证在准备与认证期间阻止解锁回收。实际模型和 worker 创建由宿主的加载入口提供，加载及资源释放不持有状态锁。服务主线程退出或初始化失败时先停止驻留模块，再销毁加载入口依赖。
+`authentication_residency.*` 的 `AuthenticationResidency` 管理生命周期线程、驻留引用、加载失败、认证使用计数与配置版本。会话事件只调用 `RequestLoad/RequestUnload`；认证通过 `Acquire` 使用原始截止时间获取带作用域的使用凭证，凭证在准备与认证期间阻止解锁回收。实际 worker 创建由宿主的加载入口提供，加载及资源释放不持有状态锁。服务主线程退出或初始化失败时先停止驻留模块，再销毁加载入口依赖。
 
 `ReloadConfig` 统一处理锁屏 worker 替换与版本确认；已排队的重试或替换不能被上一轮的 `Ready/Failed` 提前结束。未锁屏且有意卸载时，配置重载不唤醒模型。worker 的最终回收仍由父服务在公共认证结果确定后执行：失败按锁屏状态补建，成功先交付凭据并等待 ACK，再回收，后续认证请求负责重新加载。
 
@@ -35,11 +35,13 @@ AUTH_REQUEST → worker 打开相机并认证 → 父进程匹配 SID、构造�
 
 认证成功、失败、超时或通信异常后，worker 都会退出；服务在锁屏期间按需补建。模型不完整或加载失败时拒绝认证。父进程通过私有管道接收最多三条 SFace embedding，密码解密及 `AUTH_SUCCESS` 构造留在父进程。worker 生命周期和消息字段见私有 IPC 契约。
 
-生产服务路径必须解析到 EXE 所在安装目录，不可信重定向会被拒绝。standalone 的开发路径规则见 [`DEVELOPMENT.md` 路径表](../../DEVELOPMENT.md#sec-paths)。
+生产服务路径必须解析到 EXE 所在安装目录，不可信重定向会被拒绝。EXE 位于开发目录时的路径规则见 [`DEVELOPMENT.md` 路径表](../../DEVELOPMENT.md#sec-paths)。
 
 ## 认证流水线
 
-`AuthPipeline` 是 worker 与 standalone 共用的认证实现。主要约束如下：
+`AuthPipelineResult` 与父端的 `AuthWorkerResult` 使用同一个内部 `AuthOutcome` 终态：失败、成功、取消、超时；默认失败，单次结果只能表示一个终态。worker 和父服务分别映射到已有 IPC 消息或取消处理，枚举不写入管道，线格式保持现有契约。
+
+`AuthPipeline` 是 worker 的认证实现，也由确定性推理替身测试直接执行。主要约束如下：
 
 1. 没有已注册账户时直接失败；双 MiniFAS 活体检测始终启用，任何模型错误都按失败处理。
 2. 摄像头启动后先做曝光预热。人脸亮度出带时，按设备能力调节曝光和增益；有增益时优先用增益细调，无增益时优先保持或恢复驱动自动曝光。指定 `DevicePath` 时必须使用该设备，找不到即失败，不得回退到其他相机。
@@ -77,7 +79,7 @@ SFace 正式运行导出已移除 174 个 initializer graph inputs，保留权�
 | `face_recognition_sface_2021dec.onnx` | 112×112，128 维 embedding | SFace 身份识别 |
 | `MiniFASNetV2.onnx`、`MiniFASNetV1SE.onnx` | 2.7× / 4.0× 人脸裁剪 | 双模型融合 PAD |
 
-worker 和 standalone 在创建 Session 前校验四个模型的 SHA-256；C++ 哈希见 `common/model_hashes.h`，安装器提取时也会校验。普通构建复用现有模型，不要重新下载或量化。
+worker 在创建 Session 前校验四个模型的 SHA-256；C++ 哈希见 `common/model_hashes.h`，安装器提取时也会校验。普通构建复用现有模型，不要重新下载或量化。
 
 worker 的模型状态为 `Unloaded → Loading → Ready/Failed`。加载、释放由生命周期线程串行处理；配置重载会替换锁屏 worker，并在新 worker 就绪后确认。服务与 worker 分别写 `service.log`、`auth_worker.log`；排障步骤见 [`运维手册`](../operations/operations.md)。
 

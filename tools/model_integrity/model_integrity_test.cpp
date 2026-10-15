@@ -42,7 +42,7 @@ private:
 
 // Lock-screen copy for a failed model bundle must be category-specific
 // (detector/recognizer/PAD integrity vs a plain load error), actionable,
-// and identical for the worker and standalone paths (single mapping source).
+// and use the worker's shared failure-message mapping.
 void TestModelFailureMessages() {
     using facelogin::ModelLoadFailure;
     const std::wstring detector =

@@ -62,11 +62,11 @@ AuthPipelineResult AuthPipeline::Run() {
         localDeadline < m_config.authDeadline ? localDeadline : m_config.authDeadline;
     const auto interrupted = [&]() {
         if (m_callbacks.isCancelled()) {
-            result.cancelled = true;
+            result.outcome = AuthOutcome::Cancelled;
             return true;
         }
         if (ipc::RemainingAuthTimeMs(authDeadline) == 0) {
-            result.timedOut = true;
+            result.outcome = AuthOutcome::TimedOut;
             return true;
         }
         return false;
@@ -121,7 +121,7 @@ AuthPipelineResult AuthPipeline::Run() {
         bool identityRetryTimedOut = false;
         bool failFastEmpty = false;
         bool failFastAttack = false;
-        // Both verifyBinding hosts return Retry only for "no enrolled identity
+        // The parent verification callback returns Retry only for "no enrolled identity
         // matches this face". A face that keeps missing every enrolled identity
         // never leaves the anchor frame, so no frame is ever counted and the
         // persistent-attack timer fires without a single PAD verdict — that
@@ -166,7 +166,7 @@ AuthPipelineResult AuthPipeline::Run() {
             }
             if (m_callbacks.isClientDisconnected()) {
                 FACELOGIN_INFO(L"Client disconnected during anti-spoof — aborting");
-                result.cancelled = true;
+                result.outcome = AuthOutcome::Cancelled;
                 return result;
             }
 
@@ -408,7 +408,7 @@ AuthPipelineResult AuthPipeline::Run() {
             FACELOGIN_INFO(L"Liveness passed — tail anchor bound, authentication evidence "
                            L"complete (width=%ld px, face luma=%.0f)",
                            boundFaceWidth, boundFaceLuma);
-            result.succeeded = true;
+            result.outcome = AuthOutcome::Succeeded;
             return result;
         }
 

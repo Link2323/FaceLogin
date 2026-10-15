@@ -91,7 +91,7 @@ validation must use new sessions (ideally another day and additional people)
 with `--split validation`; frames from a tuning session are correlated and are
 not a valid holdout set.
 
-The tool uses the same DirectShow capture path as enrollment, standalone, and
+The tool uses the same DirectShow capture path as enrollment and
 the lock-screen service, so its captures are directly representative.
 
 The CSV contains biometric-derived scores and metadata. Keep it local, restrict

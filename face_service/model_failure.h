@@ -1,8 +1,7 @@
 #pragma once
 // model_failure.h — category-level reasons and lock-screen copy for a failed
-// authentication model bundle load. Shared by the standalone in-process
-// loader and the one-shot auth worker so both surfaces produce the same
-// fail-closed message. Category-level only: the copy must tell the user what
+// authentication model bundle load in the one-shot auth worker.
+// Category-level only: the copy must tell the user what
 // to do without leaking file names or hash detail.
 
 namespace facelogin {
@@ -16,7 +15,7 @@ enum class ModelLoadFailure {
 };
 
 // The worker sends this text as its Fatal payload and the parent relays it
-// verbatim over the public pipe; standalone picks the same copy directly.
+// verbatim over the public pipe.
 // `None` is not a real outcome — callers that lost the reason fall back to
 // the generic load message, never to success.
 inline const wchar_t* ModelLoadFailureMessage(ModelLoadFailure failure) {

@@ -40,8 +40,10 @@ cmake --build build --config Release --parallel
 cmake --build build --config Release --target check --parallel 1
 ```
 
-`check` 先构建再通过 CTest 运行 10 个自动化测试，失败返回非零。只重跑已构建测试可用 `ctest --test-dir build -C Release --output-on-failure -L automated`。相机探针、标定、GUI 与锁屏实测不纳入此目标；普通产品构建和安装器打包不会运行测试。
+`check` 先构建再通过 CTest 运行 11 个自动化测试，失败返回非零。只重跑已构建测试可用 `ctest --test-dir build -C Release --output-on-failure -L automated`。相机探针、标定、GUI 与锁屏实测不纳入此目标；普通产品构建和安装器打包不会运行测试。
 
+
+`AuthenticationResidencyTest` 直接运行生产驻留状态机，以确定性 worker 替身覆盖预载中解锁、使用期间解锁、重载版本确认及失败、重载中解锁、加载失败重试、截止时间、worker 提前退出、终态补建策略和停止期间引用释放。测试不创建真实子进程或打开相机，不能替代进程/Job 故障注入及 Session 0 验收。
 
 服务和注册程序通过静态库复用共享实现：`vision/` 提供 `facelogin_camera`（DirectShow）与 `facelogin_inference`（ONNX Runtime），`storage/` 提供 `facelogin_credential_store`。曝光状态文件读写由独立的 `facelogin_tune_state` 静态库提供，不依赖相机或推理。消费方链接目标即可获得头文件和传递依赖，不再把这些 `.cpp` 加入各自源码清单。相机诊断程序只链接相机库；`AuthPipelineTest` 保留确定性推理替身，不链接真实推理实现。Credential Provider 仅引用存储头文件中的定义，继续使用自己的静态 CRT 构建。
 
@@ -87,7 +89,7 @@ SFace 自 2026-10-04 起使用清理 initializer graph inputs 的规范化 FP32 
 
 开发验证与打包分开：安装器 Go 代码变更后在 `installer/FaceLoginSetup/` 单独运行 `go test ./...`，C++ 测试按目标显式构建和运行。
 
-注册页面源文件为 `enrollment_app/index.html.in`、`styles.css` 和 `app.js`；CMake 合成为 `build/enrollment_app/index.html`，由生成的 `resource.rc` 嵌入 EXE，不增加运行期资源文件。修改任一源文件后须重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
+注册页面源文件为 `enrollment_app/index.html.in`、`styles.css`、`capture_flow.js` 和 `app.js`；CMake 合成为 `build/enrollment_app/index.html`，由生成的 `resource.rc` 嵌入 EXE，不增加运行期资源文件。修改任一源文件后须重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
 
 ### 资源白名单
 
@@ -111,6 +113,8 @@ SFace 自 2026-10-04 起使用清理 initializer graph inputs 的规范化 FP32 
 
 ## 前端开发
 
+注册页面采集流程的无硬件回归：`node tools/enrollment_ui/capture_flow_test.cjs`。该测试覆盖角度间取消、立即重试和旧回调隔离；实际 WebView2、摄像头与保存流程仍需 GUI 验收。
+
 ```powershell
 cd installer/FaceLoginSetup/frontend
 npm run dev
@@ -121,13 +125,9 @@ npm run build
 
 ## 运行与数据目录
 
-生产安装默认将 `DataPath` 设为安装目录；开发运行可用仓库脚本启动 standalone：
+生产安装默认将 `DataPath` 设为安装目录。完整认证通过安装后的 Windows 服务与 worker 验证；前台 standalone 入口已移除。服务启动、停止及排障见 [运维手册](operations/operations.md)。worker 只在认证请求后打开相机。
 
-```powershell
-.\scripts\start_standalone.bat
-```
-
-也可直接运行 `build/face_service/Release/FaceLoginService.exe -standalone`。standalone 日志与配置路径等数据目录规则见 [代码导航](../DEVELOPMENT.md#sec-paths)；运维排障见 [运维手册](operations/operations.md)。worker 只在认证请求后打开相机。
+开发时先运行无硬件回归与独立相机诊断工具；完整登录/解锁验收需部署到测试机，由 SCM 启动服务。路径规则见 [代码导航](../DEVELOPMENT.md#sec-paths)。
 
 ## 版本号与版本资源
 

@@ -6,11 +6,8 @@
 #include <atomic>
 
 #include "../vision/liveness_types.h"
-#include "model_failure.h"
-#include "../vision/onnx_models.h"
 #include "authentication_residency.h"
 #include "template_learner.h"
-#include "../vision/webcam_capture_dshow.h"
 #include "pipe_server.h"
 #include "../storage/credential_store.h"
 #include "../common/config_util.h"
@@ -41,9 +38,6 @@ public:
     static DWORD WINAPI HandlerEx(DWORD control, DWORD eventType,
                                    LPVOID eventData, LPVOID context);
 
-    // Run standalone (foreground, for testing) — no SCM registration
-    static void RunStandalone();
-
     // Install/uninstall the service
     static bool Install(const std::wstring& exePath);
     static bool Uninstall();
@@ -54,13 +48,9 @@ private:
     void RequestStop();  // Non-blocking SCM control-handler path
     bool Initialize();   // Load DB/config and start the model lifecycle worker
     bool ProcessAuthRequest();  // Handle one auth session
-    bool ProcessWorkerAuthRequest(); // Service-mode auth via child process
 
-    // Shared identity-binding rule for both auth hosts (in-process pipeline
-    // and worker child): the first anchor locks the matched SID, later
-    // binding frames must return the same SID or the round is rejected as a
-    // face swap. Single source — the security rule must not exist as two
-    // copies that can drift.
+    // The parent binds the first worker embedding to a SID; later binding
+    // frames must match that SID or the round is rejected as a face swap.
     // identityMissDistance (optional) collects the closest identity distance
     // seen on Retry verdicts within one auth round, for the failure log —
     // distinguishing "just above threshold" from "way off" post-mortem.
@@ -82,7 +72,7 @@ private:
 
     // Record the round's distance in the user's rolling window, compute the
     // era p20 for the adaptive update gate, and hand the sample to the
-    // learner. Public-pipe thread only (both auth paths call it after
+    // learner. Public-pipe thread only (called after
     // AUTH_SUCCESS delivery); RELOAD_DB clears the windows (era reset).
     void SubmitLearningCandidate(const LearningSample& best);
 
@@ -102,7 +92,6 @@ private:
                                  const wchar_t* expectedAck);
     bool SendAuthErrorMessage(const std::wstring& message);
 
-    std::shared_ptr<InferenceModels> LoadInferenceModels(ModelLoadFailure& failureReason);
     std::shared_ptr<AuthWorkerClient> LoadAuthenticationWorker(const AppConfig& config,
                                                               std::wstring& errorMessage);
 
@@ -114,7 +103,6 @@ private:
 
     // Components
     std::unique_ptr<PipeServer> m_pipeServer;
-    std::unique_ptr<WebcamCaptureDS> m_webcamDS; // standalone only
     std::unique_ptr<CredentialStore> m_store;
     // Serializes every m_store access. Historically single-threaded (public
     // pipe thread only); template learning added a second access path (the
@@ -128,14 +116,6 @@ private:
     // Configuration
     AppConfig m_config;
     float m_antiSpoofThreshold = 0.28f;
-
-    bool m_isServiceMode = false;  // set by ServiceMain
-
-    // Set when the system resumes from sleep/hibernate (PBT_APMRESUMESUSPEND).
-    // Standalone capture can survive resume while its camera graph is stale;
-    // force a fresh camera init on the next standalone auth. Service mode
-    // always creates a new disposable child, so it has no retained camera.
-    std::atomic<bool> m_resumedFlag{false};
 
     // Settings
     std::wstring m_dataDir;

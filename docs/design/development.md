@@ -1,6 +1,6 @@
 # 本地开发约定
 
-这页只记录编码约定。构建、依赖、standalone 启动和验证命令统一见 [`BUILD.md`](../BUILD.md)；任务路由见 [`DEVELOPMENT.md`](../../DEVELOPMENT.md)。
+这页只记录编码约定。构建、依赖、服务启动和验证命令统一见 [`BUILD.md`](../BUILD.md)；任务路由见 [`DEVELOPMENT.md`](../../DEVELOPMENT.md)。
 
 ## 编码约定
 

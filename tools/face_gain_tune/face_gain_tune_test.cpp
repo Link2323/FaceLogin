@@ -131,7 +131,7 @@ void TestUnconfirmedProgressIsNotSaved() {
 }
 
 void TestPendingTuneConfirmation() {
-    // Exercise the shared entry used by worker, standalone and preview:
+    // Exercise the shared entry used by worker and preview:
     // changing the knobs is insufficient; resumption must measure and check
     // the same manual combo before and after a fresh stable window.
     for (int scenario = 0; scenario < 11; ++scenario) {

@@ -413,23 +413,28 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         static_cast<float>(std::chrono::duration<double, std::milli>(
             pipelineDoneAt - authStart).count())};
 
-    if (!channelHealthy.load() || result.cancelled) {
+    if (!channelHealthy.load()) {
         releaseCamera();
         return ERROR_CANCELLED;
     }
 
-    // Do not synchronously stop a DirectShow graph before the terminal reply:
-    // some drivers spend hundreds of milliseconds in IMediaControl::Stop(),
-    // which would put camera teardown on the unlock critical path.
-    if (result.succeeded) {
+    // Send a terminal reply before potentially slow camera/process teardown.
+    switch (result.outcome) {
+    case AuthOutcome::Cancelled:
+        releaseCamera();
+        return ERROR_CANCELLED;
+    case AuthOutcome::Succeeded:
         return SendTerminalAndExit(channel, MessageType::AuthSucceeded,
                                    command.requestId,
                                    auth_worker::EncodeAuthTiming(timing),
                                    ERROR_SUCCESS);
+    case AuthOutcome::Failed:
+    case AuthOutcome::TimedOut:
+        break;
     }
     FACELOGIN_INFO(L"Auth worker timing: camera_init=%.1f ms, pipeline=%.1f ms, total=%.1f ms",
                    timing.cameraInitMs, timing.pipelineMs, timing.totalMs);
-    if (result.timedOut) {
+    if (result.outcome == AuthOutcome::TimedOut) {
         FACELOGIN_INFO(L"Auth worker sending timeout before process reclamation");
         return SendTerminalAndExit(channel, MessageType::AuthTimedOut,
                                    command.requestId, {}, ERROR_TIMEOUT);

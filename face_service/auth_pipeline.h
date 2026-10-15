@@ -1,5 +1,6 @@
 #pragma once
 
+#include "auth_outcome.h"
 #include "../vision/liveness_types.h"
 #include "../vision/face_gain_tune.h"
 #include "../vision/onnx_models.h"
@@ -80,9 +81,7 @@ struct AuthPipelineConfig {
 };
 
 struct AuthPipelineResult {
-    bool succeeded = false;
-    bool cancelled = false;
-    bool timedOut = false;
+    AuthOutcome outcome = AuthOutcome::Failed;
     std::wstring errorMessage;
 };
 

@@ -33,8 +33,8 @@ Normalization requires Python with `onnx` and `numpy` installed
 
 For a locally running service, place the canonical files under
 `<DataPath>\models`. The production installer normally sets `DataPath` to the
-installation directory; `%ProgramData%\FaceLogin` is a fallback when `DataPath`
-is empty. Standalone development follows its configured data path and
-development allowlist; see [`DEVELOPMENT.md`](../../DEVELOPMENT.md#sec-paths).
+installation directory. The production service trusts its EXE directory;
+services running from a development directory use the development allowlist.
+Client fallback paths differ; see [`DEVELOPMENT.md`](../../DEVELOPMENT.md#sec-paths).
 Both `MiniFASNetV2.onnx` and `MiniFASNetV1SE.onnx` are required for production
 PAD.

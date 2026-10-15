@@ -151,6 +151,11 @@ func IsSafeInstallDir(path string) bool {
 	if FileExists(svcPath) {
 		return true
 	}
+	for _, marker := range rootRuntimeDataFiles {
+		if FileExists(filepath.Join(path, marker)) {
+			return true
+		}
+	}
 	for _, marker := range []string{
 		"FaceLoginConsole.exe",
 		"FaceLoginCredentialProvider.dll",

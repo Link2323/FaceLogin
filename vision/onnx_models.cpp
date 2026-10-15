@@ -683,7 +683,7 @@ float OnnxAntiSpoof::Predict(const FrameImage& image,
     }
 
     const float fusedScore = (v2Score + v1SeScore) * 0.5f;
-    // Per-frame PAD breakdown — DEBUG (only in standalone); the pass/fail tally
+    // Per-frame PAD breakdown — DEBUG (when enabled); the pass/fail tally
     // in ProcessAuthRequest is enough at INFO level.
     FACELOGIN_DEBUG(L"Dual MiniFAS PAD: V2=%.4f V1SE=%.4f fused=%.4f",
                     v2Score, v1SeScore, fusedScore);

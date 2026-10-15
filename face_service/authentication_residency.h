@@ -1,7 +1,6 @@
 #pragma once
 
 #include "auth_worker_client.h"
-#include "model_failure.h"
 #include "../common/config_util.h"
 
 #include <condition_variable>
@@ -12,12 +11,6 @@
 
 namespace facelogin {
 
-struct InferenceModels {
-    std::unique_ptr<OnnxDetector> detector;
-    std::unique_ptr<OnnxRecognizer> recognizer;
-    std::unique_ptr<OnnxAntiSpoof> antiSpoof;
-};
-
 // Serializes preload, configuration replacement and idle release. Session
 // handlers only queue requests; loaders and resource destruction run outside
 // the state mutex. The owner calls Stop before its loader dependencies expire,
@@ -27,10 +20,8 @@ struct InferenceModels {
 // called concurrently from the SCM control handler.
 class AuthenticationResidency {
 public:
-    struct Loaders {
-        std::function<std::shared_ptr<InferenceModels>(ModelLoadFailure&)> models;
-        std::function<std::shared_ptr<AuthWorkerClient>(const AppConfig&, std::wstring&)> worker;
-    };
+    using WorkerLoader = std::function<std::shared_ptr<AuthWorkerClient>(
+        const AppConfig&, std::wstring&)>;
 
     class Use {
     public:
@@ -40,9 +31,7 @@ public:
         Use& operator=(const Use&) = delete;
         Use& operator=(Use&&) = delete;
 
-        std::shared_ptr<InferenceModels> models;
         std::shared_ptr<AuthWorkerClient> worker;
-        ModelLoadFailure failure = ModelLoadFailure::None;
         std::wstring error;
 
     private:
@@ -52,7 +41,7 @@ public:
     };
 
     ~AuthenticationResidency();
-    bool Start(bool serviceMode, const AppConfig& config, Loaders loaders);
+    bool Start(const AppConfig& config, WorkerLoader loader);
     void RequestLoad(const wchar_t* reason);
     void RequestUnload(const wchar_t* reason);
     void Stop();
@@ -61,8 +50,7 @@ public:
     // during preparation and authentication, even after an unlock notification.
     Use Acquire(ipc::AuthDeadline deadline, const std::function<void()>& reportWaiting);
     // Replaces a locked service worker and waits for the matching generation.
-    // An intentionally unloaded desktop stays unloaded. Standalone retries a
-    // failed load; already-ready in-process models remain resident.
+    // An intentionally unloaded desktop stays unloaded.
     bool ReloadConfig(const AppConfig& config);
     // Called after the parent decides the complete public result. Successful
     // handoff uses false; failure may request a replacement while still locked.
@@ -73,10 +61,8 @@ private:
     void Run();
     void EndUse();
 
-    bool m_serviceMode = false;
     AppConfig m_config;
-    Loaders m_loaders;
-    std::shared_ptr<InferenceModels> m_models;
+    WorkerLoader m_loader;
     std::shared_ptr<AuthWorkerClient> m_worker;
     State m_state = State::Unloaded;
     bool m_wanted = false;
@@ -85,7 +71,6 @@ private:
     unsigned int m_activeUsers = 0;
     uint64_t m_configGeneration = 0;
     uint64_t m_loadedGeneration = 0;
-    ModelLoadFailure m_failure = ModelLoadFailure::None;
     std::wstring m_workerError;
     std::thread m_thread;
     std::mutex m_mutex;

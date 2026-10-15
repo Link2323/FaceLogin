@@ -79,6 +79,12 @@ var currentRootPayloadFiles = []string{
 	"MODEL_LICENSES.txt",
 }
 
+// Created at runtime beside data/ and log/, not shipped in the payload.
+// Upgrades preserve these files; full uninstall removes them by exact name.
+var rootRuntimeDataFiles = []string{
+	"camera_tune.state",
+}
+
 // Files deployed by earlier releases but intentionally absent from the current
 // manifest. Upgrade and uninstall remove only these exact legacy names.
 var legacyModelFiles = []string{
@@ -375,8 +381,9 @@ func removeAllOrScheduleReboot(path string) (rebootRequired bool, err error) {
 }
 
 // RemoveInstalledFiles removes the current payload plus explicitly known
-// legacy files. It reports immediate removals separately from verified
-// pending-reboot removals, and never suppresses a real deletion error.
+// legacy files, and runtime data when requested. It reports immediate removals
+// separately from verified pending-reboot removals, and never suppresses a real
+// deletion error.
 func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, rebootRequired bool, err error) {
 	var firstErr error
 	recordErr := func(err error) {
@@ -440,6 +447,9 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, reb
 	}
 
 	if removeUserData {
+		for _, name := range rootRuntimeDataFiles {
+			removeKnownFile(filepath.Join(destDir, name))
+		}
 		for _, sub := range []string{"data", "log"} {
 			dir := filepath.Join(destDir, sub)
 			if !DirExists(dir) {
@@ -474,8 +484,8 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, reb
 	return removed, rebootRequired, firstErr
 }
 
-func isKnownRootPayload(name string) bool {
-	for _, names := range [][]string{currentRootPayloadFiles, legacyRuntimeFiles, legacyToolFiles} {
+func isKnownRootFile(name string) bool {
+	for _, names := range [][]string{currentRootPayloadFiles, rootRuntimeDataFiles, legacyRuntimeFiles, legacyToolFiles} {
 		for _, known := range names {
 			if strings.EqualFold(name, known) {
 				return true
@@ -503,7 +513,7 @@ func isOwnedSubdir(name string) bool {
 }
 
 // RemoveInstalledDir finalizes the verified FaceLogin install directory. Only
-// known root payload files and installer-owned subdirectories are touched;
+// known root payload/runtime files and installer-owned subdirectories are touched;
 // unknown entries produce an explicit error. If any child is pending deletion,
 // the root directory is also verified as pending so no empty shell is left
 // after reboot.
@@ -532,7 +542,7 @@ func RemoveInstalledDir(destDir string) (removed, rebootRequired bool, err error
 			continue
 		}
 
-		if !isKnownRootPayload(entry.Name()) {
+		if !isKnownRootFile(entry.Name()) {
 			return false, rebootRequired, fmt.Errorf("install directory contains unknown file: %s", entry.Name())
 		}
 		_, pending, removeErr := removeFileOrScheduleReboot(entryPath)

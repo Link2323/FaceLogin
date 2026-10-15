@@ -5,7 +5,85 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
+
+func TestUninstallCleanupRemovesCameraTuneResidue(t *testing.T) {
+	for _, slim := range []bool{true, false} {
+		name := "full"
+		if slim {
+			name = "slim"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "FaceLogin")
+			if err := os.MkdirAll(filepath.Join(dir, "models"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(dir, "camera_tune.state")
+			if err := os.WriteFile(state, []byte("exposure=-5\ngain=10\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			previousFS := EmbeddedFS
+			t.Cleanup(func() { EmbeddedFS = previousFS })
+			EmbeddedFS = nil
+			if !slim {
+				EmbeddedFS = fstest.MapFS{"resources/LICENSE.txt": &fstest.MapFile{Data: []byte("license")}}
+			}
+			if _, pending, err := RemoveInstalledFiles(dir, true); err != nil || pending {
+				t.Fatalf("file cleanup: pending=%v err=%v", pending, err)
+			}
+			if FileExists(state) {
+				t.Error("camera_tune.state remains after full user-data removal")
+			}
+			removed, pending, err := RemoveInstalledDir(dir)
+			if err != nil || !removed || pending {
+				t.Fatalf("install directory remains: removed=%v pending=%v err=%v", removed, pending, err)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("install directory still exists: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpgradePreservesCameraTuneState(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "FaceLogin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "camera_tune.state")
+	want := "exposure=-5\ngain=10\n"
+	if err := os.WriteFile(state, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previousFS := EmbeddedFS
+	EmbeddedFS = nil
+	t.Cleanup(func() { EmbeddedFS = previousFS })
+	if _, pending, err := RemoveInstalledFiles(dir, false); err != nil || pending {
+		t.Fatalf("upgrade cleanup: pending=%v err=%v", pending, err)
+	}
+	got, err := os.ReadFile(state)
+	if err != nil || string(got) != want {
+		t.Fatalf("upgrade must preserve camera tune state: err=%v", err)
+	}
+}
+
+func TestFinalizeRecognizesOnlyCameraTuneResidue(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "FaceLogin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "camera_tune.state"), []byte("gain=10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !IsSafeInstallDir(dir) {
+		t.Fatal("known runtime residue must allow a follow-up uninstall")
+	}
+	removed, pending, err := RemoveInstalledDir(dir)
+	if err != nil || !removed || pending {
+		t.Fatalf("finalization must remove known state residue: removed=%v pending=%v err=%v", removed, pending, err)
+	}
+}
 
 func TestRemoveAllOrScheduleRebootRemovesWritableTreeImmediately(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "log")

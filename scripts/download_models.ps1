@@ -181,4 +181,4 @@ $miniFasDownloader = Join-Path $PSScriptRoot 'download_minifas_models.ps1'
 
 Write-Host ''
 Write-Host 'All four canonical runtime models are verified.' -ForegroundColor Green
-Write-Host 'For standalone/service debugging, copy assets\models\*.onnx to the configured DataPath\models directory.'
+Write-Host 'For service debugging, copy assets\models\*.onnx to the configured DataPath\models directory.'

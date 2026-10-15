@@ -19,7 +19,7 @@ namespace facelogin {
 //
 //   Development mode (EXE elsewhere, e.g. build\):
 //     The EXE directory, %ProgramData%\FaceLogin, and the caller-supplied
-//     dataDirHint are all trusted. This keeps standalone testing ergonomic
+//     dataDirHint are all trusted. This keeps development harnesses usable
 //     on developer machines that are single-user and trusted.
 //
 // dataDirHint: caller-supplied override (non-empty in dev harnesses; empty

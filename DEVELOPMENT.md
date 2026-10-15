@@ -19,14 +19,14 @@
 |---|---|---|---|
 | 认证循环、活体、识别、超时 | `face_service/FaceService.cpp`、`face_service/auth_pipeline.*`、`face_service/auth_worker*`、`vision/onnx_models.*` | [`face-service.md`](docs/modules/face-service.md)、[`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | Release 构建 + `AuthWorkerProtocolTest` + `ModelIntegrityTest` + `LivenessTimingTest` + `AuthPipelineTest` + 锁屏 |
 | 认证总时限、锁屏超时与迟到终态 | `common/ipc_protocol.h`、`face_service/FaceService.cpp`、`auth_worker_client.*`、`auth_pipeline.*`、`credential_provider/FaceLoginCredential.*`、`pipe_client.*` | [`ipc.md`](docs/contracts/ipc.md)、[`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md)、[`windows-clients.md`](docs/modules/windows-clients.md) | 三端 Release 构建 + `AuthPipelineTest` + `IpcProtocolTest` + 锁屏；5 秒共用预算不得按阶段重置 |
-| worker 启动、私有 IPC、Job/超时 | `face_service/authentication_residency.*`、`face_service/auth_worker_client.*`、`auth_worker_protocol.*`、`main.cpp` | [`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | `AuthWorkerProtocolTest` + 进程/Job 故障注入 |
+| worker 启动、私有 IPC、Job/超时 | `face_service/authentication_residency.*`、`face_service/auth_worker_client.*`、`auth_worker_protocol.*`、`main.cpp` | [`auth-worker-ipc.md`](docs/contracts/auth-worker-ipc.md) | `AuthWorkerProtocolTest` + `AuthenticationResidencyTest` + 进程/Job 故障注入 |
 | 曝光/增益调节、无脸过曝/暗光恢复、首绑前迟到纠正与参数重放 | `vision/face_gain_tune.h`、`vision/tune_state.*`、`face_service/auth_pipeline.cpp`、`enrollment_app/preview_exposure.*` | [`face-service.md`](docs/modules/face-service.md) | Service/Console Release 构建 + `FaceGainTuneTest` + `AuthPipelineTest` + `ExposureResponseProbe` 实测响应 + 暗处连续锁屏（含暗光首脸迟到入场）/暗转亮及预览 |
 | 摄像头/Session 0 | `vision/webcam_capture_dshow.*`、`face_service/auth_worker.cpp` | [`face-service.md`](docs/modules/face-service.md) | `CameraLifecycleTest` child 100 轮 + 服务 Session 0 |
 | 解锁首帧分项、稳定预热帧复用 | `face_service/auth_pipeline.cpp`、`face_service/auth_frame_preparation.*`、`face_service/auth_frame_stream.*`、`vision/webcam_capture_dshow.*`、`tools/auth_pipeline/`、`tools/camera_lifecycle/` | [`face-service.md`](docs/modules/face-service.md)、[优化记录](docs/work/in-progress/unlock-performance.md) | Service/Console Release + `AuthPipelineTest --warmup-seed` + 完整 `AuthPipelineTest` + 指定设备 child 100 轮；桌面对照不能替代锁屏 |
 | IPC 字段、终态、缓冲区、ACK/取消 | `common/ipc_protocol.*`、`face_service/pipe_server.*`、`credential_provider/pipe_client.*`、`enrollment_app/service_client.*` | [`ipc.md`](docs/contracts/ipc.md) | 三端构建 + `IpcProtocolTest` + `EnrollmentSupportTest` + 断开/超长消息 |
 | 人脸匹配、多人脸、`users.dat` | `storage/credential_store.*`、`enrollment_app/EnrollmentWizard.*`、`enrollment_app/enrollment_templates.*`、`enrollment_app/enrollment_accounts.*`、`credential_provider/FaceLoginProvider.cpp`（header） | [`users-dat.md`](docs/contracts/users-dat.md) | `CredentialStoreTest` + 保存/重载/匹配 |
 | 锁屏磁贴、输入触发、COM、LSA、卡死 | `credential_provider/FaceLoginCredential.*`、`credential_provider/input_trigger_policy.h`、`credential_provider/auth_interaction_policy.h`、`credential_provider/FaceLoginProvider.*`、`credential_provider/pipe_client.*` | [`windows-clients.md`](docs/modules/windows-clients.md)；消息问题再读 IPC 契约 | Release 构建 + 锁屏登录/解锁 |
-| 注册、人脸管理、WebView2 | `enrollment_app/EnrollmentWizard.*`、`enrollment_app/enrollment_capture.*`、`enrollment_app/WebviewHost.*`、`enrollment_app/index.html.in`、`enrollment_app/app.js`、`enrollment_app/styles.css` | [`windows-clients.md`](docs/modules/windows-clients.md)；落盘变化再读 users.dat 契约 | Release 构建 + 管理员 GUI |
+| 注册、人脸管理、WebView2 | `enrollment_app/EnrollmentWizard.*`、`enrollment_app/enrollment_capture.*`、`enrollment_app/WebviewHost.*`、`enrollment_app/index.html.in`、`enrollment_app/app.js`、`enrollment_app/capture_flow.js`、`enrollment_app/styles.css` | [`windows-clients.md`](docs/modules/windows-clients.md)；落盘变化再读 users.dat 契约 | Console Release 构建 + `node tools/enrollment_ui/capture_flow_test.cjs` + 管理员 GUI |
 | 注册端账户识别、密码验证 | `enrollment_app/session_identity.*`；记录更新在 `enrollment_app/enrollment_accounts.*` | [`windows-clients.md`](docs/modules/windows-clients.md#账号身份) | Console Release 构建 + 本地/MSA 管理员 GUI |
 | 注册端服务控制通信、日志查看 | `enrollment_app/service_client.*`、`enrollment_app/log_viewer.*` | [`ipc.md`](docs/contracts/ipc.md)、[`windows-clients.md`](docs/modules/windows-clients.md) | Console Release 构建 + `EnrollmentSupportTest` + `IpcProtocolTest` |
 | DataPath、日志、配置 | `common/data_path.*`、`face_service/FaceService.cpp`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp`、`enrollment_app/main.cpp`、`enrollment_app/EnrollmentWizard.cpp`、`installer/FaceLoginSetup/app.go`、`installer/FaceLoginSetup/internal/com.go`、`installer/FaceLoginSetup/internal/security.go` | 本文“路径与配置” | 三个 C++ 组件 + 安装器均检查 |
@@ -36,7 +36,7 @@
 | 第三方声明、模型许可、安装器许可查看 | `scripts/update_third_party_notices.ps1`、`scripts/stage_licenses.ps1`、`THIRD_PARTY_NOTICES.txt`、`third_party/MODEL_LICENSES.txt`、`docs/model-licenses.md`、`frontend/src/App.vue` | [`docs/BUILD.md`](docs/BUILD.md)、[`third_party/MODEL_LICENSES.txt`](third_party/MODEL_LICENSES.txt)、[`model-licenses.md`](docs/model-licenses.md) | 安装器 `go test ./...` + 前端构建；核对载荷/前端三份声明及 slim 卸载 |
 | 模型替换、量化、阈值 | `face_service/FaceService.cpp`、`installer/FaceLoginSetup/internal/extract.go`、`scripts/download_models.ps1`、`tools/threshold_calibration/` | [`face-service.md`](docs/modules/face-service.md)、[历史阈值标定](docs/work/completed/threshold-calibration.md) | 标定 + hash/大小同步 + Go 测试 |
 
-无硬件自动化回归统一执行 `cmake --build build --config Release --target check --parallel 1`；目标会先构建再运行 10 个测试，不能替代相机、GUI 和锁屏实测。
+无硬件自动化回归统一执行 `cmake --build build --config Release --target check --parallel 1`；目标会先构建再运行 11 个测试，不能替代相机、GUI 和锁屏实测。
 
 ## 运行期架构
 
@@ -93,8 +93,7 @@ ProgramData 不是默认生产位置。
 | Credential Provider | 直接读 DataPath；空值回退 `%ProgramData%\FaceLogin` |
 | Enrollment | 直接读 DataPath；空值回退 `%ProgramData%\FaceLogin` |
 | 服务（生产 EXE） | `ResolveSecureDataDir` 只信 EXE 目录；异常重定向 fail-closed |
-| 服务（非生产 standalone） | DataPath → 空值时 ProgramData；候选必须在开发白名单 |
-| standalone 初始化前日志 | 安全解析失败时仅日志临时回退 EXE 目录，再兜底 cwd；正式 Initialize 仍会拒绝不可信路径 |
+| 服务（EXE 位于开发目录） | DataPath → 空值时 ProgramData；候选必须在开发白名单 |
 
 改路径逻辑时必须同时检查三个组件和安装器注册表/ACL，不能只改 `common/data_path.cpp`。
 

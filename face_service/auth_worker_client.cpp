@@ -249,7 +249,7 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks,
         deadline = supervisorDeadline;
     }
     if (ipc::RemainingAuthTimeMs(deadline) == 0) {
-        result.timedOut = true;
+        result.outcome = AuthOutcome::TimedOut;
         Stop();
         return result;
     }
@@ -270,7 +270,7 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks,
     auth_worker::AuthExchangeValidator exchange(requestId);
     while (std::chrono::steady_clock::now() < deadline) {
         if (callbacks.isCancelled()) {
-            result.cancelled = true;
+            result.outcome = AuthOutcome::Cancelled;
             Stop();
             return result;
         }
@@ -346,7 +346,7 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks,
                 Stop();
                 return result;
             }
-            result.succeeded = true;
+            result.outcome = AuthOutcome::Succeeded;
             result.hasTiming = true;
             result.timing = timing;
             result.supervisorElapsedMs =
@@ -366,7 +366,7 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks,
         }
         if (message.type == auth_worker::MessageType::AuthTimedOut &&
             message.payload.empty()) {
-            result.timedOut = true;
+            result.outcome = AuthOutcome::TimedOut;
             CompleteTerminal();
             return result;
         }
@@ -384,7 +384,7 @@ AuthWorkerResult AuthWorkerClient::Authenticate(AuthWorkerCallbacks callbacks,
         return result;
     }
 
-    result.timedOut = true;
+    result.outcome = AuthOutcome::TimedOut;
     Stop();
     return result;
 }

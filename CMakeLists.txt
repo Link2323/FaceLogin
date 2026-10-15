@@ -77,6 +77,7 @@ add_development_tool(tools/model_integrity ModelIntegrityTest)
 add_development_tool(tools/ipc_protocol IpcProtocolTest)
 add_development_tool(tools/liveness_timing LivenessTimingTest)
 add_development_tool(tools/auth_pipeline AuthPipelineTest)
+add_development_tool(tools/authentication_residency AuthenticationResidencyTest)
 add_development_tool(tools/exposure_warmup ExposureWarmupTest)
 add_development_tool(tools/face_gain_tune FaceGainTuneTest)
 add_development_tool(tools/enrollment_support EnrollmentSupportTest)
@@ -87,6 +88,7 @@ set(FACELOGIN_AUTOMATED_TESTS
     AuthWorkerProtocolTest CredentialStoreTest TemplateLearnerTest
     ModelIntegrityTest IpcProtocolTest LivenessTimingTest AuthPipelineTest
     ExposureWarmupTest FaceGainTuneTest EnrollmentSupportTest
+    AuthenticationResidencyTest
 )
 foreach(test_target IN LISTS FACELOGIN_AUTOMATED_TESTS)
     add_test(NAME ${test_target} COMMAND $<TARGET_FILE:${test_target}>)

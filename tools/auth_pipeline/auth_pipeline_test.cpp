@@ -123,7 +123,7 @@ void TestPersistentMissAfterPartialEvidence(bool fastUnlock, unsigned int accept
         });
     const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
     Check(accepts == accepted && retries > 1, "partial evidence followed by repeated identity misses");
-    Check(!result.succeeded && !result.cancelled && !result.timedOut,
+    Check(result.outcome == AuthOutcome::Failed,
           "insufficient identity evidence never authenticates");
     Check(elapsed >= 1.9 && elapsed < 3.5,
           "persistent identity misses fail near 2s instead of waiting 8s");
@@ -145,7 +145,7 @@ void TestTransientMissRecovers(bool fastUnlock) {
             ++accepts;
             return BindingDecision{BindingDecisionKind::Accept, {}};
         });
-    Check(result.succeeded && accepts == 3,
+    Check(result.outcome == AuthOutcome::Succeeded && accepts == 3,
           "transient identity misses recover only after all three bindings");
 }
 
@@ -155,7 +155,7 @@ void TestPadFailureRemainsPadFailure() {
         [](const std::vector<float>&, unsigned int, float, float, float) {
             return BindingDecision{BindingDecisionKind::Accept, {}};
         });
-    Check(!result.succeeded && result.errorMessage == L"未通过活体检测，请使用真实人脸",
+    Check(result.outcome == AuthOutcome::Failed && result.errorMessage == L"未通过活体检测，请使用真实人脸",
           "matching identity cannot bypass failing PAD scores");
 }
 
@@ -177,7 +177,7 @@ void TestRecoveryResetsClockInPipeline() {
             ++accepts;
             return BindingDecision{BindingDecisionKind::Accept, {}};
         });
-    Check(result.succeeded && accepts == 3,
+    Check(result.outcome == AuthOutcome::Succeeded && accepts == 3,
           "accepted binding resets the clock even when total retry time exceeds 2s");
 }
 
@@ -189,7 +189,7 @@ void TestIdentityRejectRemainsTerminal() {
                 ? BindingDecision{BindingDecisionKind::Accept, {}}
                 : BindingDecision{BindingDecisionKind::Reject, L"活体验证期间人脸不匹配，请重试"};
         });
-    Check(!result.succeeded && result.errorMessage == L"活体验证期间人脸不匹配，请重试",
+    Check(result.outcome == AuthOutcome::Failed && result.errorMessage == L"活体验证期间人脸不匹配，请重试",
           "explicit identity rejection is not converted into a retry");
 }
 
@@ -199,7 +199,7 @@ void TestInvalidPadRemainsTerminal() {
         [](const std::vector<float>&, unsigned int, float, float, float) {
             return BindingDecision{BindingDecisionKind::Accept, {}};
         });
-    Check(!result.succeeded && result.errorMessage == L"活体检测模块异常，请使用密码登录",
+    Check(result.outcome == AuthOutcome::Failed && result.errorMessage == L"活体检测模块异常，请使用密码登录",
           "invalid PAD inference still fails closed with its own error");
 }
 
@@ -211,7 +211,7 @@ void TestCancelDuringIdentityRetry() {
             return BindingDecision{index == 0 ? BindingDecisionKind::Accept
                                              : BindingDecisionKind::Retry, {}};
         }, [&] { return Clock::now() - start >= std::chrono::milliseconds(300); });
-    Check(result.cancelled && !result.succeeded && result.errorMessage.empty(),
+    Check(result.outcome == AuthOutcome::Cancelled && result.errorMessage.empty(),
           "cancellation wins over identity failure and joins inference work");
 }
 
@@ -238,7 +238,7 @@ void TestPacingSkipsStaleFramesAndRetainsRetryAnchor() {
                 return true;
             };
         });
-    Check(result.succeeded && bindings == std::vector<int>({2, 3, 3, 4}),
+    Check(result.outcome == AuthOutcome::Succeeded && bindings == std::vector<int>({2, 3, 3, 4}),
           "counted-frame dedup rejects stale/backward sequences but Retry does not advance the anchor");
     Check(grabs == sequences.size(), "frame pacing consumes exactly the expected fresh/retry frames");
 }
@@ -254,11 +254,11 @@ void TestFrozenCameraHonorsTimeout() {
         }, [&] { return Clock::now() - start >= std::chrono::milliseconds(1500); },
         [&] { return accepts != 0; }, 1);
     Check(accepts == 1, "frozen camera cannot supply more identity evidence");
-    Check(result.timedOut && !result.cancelled && !result.succeeded,
+    Check(result.outcome == AuthOutcome::TimedOut,
           "waiting for a new camera sequence honors the authentication deadline");
     std::printf("Frozen camera: %.3f s, timedOut=%d, cancelled=%d\n",
                 std::chrono::duration<double>(Clock::now() - start).count(),
-                result.timedOut, result.cancelled);
+                result.outcome == AuthOutcome::TimedOut, result.outcome == AuthOutcome::Cancelled);
 }
 
 void TestFrozenCameraHonorsDisconnect() {
@@ -272,7 +272,7 @@ void TestFrozenCameraHonorsDisconnect() {
         }, [&] { return Clock::now() - start >= std::chrono::milliseconds(1000); },
         [&] { return accepts != 0; }, 15,
         [&] { return Clock::now() - start >= std::chrono::milliseconds(200); });
-    Check(result.cancelled && !result.succeeded && accepts == 1,
+    Check(result.outcome == AuthOutcome::Cancelled && accepts == 1,
           "client disconnect aborts a frozen camera without counting stale evidence");
     Check(Clock::now() - start < std::chrono::milliseconds(800),
           "frozen camera observes disconnect before watchdog cancellation");
@@ -295,7 +295,7 @@ void TestPreparationConsumesAuthBudget() {
                 return true;
             };
         });
-    Check(result.timedOut && !result.succeeded && bindings == 0,
+    Check(result.outcome == AuthOutcome::TimedOut && bindings == 0,
           "exposure preparation consumes the authentication budget before any binding");
 }
 
@@ -309,7 +309,7 @@ void TestExpiredHostDeadlineNeverBinds() {
         [] { return false; }, [](AuthPipelineCallbacks&, AuthPipelineConfig& config) {
             config.authDeadline = ipc::MakeAuthDeadline(0);
         });
-    Check(result.timedOut && !result.succeeded && bindings == 0,
+    Check(result.outcome == AuthOutcome::TimedOut && bindings == 0,
           "an expired host deadline cannot restart a fresh pipeline budget");
 }
 
@@ -357,24 +357,24 @@ void TestNoFaceDarkRecovery(bool lateEntry = false, bool padPass = true,
     g_minDetectLuma = 0;
     g_smallBacklitFace = false;
     if (cancelAfterWrite) {
-        Check(result.cancelled && !result.succeeded && writes == 1 && bindings == 0,
+        Check(result.outcome == AuthOutcome::Cancelled && writes == 1 && bindings == 0,
               "cancellation during dark recovery stops before any identity evidence");
     } else if (timeoutSeconds == 1) {
-        Check(result.timedOut && !result.succeeded && bindings == 0 &&
+        Check(result.outcome == AuthOutcome::TimedOut && bindings == 0 &&
               Clock::now() - start < std::chrono::milliseconds(1500),
               "dark recovery shares the original deadline and cannot extend authentication");
     } else if (!padPass) {
-        Check(writes > 0 && !result.succeeded,
+        Check(writes > 0 && result.outcome == AuthOutcome::Failed,
               "successful dark recovery cannot bypass failed PAD evidence");
     } else {
-        Check(writes > 0 && result.succeeded && bindings == 3,
+        Check(writes > 0 && result.outcome == AuthOutcome::Succeeded && bindings == 3,
               "no-face dark scene brightens before detection, then requires all identity bindings");
     }
     std::printf("No-face dark recovery (late=%d, PAD=%d, timeout=%d, cancel=%d, backlit=%d): "
                 "%.3f s, writes=%u, bindings=%u, succeeded=%d\n",
                 lateEntry, padPass, timeoutSeconds, cancelAfterWrite, backlit,
                 std::chrono::duration<double>(Clock::now() - start).count(),
-                writes, bindings, result.succeeded);
+                writes, bindings, result.outcome == AuthOutcome::Succeeded);
 }
 enum class TuneRecoveryScene { Stable, PadFailure, IdentityReject, Cancel, Disconnect, Drift, Frozen };
 
@@ -441,14 +441,14 @@ void TestInterruptedTuneRecovery(TuneRecoveryScene scene = TuneRecoveryScene::St
         Check(LoadTuneKnobState(path, saved) && saved.exposure == (stable ? -8 : -9),
               "only independently settled recovery replaces stale checkpoint");
         if (scene == TuneRecoveryScene::Stable)
-            Check(result.succeeded && bindings == 3, "recovered tune retains all identity/PAD evidence");
+            Check(result.outcome == AuthOutcome::Succeeded && bindings == 3, "recovered tune retains all identity/PAD evidence");
         else if (scene == TuneRecoveryScene::PadFailure || scene == TuneRecoveryScene::IdentityReject)
-            Check(!result.succeeded && bindings > 0, "settled exposure cannot bypass identity or PAD rejection");
+            Check(result.outcome == AuthOutcome::Failed && bindings > 0, "settled exposure cannot bypass identity or PAD rejection");
         else if (scene == TuneRecoveryScene::Cancel || scene == TuneRecoveryScene::Disconnect)
-            Check(result.cancelled && !result.succeeded && bindings == 0,
+            Check(result.outcome == AuthOutcome::Cancelled && bindings == 0,
                   "resumed settling aborts before binding on cancellation or disconnect");
         else if (scene == TuneRecoveryScene::Frozen)
-            Check(result.timedOut && !result.succeeded, "resumed settling does not restart the shared deadline");
+            Check(result.outcome == AuthOutcome::TimedOut, "resumed settling does not restart the shared deadline");
         if (round == 1)
             Check(writes.size() == startWrites, "unchanged scene retry does not undo recovered exposure");
     }
@@ -532,7 +532,7 @@ void TestManualWarmupSeed(SeedScene scene = SeedScene::Manual, int rotation = 0,
             };
         });
     if (scene == SeedScene::Cancel) {
-        Check(result.cancelled && !result.succeeded && bindings == 0,
+        Check(result.outcome == AuthOutcome::Cancelled && bindings == 0,
               "cancellation at the stable gate releases async detection without binding");
     } else {
         const bool mayReuse = scene == SeedScene::Manual || scene == SeedScene::Auto ||
@@ -541,12 +541,12 @@ void TestManualWarmupSeed(SeedScene scene = SeedScene::Manual, int rotation = 0,
         Check(mayReuse ? firstMarker == 1 : firstMarker > 1,
               "only stable known-mode, fresh, unchanged warmup evidence is reused");
         if (scene == SeedScene::IdentityReject) {
-            Check(!result.succeeded && bindings == 1 && result.errorMessage == L"test identity rejection",
+            Check(result.outcome == AuthOutcome::Failed && bindings == 1 && result.errorMessage == L"test identity rejection",
                   "reused seed cannot bypass identity rejection");
         } else if (scene == SeedScene::PadFailure) {
-            Check(!result.succeeded && bindings == 3, "reused seed cannot bypass failed PAD");
+            Check(result.outcome == AuthOutcome::Failed && bindings == 3, "reused seed cannot bypass failed PAD");
         } else {
-            Check(result.succeeded && bindings == 3, "warmup seed preserves all three identity bindings");
+            Check(result.outcome == AuthOutcome::Succeeded && bindings == 3, "warmup seed preserves all three identity bindings");
         }
         for (size_t i = 1; i < markers.size(); ++i) {
             Check(markers[i] > markers[i - 1], "reused seed bindings use increasing distinct frames");
@@ -556,7 +556,7 @@ void TestManualWarmupSeed(SeedScene scene = SeedScene::Manual, int rotation = 0,
     }
     g_padScore = 1.0f;
     std::printf("Warmup seed scene=%d rotation=%d fast=%d: first=%d, bindings=%u, success=%d\n",
-                static_cast<int>(scene), rotation, fastUnlock, firstMarker, bindings, result.succeeded);
+                static_cast<int>(scene), rotation, fastUnlock, firstMarker, bindings, result.outcome == AuthOutcome::Succeeded);
 }
 
 // Exit while SCRFD still owns its input. Preparation must join before Run
@@ -576,8 +576,8 @@ void TestPendingWarmupExit(bool expireDeadline) {
         });
     Check(g_detectCalls > 0 && g_activeDetections == 0,
           "pending warmup detection is joined before the pipeline returns");
-    Check(!result.succeeded && bindings == 0 &&
-          (expireDeadline ? result.timedOut : result.cancelled),
+    Check(bindings == 0 && result.outcome ==
+          (expireDeadline ? AuthOutcome::TimedOut : AuthOutcome::Cancelled),
           "pending warmup exit preserves the shared deadline/cancel terminal state");
     g_detectionDelayMs = 0;
 }

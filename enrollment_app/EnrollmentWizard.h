@@ -173,7 +173,7 @@ private:
     // Camera & face processing
     std::unique_ptr<WebcamCaptureDS>  m_webcam;
     std::unique_ptr<OnnxDetector>   m_onnxDetector;   // SCRFD detection (+5 keypoints)
-    std::unique_ptr<OnnxRecognizer> m_onnxRecognizer; // InsightFace recognition
+    std::unique_ptr<OnnxRecognizer> m_onnxRecognizer; // SFace recognition
     std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;
     std::unique_ptr<EnrollmentAccounts> m_accounts;
 

@@ -24,9 +24,7 @@ struct AuthWorkerCallbacks {
 };
 
 struct AuthWorkerResult {
-    bool succeeded = false;
-    bool cancelled = false;
-    bool timedOut = false;
+    AuthOutcome outcome = AuthOutcome::Failed;
     bool hasTiming = false;
     auth_worker::AuthTiming timing;
     double supervisorElapsedMs = 0.0;

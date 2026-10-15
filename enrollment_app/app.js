@@ -24,26 +24,9 @@ function closeLicenseViewer() {
   document.getElementById('license-overlay').classList.remove('active');
 }
 var viewing = true, lastB64 = '', lastFacesJson = '', timer = 0, faceImg = new Image();
-var captureMultiAngle = false;  // set by onCapture, read by finishCapture / showAppendScreen
-// True while an angle sequence is in flight (CaptureFaceSamples started but
-// finishCapture/abort not yet run). Guards the idle status poll from writing
-// the cumulative total into the caption during the ~400ms gap between angles,
-// where the per-angle poll is briefly idle but the sequence is not done.
-var capturing = false;
-var captureAngleIndex = 0;  // angle being captured; used to name/describe a single-angle append
+var captureFlow = createCaptureFlow(window);
 var camReady = false, currentTab = 'cam';
 var refreshState = 0;  // account-type-change state shown in the refresh modal (0/1/2)
-var capturePoll = 0;        // capture status poll; module-level so cancel can stop it
-var cancelRequested = false; // set by onCancelCapture — a cancel during the gap
-                             // between two angles must suppress the next angle
-var suppressIdleTotal = false; // set when a capture flow ends (confirm/cancel/
-                               // save): the idle poll must not resurrect the
-                               // old「已采 N 帧」total on the next screen return
-
-// Stop the capture status poll wherever it is (module-level id).
-function stopCapturePoll() {
-  if (capturePoll) { clearInterval(capturePoll); capturePoll = 0; }
-}
 
 // Single status line for the cam screen: an overlay pill on the video. All
 // capture states (guidance, angle/frame counts, liveness, completion) and the
@@ -64,7 +47,7 @@ function enterCaptureCancelMode() {
   document.getElementById('cap-spinner').style.display = 'none';
 }
 function resetCaptureUi() {
-  capturing = false;
+  captureFlow.end();
   var btn = document.getElementById('btn-capture');
   btn.disabled = false;
   btn.classList.add('btn-primary');
@@ -82,8 +65,7 @@ function hideCaptureProgress() {
 // thread cooperatively (both phases check m_capturing between frames). The
 // partial samples stay in host memory exactly like a failed capture does.
 function onCancelCapture() {
-  cancelRequested = true;
-  stopCapturePoll();
+  captureFlow.end();
   try { H.CancelCapture(); } catch(e) {}
   resetCaptureUi();
   hideCaptureProgress();
@@ -294,7 +276,7 @@ function switchTab(name) {
 
   // A capture in flight owns the DirectShow graph — pausing the preview to
   // idle the camera would abort it. Block the switch; cancel first instead.
-  if (currentTab === 'cam' && (capturing || capturePoll)) {
+  if (currentTab === 'cam' && captureFlow.isActive()) {
     showBanner('cam', '正在采集，请先取消采集再切换页面。', 'error');
     return;
   }
@@ -360,7 +342,7 @@ function loadSettings() {
         camSel.value = currentCam;
       } else if (currentCam) {
         // Configured camera is no longer present — keep it visible so the
-        // user knows, but fall back to default at runtime.
+        // user knows; the backend refuses to substitute another device.
         var missingOpt = document.createElement('option');
         missingOpt.value = currentCam;
         missingOpt.textContent = '(未找到: ' + currentCam + ')';
@@ -443,7 +425,7 @@ function onResetDefaults() {
 
 function onCapture() {
   // While a capture runs, the primary button doubles as its cancel control.
-  if (capturing) { onCancelCapture(); return; }
+  if (captureFlow.isActive()) { onCancelCapture(); return; }
 
   var prog = document.getElementById('cap-progress');
 
@@ -458,10 +440,6 @@ function onCapture() {
     return;
   }
 
-  captureMultiAngle = multi;  // remember for finishCapture / showAppendScreen
-  cancelRequested = false;    // fresh run — drop any stale cancel from a prior one
-  suppressIdleTotal = false;  // fresh run — the caption is the capture's again
-
   enterCaptureCancelMode();
   prog.style.display = 'block';
   document.getElementById('cap-fill').style.width = '0%';
@@ -472,8 +450,9 @@ function onCapture() {
   // Single-angle append: capture the FIRST MISSING angle, not always the
   // front. First enrollment (no faces) -> front angle.
   try {
-    captureAngleIndex = multi ? 0 : pickMissingAngle(faceCount);
-    captureAngleSequence(captureAngleIndex, angles);
+    var firstAngle = multi ? 0 : pickMissingAngle(faceCount);
+    captureFlow.begin(multi, firstAngle);
+    captureAngleSequence(firstAngle, angles);
   } catch(e) {
     resetCaptureUi();
     hideCaptureProgress();
@@ -508,14 +487,7 @@ var ANGLE_INSTR = {
 // Drive one capture angle at a time: call CaptureFaceSamples(angle), poll
 // GetCaptureStatus, show the instruction + live progress, then move on.
 function captureAngleSequence(idx, total) {
-  // A cancel pressed during the gap between two angles must also stop this
-  // angle from starting — onCancelCapture already reset the whole UI.
-  if (cancelRequested) { cancelRequested = false; return; }
-
-  // Mark the whole angle sequence as in-flight; only finishCapture / an abort
-  // path clears it. Keeps the idle status poll from clobbering the caption
-  // with the cumulative total during the gap between two angles.
-  capturing = true;
+  if (!captureFlow.isActive()) return;
 
   // Start the capture. A false return means a previous capture is still
   // winding down server-side — surface that instead of freezing silently.
@@ -544,15 +516,15 @@ function captureAngleSequence(idx, total) {
   var pollStart = Date.now();
   var gotProgress = false;
 
-  stopCapturePoll();
-  capturePoll = setInterval(function() {
+  captureFlow.stopPolling();
+  captureFlow.poll(function() {
     var st;
     try { st = JSON.parse(H.GetCaptureStatus()); } catch(e) { return; }
 
     // A cancel landed server-side while a poll was still in flight — the
     // cancel path has already reset the UI; just stand down.
     if (st.cancelled) {
-      stopCapturePoll();
+      captureFlow.stopPolling();
       resetCaptureUi();
       hideCaptureProgress();
       return;
@@ -560,7 +532,7 @@ function captureAngleSequence(idx, total) {
 
     if (st.collected > 0) gotProgress = true;
     if (!gotProgress && !st.done && st.collected === 0 && Date.now() - pollStart > 25000) {
-      stopCapturePoll();
+      captureFlow.stopPolling();
       resetCaptureUi();
       hideCaptureProgress();
       setCaption('采集未开始');
@@ -578,7 +550,7 @@ function captureAngleSequence(idx, total) {
 
     // Liveness failed -> abort with the classic error banner.
     if (st.done && !st.livenessPassed) {
-      stopCapturePoll();
+      captureFlow.stopPolling();
       resetCaptureUi();
       hideCaptureProgress();
       setCaption('采集失败');
@@ -599,27 +571,23 @@ function captureAngleSequence(idx, total) {
     // This angle is complete — move on to the next one. Paint 100% AND a
     // matching caption: the step text used to keep saying「活体检测中」here,
     // which next to「角度 N · 完成」and a frozen 100% bar read as stuck.
-    stopCapturePoll();
+    captureFlow.stopPolling();
     document.getElementById('cap-fill').style.width = '100%';
     setCaption(total > 1 ? '角度 ' + (idx + 1) + '/' + total + ' 完成'
                          : '「' + ANGLE_LABELS[idx] + '」采集完成');
     if (idx + 1 < total) {
-      setTimeout(function() { captureAngleSequence(idx + 1, total); }, 400);
+      captureFlow.scheduleNext(function() { captureAngleSequence(idx + 1, total); });
       return;
     }
 
     finishCapture();
-  }, 200);
+  });
 }
 
 // All angles captured — the original post-capture flow (append vs password).
 function finishCapture() {
   resetCaptureUi();
   hideCaptureProgress();
-  // The capture flow is over: the idle poll must not repaint the old
-  //「已采 N 帧」total when the user comes back to this screen (the samples
-  // are only kept after they confirm/save on the next screen).
-  suppressIdleTotal = true;
   setCaption('准备就绪');
 
   viewing = false;
@@ -644,7 +612,7 @@ function finishCapture() {
         return;
       }
     } catch(e) {}
-    showAppendScreen(faceCount, captureMultiAngle);
+    showAppendScreen(faceCount, captureFlow.isMultiAngle());
     return;
   }
 
@@ -1023,7 +991,7 @@ function showAppendScreen(faceCount, isReplace) {
     document.getElementById('append-title').textContent = '添加新人脸';
     document.getElementById('append-label-field').style.display = '';
     document.getElementById('append-info').textContent =
-      '当前账号已有 ' + faceCount + ' 张脸，将补录「' + ANGLE_LABELS[captureAngleIndex] + '」角度。追加无需再次输入密码。';
+      '当前账号已有 ' + faceCount + ' 张脸，将补录「' + ANGLE_LABELS[captureFlow.firstAngle()] + '」角度。追加无需再次输入密码。';
     document.getElementById('btn-append-text').textContent = '确认追加';
   }
 }
@@ -1198,7 +1166,7 @@ function renderLearningStatus(force) {
     var st = JSON.parse(H.GetLearningStatus());
     if (st.error) {
       html = '<div class="log-warn">学习状态不可用: ' + escapeHtml(st.error) +
-             '（需后台服务运行；standalone 模式下同样可用）</div>';
+             '（需后台服务运行）</div>';
     } else {
       html = '<div class="log-info">[渐进式学习] ' + (st.enabled ? '已开启' : '已关闭') +
              ' · 距离门上限 ' + Number(st.gate_cap).toFixed(2) +
@@ -1439,15 +1407,15 @@ function onCamPickerSkip() {
 
   setInterval(function() {
     if (!viewing) return;
-    if (capturing) return;  // sequence in flight — the capture poll owns the tag
+    if (captureFlow.isActive()) return;  // sequence in flight — the capture poll owns the tag
     try {
       var st = JSON.parse(H.GetCaptureStatus());
       // Only after the whole sequence has ended do we show the running total.
       // A cancelled capture (st.cancelled) leaves a partial total behind —
       // don't resurrect it after the user asked to reset to zero. Same for
-      // a finished flow (suppressIdleTotal): the total is stale once the
+      // an ended capture flow: the total is stale once the
       // confirm/cancel/save screen was left.
-      if (st.done && !st.livenessChecking && !st.cancelled && !suppressIdleTotal) {
+      if (st.done && !st.livenessChecking && !st.cancelled && captureFlow.canShowIdleTotal()) {
         setCaption('已采 ' + st.total + ' 帧');
       }
     } catch(e) {}

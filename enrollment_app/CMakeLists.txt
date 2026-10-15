@@ -2,9 +2,12 @@
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/styles.css"
     "${CMAKE_CURRENT_SOURCE_DIR}/app.js"
+    "${CMAKE_CURRENT_SOURCE_DIR}/capture_flow.js"
 )
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/styles.css" ENROLLMENT_CSS)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/app.js" ENROLLMENT_JS)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/capture_flow.js" ENROLLMENT_CAPTURE_JS)
+string(PREPEND ENROLLMENT_JS "${ENROLLMENT_CAPTURE_JS}\n")
 configure_file(index.html.in ${CMAKE_CURRENT_BINARY_DIR}/index.html @ONLY)
 # RC inputs must change with the page even when MSBuild file tracking is disabled.
 file(SHA256 "${CMAKE_CURRENT_BINARY_DIR}/index.html" ENROLLMENT_PAGE_SHA256)

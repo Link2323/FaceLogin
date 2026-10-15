@@ -14,7 +14,7 @@
 
 ### A — 模型 hash 跨语言单一来源
 
-C++ 的生产 worker、standalone 和 `ModelIntegrityTest` 已共同使用 `common/model_hashes.h`；Go 安装器、PAD 标定工具与模型下载脚本仍维护各自的 hash 常量，模型升级时可能漂移。
+C++ 的生产 worker 和 `ModelIntegrityTest` 已共同使用 `common/model_hashes.h`；Go 安装器、PAD 标定工具与模型下载脚本仍维护各自的 hash 常量，模型升级时可能漂移。
 
 建议：引入机器可读 manifest，并生成或统一校验 C++、Go 和 PowerShell 使用的值；至少先由脚本和安装器测试共同校验 64 位十六进制格式与四个正式模型。
 
