@@ -23,7 +23,7 @@
 | 2 | A | DataPath 解析统一 —— 已在 [`todo.md`](todo.md)「DataPath 解析统一」登记，以该处为准 | `common/data_path.cpp` 等 | 未开始 |
 | 3 | C | 陈旧引用与缩进错位清理（onnx_models.h 注释部分已登记于 [`todo.md`](todo.md)「清理推理接口与离线标定的旧说明」） | 见下文 | 已完成（2026-10-15） |
 | 4 | C | 魔法数字具名化 | 见下文 | 已完成（2026-10-15） |
-| 5 | B | 拆分 `AuthPipeline::Run` | `face_service/auth_pipeline.cpp:45-439` | 未开始 |
+| 5 | B | 拆分 `AuthPipeline::Run` | `face_service/auth_pipeline.cpp:45-439` | 已完成（2026-10-15） |
 | 6 | C | CMake MSVC runtime 样板收口 | 根及各模块 `CMakeLists.txt` | 已完成（2026-10-15） |
 | 7 | B | dispId 单表化与凭据字段 ID 具名 | `enrollment_app/WebviewHost.cpp`、`credential_provider/` | 未开始 |
 | 8 | B | pipe_client 管道对测 | `credential_provider/pipe_client.cpp` | 未开始 |
@@ -99,6 +99,15 @@ credential_provider 目前几乎零自动化覆盖。照 `tools/enrollment_suppo
 ## 完成记录
 
 完成后在此按日期登记（日期、条目号、改动摘要、验证方式与结果），并同步更新上表状态。
+
+### 2026-10-15 — #5（拆分 AuthPipeline::Run）
+
+**`auth_pipeline.cpp`（395 行 → 编排 + 6 个阶段函数）**：`Run` 收为 92 行编排（守卫、截止时间、诊断与帧准备、状态上报、循环调用、结局分派）；循环体按阶段拆为私有成员 `CheckLoopGates`（每迭代取消/断开/窗口/空场门）、`RunLivenessLoop`（计帧主循环骨架，105 行/78 行纯代码）、`CorrectExposureBeforeFirstCount`（首计帧前三道曝光纠正：暗场恢复、中断调节确认、迟到纠正）、`AttemptBinding`（锚点/共识帧绑定尝试）、`PrefetchNextFrame`（重叠窗口预取）、`CountPadFrame`（PAD 判定与计帧）、`ResolveOutcome`（终态到用户消息映射），另加自由函数 `PositionDiscontinuous`（IoU 连续性门）。约 10 个布尔结局标志（failFastEmpty/failFastAttack/livenessInferenceError/identityRejected/identityRetryTimedOut…）合并为 `AuthLoopStop` enum，绑定与纠正的中间裁决分别为 `BindingDisposition`/`PreCountCorrection`，共享循环状态收进 `AuthLoopState`（含原 post-mortem 注释）。日志串新旧逐字比对一致（含一处差点引入的 "2s"→"2S" 笔误，已由比对拦回）。
+
+**`auth_worker.cpp`（RunAuthenticationWorker 278 行 → 118 行主线 + 6 个自由函数）**：拆出 `PreloadWorker`（预载策略快照、模型加载、ORT 预热、相机骨架及计时日志）、`InitializeWorkerSession`（Hello→Init→配置解码→数据目录→日志握手）、`AwaitAuthCommand`（空闲命令等待，`CommandWait` enum 区分取消/无效/断链）、`WireAuthCallbacks` + `ExchangeBindingVerdict`（回调装配与单次绑定往返）、`OptOutOfPowerThrottling`（EcoQoS 退出，实测注释随迁）、`SendAuthTerminal`（终态回包）。顺带移除 `LoadModels` 从未使用的 `config` 参数（重编译暴露的 C4100，原代码即如此）。
+
+- 验证：CTest `check` 11/11 通过（`AuthPipelineTest` 32 s 全场景含 tune-recovery/warmup-seed/dark-recovery/pacing/timeout/cancel，`LivenessTimingTest` 在列）；全目标 Release 构建零警告；两文件所有日志字面量与 HEAD 逐一 diff 一致。单函数行数：两文件最大为 `RunAuthenticationWorker` 118 行（含 ~30 行必要注释、86 行纯代码）与 `RunLivenessLoop` 105 行（78 行纯代码），其余 ≤92 行。
+- 未做 GUI/锁屏实测，理由：纯结构重构，控制流逐路径等价（continue/break/return 语义、scoreFuture join 点、时序门与 pacing 逐行保留），worker 协议消息与顺序未变，自动化已覆盖循环全部结局分支。
 
 ### 2026-10-15 — #6、#9（第一梯队补充）
 

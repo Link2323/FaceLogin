@@ -8,10 +8,16 @@
 #include "../common/ipc_protocol.h"
 
 #include <functional>
+#include <future>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace facelogin {
+
+struct AuthFrame;
+class AuthFrameStream;
+namespace auth_diagnostics { struct NormLog; }
 
 // The inference-only authentication loop.  It owns no camera, credential
 // store, named pipe, or Windows password.  Those resources deliberately live
@@ -85,6 +91,80 @@ struct AuthPipelineResult {
     std::wstring errorMessage;
 };
 
+// How the counted-frame anti-spoof loop ended. Interrupted and
+// ClientDisconnected have already written the terminal outcome (the
+// interrupted lambda / Run's disconnect handling), so they must not go
+// through the failure-message selection in ResolveOutcome.
+enum class AuthLoopStop {
+    CountingComplete,      // while-condition exit: every frame counted
+    WindowExpired,         // 8 s PAD window elapsed
+    EmptyScene,            // 2.5 s without any face
+    Attack,                // 2 s persistent attack before the first PAD pass
+    PadInferenceError,     // invalid PAD score — fail closed
+    IdentityRejected,      // parent returned an explicit Reject
+    IdentityRetryTimedOut, // 2 s of continuous identity misses
+    Interrupted,           // cancellation or deadline (outcome already set)
+    ClientDisconnected,    // credential provider went away (Run sets Cancelled)
+};
+
+// Verdict of the pre-count exposure gates: whether the triggering frame was
+// consumed (sensor state and stream may have moved — grab fresh) or survives
+// to the attack/binding stages.
+enum class PreCountCorrection {
+    NotNeeded,
+    Corrected,
+    Interrupted,
+};
+
+// Verdict of an identity-binding attempt on an anchor/consensus frame.
+enum class BindingDisposition {
+    Bound,        // binding accepted; frame proceeds to PAD counting
+    Discard,      // embedding or identity miss — retry pace, frame not counted
+    RetryTimedOut,// 2 s of continuous identity misses
+    Rejected,     // terminal parent rejection
+};
+
+// Shared mutable state of the counted-frame loop and its stage helpers.
+// Main-thread-only, like the loop itself.
+struct AuthLoopState {
+    explicit AuthLoopState(LivenessTiming::TimePoint windowStart) : timing(windowStart) {}
+
+    LivenessTiming timing;
+    int totalChecked = 0;
+    unsigned int bindingCount = 0;
+    bool havePrevRect = false;
+    FaceRect prevRect{};
+    // The parent verification callback returns Retry only for "no enrolled
+    // identity matches this face". A face that keeps missing every enrolled
+    // identity never leaves the anchor frame, so no frame is ever counted and
+    // the persistent-attack timer fires without a single PAD verdict — that
+    // outcome is an unknown face, not a PAD failure, and must not report
+    // the misleading liveness message.
+    bool sawUnknownFace = false;
+    std::wstring identityError;
+    // Capture conditions for the outcome log lines: the first identity
+    // miss (what the unknown-face failure looked like) and the latest
+    // accepted binding (what a passing frame looked like).
+    long retryFaceWidth = 0;
+    float retryFaceLuma = -1.0f;
+    bool haveRetryConditions = false;
+    long boundFaceWidth = 0;
+    float boundFaceLuma = -1.0f;
+    // Pre-binding exposure correction budget (2026-09-19 17:45:46
+    // post-mortem): the pre-loop tune needs a face to measure, so a
+    // trigger frame without one (late walk-up, dark-face miss) or
+    // brightness that drifts after it left the loop matching a dark chip
+    // until the attack timer killed the round — identity distance 0.989
+    // at face luma 18. While NO frame has been counted yet, nothing
+    // contributes to PAD or identity evidence, so sensor writes are still
+    // safe; an out-of-band face luma earns one full tune pass (the gate
+    // lives in CorrectExposureBeforeFirstCount, before the first binding
+    // attempt). Two passes bound the worst case; a face that stays out of
+    // band after them proceeds exactly like the legacy loop.
+    int lateTuneBudget = 2;
+    bool sensorKnobsWired = false;
+};
+
 struct PreparedAuthFrames;
 namespace auth_diagnostics { struct ExposureTimingProfile; }
 
@@ -104,6 +184,35 @@ private:
                        const SensorKnobs& sensorKnobs,
                        const std::function<bool()>& interrupted,
                        const decltype(AuthPipelineCallbacks::grabFrame)& grabFrame);
+
+    // Stage helpers Run is split into, by phase: loop gates, the pre-count
+    // exposure corrections, identity binding, PAD counting, and the final
+    // outcome mapping. All run on the camera's COM thread inside Run's
+    // try block.
+    std::optional<AuthLoopStop> CheckLoopGates(AuthLoopState& state,
+                                               const std::function<bool()>& interrupted);
+    AuthLoopStop RunLivenessLoop(AuthLoopState& state,
+                                 AuthFrameStream& frames,
+                                 PreparedAuthFrames& prepared,
+                                 const SensorKnobs& sensorKnobs,
+                                 const std::function<bool()>& interrupted,
+                                 auth_diagnostics::NormLog& normLog);
+    PreCountCorrection CorrectExposureBeforeFirstCount(
+        AuthLoopState& state, PreparedAuthFrames& prepared, const AuthFrame& cur,
+        const SensorKnobs& sensorKnobs, const std::function<bool()>& interrupted);
+    BindingDisposition AttemptBinding(AuthLoopState& state, const AuthFrame& cur,
+                                      const FaceRect& faceRect,
+                                      std::future<float>& scoreFuture,
+                                      auth_diagnostics::NormLog& normLog);
+    std::optional<AuthLoopStop> PrefetchNextFrame(
+        AuthLoopState& state, AuthFrameStream& frames, AuthFrame& next,
+        std::future<float>& scoreFuture, int totalChecks,
+        const std::function<bool()>& interrupted);
+    std::optional<AuthLoopStop> CountPadFrame(AuthLoopState& state,
+                                              std::future<float>& scoreFuture,
+                                              const FaceRect& faceRect,
+                                              const std::function<bool()>& interrupted);
+    AuthPipelineResult ResolveOutcome(AuthLoopStop stop, const AuthLoopState& state) const;
 
     OnnxDetector& m_detector;
     OnnxRecognizer& m_recognizer;
