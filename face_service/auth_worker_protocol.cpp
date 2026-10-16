@@ -225,8 +225,8 @@ std::vector<uint8_t> EncodeConfig(const WorkerConfig& config) {
     writer.WriteI32(config.cameraRotation);
     writer.WriteFloat(config.antiSpoofThreshold);
     writer.WriteI32(config.authTimeoutSeconds);
-    writer.WriteU32(config.lowLightEnhance ? 1U : 0U);
     writer.WriteWString(config.cameraDevice);
+    writer.WriteI32(config.fastUnlock ? 1 : 0);
     return writer.Data();
 }
 
@@ -234,23 +234,23 @@ bool DecodeConfig(const std::vector<uint8_t>& payload, WorkerConfig& config) {
     PayloadReader reader(payload);
     int32_t rotation = 0;
     int32_t timeout = 0;
-    uint32_t lowLight = 0;
+    int32_t fastUnlock = 0;
     if (!reader.ReadI32(rotation) ||
         !reader.ReadFloat(config.antiSpoofThreshold) || !reader.ReadI32(timeout) ||
-        !reader.ReadU32(lowLight) ||
-        !reader.ReadWString(config.cameraDevice) ||
+        !reader.ReadWString(config.cameraDevice) || !reader.ReadI32(fastUnlock) ||
         !reader.Done()) {
         return false;
     }
     if ((rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) ||
         !std::isfinite(config.antiSpoofThreshold) ||
         config.antiSpoofThreshold < 0.15f || config.antiSpoofThreshold > 0.50f ||
-        timeout < 1 || timeout > 60 || lowLight > 1) {
+        timeout < 1 || timeout > 60 ||
+        (fastUnlock != 0 && fastUnlock != 1)) {
         return false;
     }
     config.cameraRotation = rotation;
     config.authTimeoutSeconds = timeout;
-    config.lowLightEnhance = lowLight != 0;
+    config.fastUnlock = (fastUnlock != 0);
     return true;
 }
 
@@ -267,20 +267,31 @@ bool DecodeWString(const std::vector<uint8_t>& payload, std::wstring& value,
 }
 
 std::vector<uint8_t> EncodeMatchProbe(unsigned int bindingIndex,
-                                      const std::vector<float>& embedding) {
+                                      const std::vector<float>& embedding,
+                                      float preNorm,
+                                      float yawDeg,
+                                      float pitchDeg) {
     PayloadWriter writer;
     writer.WriteU32(bindingIndex);
     writer.WriteFloatVector(embedding);
+    writer.WriteFloat(preNorm);
+    writer.WriteFloat(yawDeg);
+    writer.WriteFloat(pitchDeg);
     return writer.Data();
 }
 
 bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
                       unsigned int& bindingIndex,
-                      std::vector<float>& embedding) {
+                      std::vector<float>& embedding,
+                      float& preNorm,
+                      float& yawDeg,
+                      float& pitchDeg) {
     PayloadReader reader(payload);
     uint32_t rawIndex = 0;
     if (!reader.ReadU32(rawIndex) || rawIndex > 2 ||
-        !reader.ReadFloatVector(embedding, kEmbeddingDimension) || !reader.Done() ||
+        !reader.ReadFloatVector(embedding, kEmbeddingDimension) ||
+        !reader.ReadFloat(preNorm) || !reader.ReadFloat(yawDeg) ||
+        !reader.ReadFloat(pitchDeg) || !reader.Done() ||
         embedding.size() != kEmbeddingDimension) {
         return false;
     }
@@ -295,6 +306,16 @@ bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
         static_cast<double>(kMaxEmbeddingNorm) * kMaxEmbeddingNorm;
     if (!std::isfinite(normSquared) || normSquared < minNormSquared ||
         normSquared > maxNormSquared) return false;
+    // The quality signal travels alongside the (unit-length) embedding: a
+    // finite, strictly positive value lets the parent gate template updates
+    // on recognizer norm without recomputing it from the normalized vector.
+    if (!std::isfinite(preNorm) || preNorm <= 0.0f) return false;
+    // Pose estimates come from atan-based weak-perspective models, so the
+    // physical range is ±90°; anything outside is wire corruption.
+    if (!std::isfinite(yawDeg) || std::fabs(yawDeg) > 90.0f ||
+        !std::isfinite(pitchDeg) || std::fabs(pitchDeg) > 90.0f) {
+        return false;
+    }
     bindingIndex = rawIndex;
     return true;
 }

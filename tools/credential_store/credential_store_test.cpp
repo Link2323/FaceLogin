@@ -1,6 +1,7 @@
 #include "credential_store.h"
 
 #include "dpapi_util.h"
+#include "config_util.h"
 
 #include <windows.h>
 
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -23,14 +25,14 @@ void Check(bool condition, const char* description) {
     }
 }
 
-std::vector<float> Basis(size_t index, size_t dimension = 512) {
+std::vector<float> Basis(size_t index, size_t dimension = 128) {
     std::vector<float> value(dimension, 0.0f);
     value[index] = 1.0f;
     return value;
 }
 
 std::vector<float> Midpoint(size_t first, size_t second) {
-    std::vector<float> value(512, 0.0f);
+    std::vector<float> value(128, 0.0f);
     const float component = 1.0f / std::sqrt(2.0f);
     value[first] = component;
     value[second] = component;
@@ -75,9 +77,38 @@ void WriteUnsupportedDatabase(const std::wstring& root, uint32_t version) {
     Write(file, kFileMagic);
     Write(file, version);
     Write(file, count);
+    Write(file, facelogin::kRecognizerModelTag);
 }
 
-void WriteValidV4Record(std::ofstream& file, const std::wstring& username,
+void WriteLegacyDatabase(const std::wstring& root, uint32_t version) {
+    std::ofstream file(root + L"\\data\\users.dat", std::ios::binary | std::ios::trunc);
+    Write(file, kFileMagic);
+    Write(file, version);
+    Write(file, uint32_t{1});
+    WriteText(file, L"legacy");
+    WriteText(file, L"");
+    WriteText(file, L"SID-LEGACY");
+    const auto password = facelogin::DpapiUtil::Protect(L"legacy-test-password");
+    Write(file, static_cast<uint32_t>(password.size()));
+    file.write(reinterpret_cast<const char*>(password.data()), password.size());
+    Write(file, uint32_t{1}); // face count
+    Write(file, uint32_t{1}); // face ID
+    WriteText(file, L"front");
+    Write(file, uint32_t{512});
+    const auto embedding = Basis(0, 512);
+    file.write(reinterpret_cast<const char*>(embedding.data()), embedding.size() * sizeof(float));
+    if (version == 5) {
+        Write(file, 0.0f);
+        Write(file, 0.0f);
+    }
+}
+
+std::string ReadDatabaseBytes(const std::wstring& root) {
+    std::ifstream file(root + L"\\data\\users.dat", std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+void WriteValidV6Record(std::ofstream& file, const std::wstring& username,
                         const std::wstring& sid) {
     WriteText(file, username);
     WriteText(file, L"");
@@ -88,7 +119,7 @@ void WriteValidV4Record(std::ofstream& file, const std::wstring& username,
     file.write(reinterpret_cast<const char*>(encryptedPassword), sizeof(encryptedPassword));
     const uint32_t faceCount = 1;
     const uint32_t faceId = 1;
-    const uint32_t embeddingLength = 512;
+    const uint32_t embeddingLength = 128;
     Write(file, faceCount);
     Write(file, faceId);
     WriteText(file, L"face");
@@ -96,6 +127,9 @@ void WriteValidV4Record(std::ofstream& file, const std::wstring& username,
     const auto embedding = Basis(0);
     file.write(reinterpret_cast<const char*>(embedding.data()),
                static_cast<std::streamsize>(embedding.size() * sizeof(float)));
+    const float yaw = 0.0f, pitch = 0.0f;
+    Write(file, yaw);
+    Write(file, pitch);
 }
 
 void TestIdentityMatching() {
@@ -113,6 +147,8 @@ void TestIdentityMatching() {
     auto identity = store.FindBestIdentity(aliceProbe.data(), aliceProbe.size(), 0.80f);
     Check(identity && identity->sid == L"SID-A",
           "identity-only match chooses the closest account without a credential field");
+    Check(identity && identity->faceId == 2 && identity->faceLabel == L"脸2",
+          "identity match reports which stored face won (progressive learning)");
 
     const auto ambiguous = Midpoint(1, 2);
     float ratioMissDistance = -1.0f;
@@ -121,7 +157,7 @@ void TestIdentityMatching() {
           "best/second account ratio rejects an ambiguous probe");
     Check(ratioMissDistance > 0.70f && ratioMissDistance < 0.80f,
           "outBestDistance reports the closest distance on ratio rejection");
-    const auto legacyProbe = Basis(0, 128);
+    const auto legacyProbe = Basis(0, 512);
     float legacyMissDistance = -1.0f;
     Check(!store.FindBestIdentity(legacyProbe.data(), legacyProbe.size(), 0.80f,
                                   &legacyMissDistance),
@@ -150,12 +186,22 @@ void TestIdentityMatching() {
 }
 
 void TestThresholds() {
-    Check(std::fabs(facelogin::EmbeddingThresholdForDim(0.80f, 512) - 0.80f) < 0.0001f,
-          "calibrated 512-D threshold is preserved");
-    Check(std::fabs(facelogin::EmbeddingThresholdForDim(0.20f, 512) - 0.80f) < 0.0001f,
-          "unsafe-tight 512-D threshold returns safe default");
-    Check(std::fabs(facelogin::EmbeddingThresholdForDim(1.20f, 512) - 1.00f) < 0.0001f,
-          "unsafe-loose 512-D threshold is clamped");
+    Check(facelogin::EmbeddingThresholdForDim(0.80f, 128) == 0.80f,
+          "explicit SFace threshold is preserved");
+    Check(facelogin::EmbeddingThresholdForDim(0.20f, 128) == 1.00f,
+          "out-of-range SFace threshold resets to trial default");
+    Check(facelogin::EmbeddingThresholdForDim(1.20f, 128) == 1.00f,
+          "loose SFace threshold stays below trial ceiling");
+    Check(facelogin::EmbeddingThresholdForDim(1.00f, 512) == 0.0f,
+          "R50 dimensions cannot authenticate with this build");
+    auto old = facelogin::ConfigFromJson(R"({"match_threshold":0.8,"ema_learning":true,"camera_rotation":90})");
+    Check(old.match_threshold == 1.0f && !old.ema_learning && old.camera_rotation == 90,
+          "old config resets recognizer settings while retaining camera settings");
+    auto fresh = facelogin::ConfigFromJson(R"({"recognizer_model":"opencv-sface-2021dec","match_threshold":0.95,"ema_learning":true})");
+    Check(fresh.match_threshold == 0.95f && !fresh.ema_learning && !fresh.failure_learning,
+          "SFace trial preserves its own threshold and cannot enable unvalidated learning");
+    Check(facelogin::ConfigFromJson(facelogin::ConfigToJson(fresh)).match_threshold == 0.95f,
+          "SFace config model marker survives serialization");
 }
 
 void TestPasswordBlobValidation() {
@@ -167,7 +213,118 @@ void TestPasswordBlobValidation() {
           "single-byte legacy sentinel is rejected");
 }
 
-void TestV4RoundTripAndReload() {
+void TestDeleteFace() {
+    facelogin::CredentialStore store;
+    const auto password = facelogin::DpapiUtil::Protect(L"test-password");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", password,
+                        Basis(0)), "first Alice face is added");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", password,
+                        Basis(1)), "second Alice face is added");
+    // Zoe is deliberately the LAST record: deleting her only face used to
+    // log rec.username after the vector erase — UB exactly in this position.
+    Check(store.AddFace(L"zoe", L"zoe@example.test", L"SID-Z", password,
+                        Basis(2)), "Zoe face is added as the last account");
+
+    Check(store.DeleteFace(L"SID-A", 1), "one of several faces is deleted");
+    Check(store.GetFaceCount(L"SID-A") == 1,
+          "account survives while at least one face remains");
+    Check(!store.DeleteFace(L"SID-A", 9), "unknown face id is rejected");
+    Check(!store.DeleteFace(L"SID-MISSING", 1), "unknown account is rejected");
+
+    Check(store.DeleteFace(L"SID-Z", 1), "last account's only face is deleted");
+    Check(store.GetFaceCount(L"SID-Z") == 0,
+          "account is dropped together with its last face");
+    Check(!store.LoadCredentialForSid(L"SID-Z"), "dropped account fails closed");
+
+    Check(store.DeleteFace(L"SID-A", 2), "remaining Alice face is deleted");
+    Check(store.GetUserCount() == 0,
+          "database empties after the last account loses its last face");
+}
+
+// Unit vector tilted `perturb` away from a basis axis (still ~orthogonal to
+// every other axis — distance to Basis(index) ≈ atan(perturb)).
+std::vector<float> NearBasis(size_t index, float perturb) {
+    std::vector<float> value(128, 0.0f);
+    value[index] = 1.0f;
+    value[(index + 7) % 128] = perturb;
+    float norm = 0.0f;
+    for (float v : value) norm += v * v;
+    norm = std::sqrt(norm);
+    for (float& v : value) v /= norm;
+    return value;
+}
+
+float VectorDistance(const std::vector<float>& a, const std::vector<float>& b) {
+    float sum = 0.0f;
+    for (size_t i = 0; i < a.size(); i++) {
+        const float diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return std::sqrt(sum);
+}
+
+void TestUpdateTemplateFace() {
+    const std::wstring root = MakeTempRoot();
+    Check(!root.empty(), "temp root created for template update tests");
+    if (root.empty()) return;
+
+    facelogin::CredentialStore store;
+    store.SetDataDir(root);
+    const auto password = facelogin::DpapiUtil::Protect(L"test-password");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", password,
+                        Basis(0), L"正面"),
+          "front face is added for update tests");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", {},
+                        Basis(1), L"左转"),
+          "left face is added for update tests");
+
+    const auto inCone = NearBasis(0, 0.10f);   // ≈0.10 from Basis(0), ≈1.40 from Basis(1)
+    Check(store.UpdateTemplateFace(L"SID-A", 1, inCone),
+          "same-pose EMA update is accepted");
+
+    // Pair-spacing observation (2026-09-04): replacing face #1 with a vector
+    // only ~0.10 from face #2 collapses the pair below
+    // kCrossAngleSentinelDist — the update COMMITS anyway (a rejecting
+    // sentinel wedged the whole learning channel on legacy near-pair
+    // accounts; convergence is fail-safe coverage loss, docs red line 3).
+    const auto nearFace2 = NearBasis(1, 0.10f);
+    Check(store.UpdateTemplateFace(L"SID-A", 1, nearFace2),
+          "converging update commits (pair distance is observation-only)");
+    {
+        const auto& users = store.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 2 &&
+                  VectorDistance(users[0].faces[0].embedding, nearFace2) < 1e-5f,
+              "observation-only update actually replaces the template");
+    }
+
+    Check(!store.UpdateTemplateFace(L"SID-MISSING", 1, inCone),
+          "unknown SID update is rejected");
+    Check(!store.UpdateTemplateFace(L"SID-A", 9, inCone),
+          "unknown face id update is rejected");
+    Check(!store.UpdateTemplateFace(L"SID-A", 1, std::vector<float>(256, 0.5f)),
+          "dimension-mismatched update is rejected");
+
+    // Persisted: a fresh store reloads the updated template with ids/labels
+    // and the password intact (learning must never corrupt the credential).
+    Check(store.SaveDatabase(), "updated database saves");
+    {
+        facelogin::CredentialStore reloaded;
+        reloaded.SetDataDir(root);
+        Check(reloaded.LoadDatabase(), "updated database reloads");
+        const auto& users = reloaded.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 2 &&
+                  users[0].faces[0].label == L"正面" &&
+                  users[0].faces[1].label == L"左转" &&
+                  VectorDistance(users[0].faces[0].embedding, nearFace2) < 1e-5f,
+              "updated template round-trips with labels and slot order");
+        auto credential = reloaded.LoadCredentialForSid(L"SID-A", 0.1f);
+        Check(credential && credential->password == L"test-password",
+              "password survives template updates");
+    }
+    CleanupTempRoot(root);
+}
+
+void TestV6RoundTripAndReload() {
     const std::wstring root = MakeTempRoot();
     Check(!root.empty(), "temporary credential-store directory is created");
     if (root.empty()) return;
@@ -178,27 +335,28 @@ void TestV4RoundTripAndReload() {
     Check(writer.AddFace(L"roundtrip", L"roundtrip@example.test", L"SID-R",
                          encrypted, Basis(0), L"front"),
           "round-trip record is added");
-    Check(writer.SaveDatabase(), "V4 database saves");
+    Check(writer.SaveDatabase(), "V6 database saves");
 
     facelogin::CredentialStore reader;
     reader.SetDataDir(root);
     Check(reader.LoadDatabase() && reader.GetUserCount() == 1 &&
           reader.GetFaceCount(L"SID-R") == 1,
-          "V4 database reload preserves account and face");
+          "V6 database reload preserves account and face");
     const auto credential = reader.LoadCredentialForSid(L"SID-R");
     Check(credential && credential->password == L"round-trip-password",
-          "V4 reload preserves decryptable credential");
+          "V6 reload preserves decryptable credential");
 
     // Replace the file with a valid empty database. A previously authorized
     // SID must disappear immediately after the reload.
     {
         std::ofstream file(root + L"\\data\\users.dat",
                            std::ios::binary | std::ios::trunc);
-        const uint32_t version = 4;
+        const uint32_t version = 6;
         const uint32_t count = 0;
         Write(file, kFileMagic);
         Write(file, version);
         Write(file, count);
+        Write(file, facelogin::kRecognizerModelTag);
     }
     Check(reader.LoadDatabase() && reader.GetUserCount() == 0,
           "valid empty database atomically clears old records");
@@ -207,17 +365,93 @@ void TestV4RoundTripAndReload() {
     CleanupTempRoot(root);
 }
 
+void TestV6NominalAnglesAndLegacyRead() {
+    const std::wstring root = MakeTempRoot();
+    Check(!root.empty(), "temp root created for V6 nominal-angle tests");
+    if (root.empty()) return;
+
+    // V6 round trip: nominal angles persist per face.
+    {
+        facelogin::CredentialStore writer;
+        writer.SetDataDir(root);
+        const auto encrypted = facelogin::DpapiUtil::Protect(L"v5-password");
+        Check(writer.AddFace(L"v5", L"", L"SID-V5", encrypted, Basis(0),
+                             L"正面", nullptr, 0.0f, 0.0f),
+              "front face with nominal angles is added");
+        Check(writer.AddFace(L"v5", L"", L"SID-V5", {}, Basis(1),
+                             L"左转", nullptr, 30.0f, 0.0f),
+              "left face with nominal yaw +30 is added");
+        Check(writer.SaveDatabase(), "V6 database saves");
+        facelogin::CredentialStore reader;
+        reader.SetDataDir(root);
+        Check(reader.LoadDatabase(), "V6 database reloads");
+        const auto& users = reader.GetUsers();
+        Check(users.size() == 1 && users[0].faces.size() == 2 &&
+                  users[0].faces[0].nominalYaw == 0.0f &&
+                  users[0].faces[1].nominalYaw == 30.0f &&
+                  users[0].faces[0].nominalPitch == 0.0f &&
+                  users[0].faces[1].nominalPitch == 0.0f,
+              "V6 nominal angles round-trip per face");
+        auto credential = reader.LoadCredentialForSid(L"SID-V5");
+        Check(credential && credential->password == L"v5-password",
+              "V6 reload preserves decryptable credential");
+
+        // Landing-clarity input: the winning account's second-nearest face
+        // is exposed on IdentityMatch; a probe near face #1 reports face #2's
+        // distance as the runner-up.
+        const auto probe = NearBasis(0, 0.05f);
+        auto identity = reader.FindBestIdentity(probe.data(), probe.size(), 0.80f);
+        Check(identity && identity->faceId == 1 &&
+                  identity->secondFaceDistance > 1.30f,
+              "identity match reports the winning account's runner-up face");
+        // Single-face account: negative runner-up = clarity gate passes.
+        facelogin::CredentialStore single;
+        single.SetDataDir(root);
+        const auto encrypted2 = facelogin::DpapiUtil::Protect(L"v5b");
+        Check(single.AddFace(L"solo", L"", L"SID-SOLO", encrypted2, Basis(4)),
+              "single-face account is added");
+        auto solo = single.FindBestIdentity(Basis(4).data(), 128, 0.80f);
+        Check(solo && solo->secondFaceDistance < 0.0f,
+              "single-face account reports no runner-up face");
+    }
+
+    // Model changes force re-enrollment; even an old header with accounts
+    // must expose no identities and leave its bytes untouched.
+    for (uint32_t version : {4u, 5u}) {
+        WriteLegacyDatabase(root, version);
+        const auto originalBytes = ReadDatabaseBytes(root);
+        facelogin::CredentialStore reader;
+        reader.SetDataDir(root);
+        Check(reader.LoadDatabase() && reader.GetUserCount() == 0,
+              "old R50 databases remain inactive without conversion");
+        Check(!reader.LoadCredentialForSid(L"SID-LEGACY"),
+              "old credentials cannot authenticate through the new store");
+        Check(ReadDatabaseBytes(root) == originalBytes,
+              "loading an old database preserves its original bytes");
+    }
+    {
+        std::ofstream file(root + L"\\data\\users.dat", std::ios::binary | std::ios::trunc);
+        Write(file, kFileMagic);
+        const uint32_t version = 6, count = 0, wrongTag = 0;
+        Write(file, version); Write(file, count); Write(file, wrongTag);
+    }
+    facelogin::CredentialStore wrong;
+    wrong.SetDataDir(root);
+    Check(!wrong.LoadDatabase(), "a V6 file with a different recognizer is rejected");
+    CleanupTempRoot(root);
+}
+
 void TestUnsupportedVersionsAreRejected() {
     const std::wstring root = MakeTempRoot();
     Check(!root.empty(), "unsupported-version fixture directory is created");
     if (root.empty()) return;
 
-    for (uint32_t version = 1; version <= 3; ++version) {
+    for (uint32_t version : {1u, 2u, 3u, 7u}) {
         WriteUnsupportedDatabase(root, version);
         facelogin::CredentialStore store;
         store.SetDataDir(root);
         Check(!store.LoadDatabase() && store.GetUserCount() == 0,
-              "non-V4 database version is rejected");
+              "unsupported database version is rejected");
     }
     CleanupTempRoot(root);
 }
@@ -233,12 +467,13 @@ void TestMalformedReloadIsTransactional() {
     {
         std::ofstream file(root + L"\\data\\users.dat",
                            std::ios::binary | std::ios::trunc);
-        const uint32_t version = 4;
+        const uint32_t version = 6;
         const uint32_t count = 2;
         Write(file, kFileMagic);
         Write(file, version);
         Write(file, count);
-        WriteValidV4Record(file, L"first", L"SID-FIRST");
+        Write(file, facelogin::kRecognizerModelTag);
+        WriteValidV6Record(file, L"first", L"SID-FIRST");
         const uint32_t secondNameLength = 8;
         Write(file, secondNameLength);
     }
@@ -252,11 +487,12 @@ void TestMalformedReloadIsTransactional() {
     {
         std::ofstream file(root + L"\\data\\users.dat",
                            std::ios::binary | std::ios::trunc);
-        const uint32_t version = 4;
+        const uint32_t version = 6;
         const uint32_t count = static_cast<uint32_t>(facelogin::kMaxUsers + 1);
         Write(file, kFileMagic);
         Write(file, version);
         Write(file, count);
+        Write(file, facelogin::kRecognizerModelTag);
     }
     Check(!store.LoadDatabase() && store.GetUserCount() == 0,
           "oversized database user count fails closed");
@@ -269,7 +505,10 @@ int wmain() {
     TestIdentityMatching();
     TestThresholds();
     TestPasswordBlobValidation();
-    TestV4RoundTripAndReload();
+    TestDeleteFace();
+    TestV6RoundTripAndReload();
+    TestUpdateTemplateFace();
+    TestV6NominalAnglesAndLegacyRead();
     TestUnsupportedVersionsAreRejected();
     TestMalformedReloadIsTransactional();
     if (g_failures != 0) {

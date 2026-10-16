@@ -32,6 +32,12 @@ add_compile_definitions(
 
 # Global compiler options
 if(MSVC)
+    # CRT linkage is dynamic (/MD[d]) tree-wide; set once here instead of
+    # per-target boilerplate. This variable initializes the target property
+    # at target creation, so it must precede every add_subdirectory below.
+    # credential_provider overrides this to the static CRT (/MT) — see the
+    # rationale in its CMakeLists.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
     add_compile_options(/W4 /WX- /MP)
     # VS 18 (VS 2026): /MP used to orphan cl.exe at zero CPU while the MSBuild
     # Tracker was enabled. With TrackFileAccess=false + ErrorReporting=None
@@ -55,6 +61,8 @@ if(MSVC)
 endif()
 
 add_subdirectory(common)
+add_subdirectory(vision)
+add_subdirectory(storage)
 add_subdirectory(face_service)
 add_subdirectory(credential_provider)
 add_subdirectory(enrollment_app)
@@ -67,15 +75,34 @@ function(add_development_tool directory target)
 endfunction()
 
 add_development_tool(tools/pad_calibration PadCalibration)
-add_development_tool(tools/embedding_test EmbeddingTest)
 add_development_tool(tools/camera_lifecycle CameraLifecycleTest)
-add_development_tool(tools/pipe_lifecycle PipeLifecycleTest)
-add_development_tool(tools/ort_memory OrtMemoryTest)
 add_development_tool(tools/auth_worker_protocol AuthWorkerProtocolTest)
 add_development_tool(tools/credential_store CredentialStoreTest)
-add_development_tool(tools/auth_worker_lifecycle AuthWorkerLifecycleTest)
-add_development_tool(tools/credential_provider_policy CredentialProviderInteractionPolicyTest)
+add_development_tool(tools/template_learner TemplateLearnerTest)
 add_development_tool(tools/model_integrity ModelIntegrityTest)
 add_development_tool(tools/ipc_protocol IpcProtocolTest)
 add_development_tool(tools/liveness_timing LivenessTimingTest)
+add_development_tool(tools/auth_pipeline AuthPipelineTest)
+add_development_tool(tools/authentication_residency AuthenticationResidencyTest)
 add_development_tool(tools/exposure_warmup ExposureWarmupTest)
+add_development_tool(tools/face_gain_tune FaceGainTuneTest)
+add_development_tool(tools/enrollment_support EnrollmentSupportTest)
+
+# Hardware-free regression suite. Camera probes remain explicit manual targets.
+enable_testing()
+set(FACELOGIN_AUTOMATED_TESTS
+    AuthWorkerProtocolTest CredentialStoreTest TemplateLearnerTest
+    ModelIntegrityTest IpcProtocolTest LivenessTimingTest AuthPipelineTest
+    ExposureWarmupTest FaceGainTuneTest EnrollmentSupportTest
+    AuthenticationResidencyTest
+)
+foreach(test_target IN LISTS FACELOGIN_AUTOMATED_TESTS)
+    add_test(NAME ${test_target} COMMAND $<TARGET_FILE:${test_target}>)
+    set_tests_properties(${test_target} PROPERTIES TIMEOUT 120 LABELS "automated")
+endforeach()
+add_custom_target(check
+    COMMAND ${CMAKE_CTEST_COMMAND} -C $<CONFIG> --output-on-failure -L automated
+    DEPENDS ${FACELOGIN_AUTOMATED_TESTS}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    USES_TERMINAL
+)

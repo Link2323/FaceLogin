@@ -6,7 +6,7 @@
 
 - 服务端：`FaceLoginService.exe`
 - 认证客户端：LogonUI 中加载的 `FaceLoginCredentialProvider.dll`
-- 管理客户端：`FaceLoginConsole.exe`，当前通过管道发送 `RELOAD_DB` / `CONFIG_RELOAD`
+- 管理客户端：`FaceLoginConsole.exe`，当前通过管道发送 `RELOAD_DB` / `CONFIG_RELOAD` / `LEARNING_STATUS`
 
 安装器不参与运行期 IPC。注册控制台的服务日志页面直接读取 `<DataPath>\log\service.log`，以避开固定消息缓冲区限制。
 
@@ -35,11 +35,15 @@
 ## 访问控制
 
 - 服务模式下有效主体为 SYSTEM + Administrators。
-- standalone 模式会尝试额外加入当前运行用户。
+- ACL 构造还会尝试加入当前进程用户；正式服务以 SYSTEM 运行。
 - 管道拒绝远程客户端。
 - 明文密码只存在于认证成功消息和短生命周期内存中；禁止记录消息全文，使用后必须清零。
 
 ## 消息表
+
+单次认证上限由 `ipc::AUTH_TIMEOUT_SECONDS` 定义，当前为 **5 秒**。Credential Provider 从 `StartAuth` 进入认证状态起使用单调时钟计时，连接、发送请求和等待终态共用同一截止时间；`STATUS:` 不延长预算。服务收到 `AUTH_REQUEST` 后建立本轮截止时间，模型等待、相机初始化、曝光准备、身份绑定和 PAD 均计入；阶段切换不重新计时。
+
+时限耗尽返回 `AUTH_TIMEOUT`。即使服务不回应，CP 的后台 overlapped 读取也在自身截止时间主动取消 I/O、关闭管道，并以本地 `AUTH_TIMEOUT` 驱动同一失败状态，不依赖 LogonUI 再次调用 `GetSerialization`。截止时间之后收到的终态不用于放行凭据；结束本轮后按原重试交互发起新一轮。Windows 接收凭据后的登录处理不属于人脸识别预算。
 
 | 消息 | 方向 | 当前行为 |
 |---|---|---|
@@ -51,6 +55,7 @@
 | `AUTH_ACK` | CP → 服务 | CP 已复制并擦除终态传输缓冲区；服务最多等待 2 秒 |
 | `RELOAD_DB` / `RELOAD_OK` | 控制台 ↔ 服务 | 凭据数据库保存后热重载；客户端必须保持双向连接并等到 `RELOAD_OK`，不能写完即关闭 |
 | `CONFIG_RELOAD` / `CONFIG_RELOAD_OK` / `CONFIG_RELOAD_ERROR` | 控制台 ↔ 服务 | 配置热重载；无效活体配置保持 fail-closed |
+| `LEARNING_STATUS` | 控制台 ↔ 服务 | 只读查询渐进式学习状态；响应为单条 JSON（`enabled`/`gate_cap`/`faces[]`/`recent[]`，无 OK/ERROR 后缀），服务端同步组装。数据为内存快照，服务重启清零（持久事实源是日志）。客户端读取后回 `CONTROL_ACK`。管道单实例，控制台侧按 10s 节流，不得变成高频轮询 |
 | `CONTROL_ACK` | 控制台 → 服务 | 控制台已读取 reload 响应；服务最多等待 2 秒 |
 
 ## `AUTH_SUCCESS` 当前格式

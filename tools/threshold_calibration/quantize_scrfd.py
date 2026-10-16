@@ -2,9 +2,13 @@
 """Quantize the SCRFD detector (det_10g_gnkps.onnx) to INT8 and validate.
 
 Pipeline fidelity: calibration inputs are real photos resized with the
-production direct-stretch 640x640 path (calibrate.py / onnx_models.cpp:238-252,
+production direct-stretch 512x512 path (mirrors onnx_models.cpp:241-252,
 BGR planar, (p - 127.5) / 128).  The model is opset 11, so per-tensor QDQ
-static quantization applies (same constraint as r50).
+static quantization applies.
+
+The SCRFD decode below is a faithful port of vision/onnx_models.cpp:186-428;
+it moved here from calibrate.py when that (retired-recognizer) calibration
+tool was removed.
 
 Validation: the same batch of photos is run through FP32 vs INT8 and compared
 per photo: largest-face box IoU, score delta, and detection agreement.  SCRFD
@@ -21,6 +25,7 @@ import argparse
 import statistics
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -29,25 +34,253 @@ import onnxruntime as ort
 from onnxruntime.quantization import CalibrationDataReader, QuantFormat, QuantType
 from onnxruntime.quantization import quantize_static
 
-sys.path.insert(0, str(Path(__file__).parent))
-import calibrate  # noqa: E402
-
-DEFAULT_MODELS_DIR = calibrate.DEFAULT_MODELS_DIR
+DEFAULT_MODELS_DIR = Path(__file__).resolve().parents[2] / "assets" / "models"
 DEFAULT_IMAGES = Path(__file__).parent / "data" / "lfw_subset"
-SCRFD_INPUT_SIZE = calibrate.SCRFD_INPUT_SIZE  # 640
 
 INTRA_OP_THREADS = 8  # production OnnxThreadCount() cap
 BENCH_REPEATS = 20
 BENCH_WARMUP = 5
 
+# ---------------------------------------------------------------------------
+# SCRFD constants + decode — faithful port of vision/onnx_models.cpp:186-428.
+# ---------------------------------------------------------------------------
+
+# vision/onnx_models.cpp:244 — SCRFD input is a fixed square (512 since 2026-08).
+SCRFD_INPUT_SIZE = 512  # production detect input (was 640; 512 validated
+# 2026-08: 60/60 detections, box IoU 0.96, detect time -34% on weak CPUs)
+# vision/onnx_models.cpp:311, 379.
+SCRFD_SCORE_THRESHOLD = 0.5
+SCRFD_NMS_IOU = 0.5
+# Three strides, two anchors per cell. onnx_models.cpp:330-344.
+SCRFD_STRIDES = (8, 16, 32)
+SCRFD_NUM_ANCHORS = 2
+
+# vision/onnx_models.cpp:241-252. NOTE the divisor is 128.0, not 127.5.
+SCRFD_NORM_MEAN = 127.5
+SCRFD_NORM_DIVISOR = 128.0
+
+
+def imread_unicode(path: Path) -> np.ndarray | None:
+    """cv2.imread that survives non-ASCII (Chinese) paths on Windows.
+
+    cv2.imread on Windows silently returns None for paths containing
+    characters outside the system code page. np.fromfile + cv2.imdecode
+    bypasses the libc FILE* layer that causes this.
+    """
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def load_image(path: Path, rotate: int = 0) -> np.ndarray | None:
+    """Load an image with optional 90-degree rotation, Unicode-path safe.
+
+    `rotate` is clockwise degrees, one of {0, 90, 180, 270}. Useful when the
+    capture device stored frames sideways (e.g. portrait phone video saved as
+    landscape) — SCRFD is trained on upright faces and produces garbage
+    keypoints/bboxes on rotated faces, which would corrupt the embedding.
+    """
+    bgr = imread_unicode(path)
+    if bgr is None:
+        return None
+    if rotate == 90:
+        return cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)
+    if rotate == 180:
+        return cv2.rotate(bgr, cv2.ROTATE_180)
+    if rotate == 270:
+        return cv2.rotate(bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return bgr
+
+
+@dataclass(frozen=True)
+class Detection:
+    """One face: bbox (x1,y1,x2,y2) + score + 5 keypoints (x,y interleaved)."""
+
+    score: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    kps: np.ndarray  # shape (10,), float32
+
+
+class ScrfdDetector:
+    """SCRFD 10g gnkps detector, consuming the normalized export.
+
+    The model MUST be the output of scripts/normalize_scrfd_export.py: that
+    script strips the trailing Mul(stride) nodes and reorders outputs to
+    grouped [score_8/16/32, box_8/16/32, lmk5pt_8/16/32]. The C++ decoder
+    (and this port) assumes that layout.
+    """
+
+    # Names in the grouped order produced by normalize_scrfd_export.py.
+    # Verified against the production det_10g_gnkps.onnx in assets/models/:
+    #   score_{8,16,32}, box_{8,16,32}, lmk5pt_{8,16,32}.
+    _OUTPUT_NAMES = [
+        "score_8", "score_16", "score_32",
+        "box_8", "box_16", "box_32",
+        "lmk5pt_8", "lmk5pt_16", "lmk5pt_32",
+    ]
+
+    def __init__(self, model_path: Path) -> None:
+        if not model_path.is_file():
+            raise FileNotFoundError(f"SCRFD model not found: {model_path}")
+        self._session = ort.InferenceSession(
+            str(model_path),
+            providers=["CPUExecutionProvider"],
+        )
+        self._input_name = self._session.get_inputs()[0].name
+        # Sort the model's outputs into the grouped order the decoder expects.
+        # The graph stores them under their normalized names; match by name so
+        # we are robust to onnxruntime's insertion order.
+        avail = {o.name: i for i, o in enumerate(self._session.get_outputs())}
+        missing = [n for n in self._OUTPUT_NAMES if n not in avail]
+        if missing:
+            raise ValueError(
+                f"SCRFD model is missing grouped outputs {missing}. "
+                f"Run scripts/normalize_scrfd_export.py on it first. "
+                f"Available outputs: {list(avail)}"
+            )
+        self._output_indices = [avail[n] for n in self._OUTPUT_NAMES]
+
+    def detect_largest(self, bgr_image: np.ndarray) -> Detection | None:
+        """Return the highest-score detection, or None if no face found.
+
+        Mirrors FaceService's DetectLargestFace usage: take the max-score box
+        after NMS rather than letting callers re-sort.
+        """
+        dets = self._detect_all(bgr_image)
+        if not dets:
+            return None
+        return max(dets, key=lambda d: d.score)
+
+    def _detect_all(self, bgr_image: np.ndarray) -> list[Detection]:
+        src_h, src_w = bgr_image.shape[:2]
+        # onnx_models.cpp:238-239 — direct stretch resize, no letterbox.
+        resized = cv2.resize(
+            bgr_image, (SCRFD_INPUT_SIZE, SCRFD_INPUT_SIZE),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        # onnx_models.cpp:241-252 — BGR planar, (p - 127.5) / 128.
+        # resized is HWC BGR uint8; transpose to CHW, keep BGR order.
+        tensor = (
+            resized.astype(np.float32).transpose(2, 0, 1)
+            - SCRFD_NORM_MEAN
+        ) / SCRFD_NORM_DIVISOR
+        tensor = tensor.reshape(1, 3, SCRFD_INPUT_SIZE, SCRFD_INPUT_SIZE)
+
+        outputs = self._session.run(
+            None, {self._input_name: tensor.astype(np.float32)}
+        )
+        # Reorder to grouped [score_8/16/32, box_8/16/32, kps_8/16/32].
+        grouped = [outputs[i] for i in self._output_indices]
+
+        # onnx_models.cpp:235-236 — independent X/Y scale factors (different
+        # for non-square source frames).
+        scale_x = src_w / SCRFD_INPUT_SIZE
+        scale_y = src_h / SCRFD_INPUT_SIZE
+
+        candidates: list[Detection] = []
+        for s_idx, stride in enumerate(SCRFD_STRIDES):
+            score_blob = grouped[0 + s_idx]   # shape (N, 1)
+            box_blob = grouped[3 + s_idx]     # shape (N, 4)
+            kps_blob = grouped[6 + s_idx]     # shape (N, 10)
+            n = score_blob.shape[1]
+            grid = SCRFD_INPUT_SIZE // stride  # 64 / 32 / 16
+
+            # onnx_models.cpp:330-344 — anchor centers, NO +0.5 offset.
+            centers = np.empty((grid * grid, 2), dtype=np.float32)
+            for r in range(grid):
+                for c in range(grid):
+                    centers[r * grid + c, 0] = c * stride
+                    centers[r * grid + c, 1] = r * stride
+
+            for i in range(n):
+                score = float(score_blob[0, i, 0])
+                if score < SCRFD_SCORE_THRESHOLD:
+                    continue
+                # onnx_models.cpp:336-337 — i -> cell i//2; both anchors share
+                # the same center.
+                cx, cy = centers[i // SCRFD_NUM_ANCHORS]
+
+                # onnx_models.cpp:357-364 — box * stride, then distance-to-bbox.
+                dist = box_blob[0, i, :4] * stride
+                x1 = cx - dist[0]
+                y1 = cy - dist[1]
+                x2 = cx + dist[2]
+                y2 = cy + dist[3]
+
+                # onnx_models.cpp:366-369 — kps * stride, then distance-to-kps.
+                kd = kps_blob[0, i, :10] * stride
+                kps = np.empty(10, dtype=np.float32)
+                for k in range(5):
+                    kps[k * 2] = cx + kd[k * 2]
+                    kps[k * 2 + 1] = cy + kd[k * 2 + 1]
+
+                candidates.append(
+                    Detection(
+                        score=score,
+                        x1=x1 * scale_x,
+                        y1=y1 * scale_y,
+                        x2=x2 * scale_x,
+                        y2=y2 * scale_y,
+                        kps=kps * np.array(
+                            [scale_x, scale_y] * 5, dtype=np.float32
+                        ),
+                    )
+                )
+
+        return self._nms(candidates)
+
+    @staticmethod
+    def _nms(dets: list[Detection]) -> list[Detection]:
+        # onnx_models.cpp:375-398 — greedy, score-descending, IoU > 0.5
+        # (strictly greater) suppresses the lower-score box.
+        if not dets:
+            return []
+        order = sorted(range(len(dets)), key=lambda i: dets[i].score, reverse=True)
+        kept: list[bool] = [True] * len(dets)
+        result: list[Detection] = []
+        for a_pos, a in enumerate(order):
+            if not kept[a_pos]:
+                continue
+            result.append(dets[a])
+            da = dets[a]
+            a_area = (da.x2 - da.x1) * (da.y2 - da.y1) + 1e-5
+            for b_pos in range(a_pos + 1, len(order)):
+                if not kept[b_pos]:
+                    continue
+                db = dets[order[b_pos]]
+                ix = min(da.x2, db.x2) - max(da.x1, db.x1)
+                if ix <= 0:
+                    continue
+                iy = min(da.y2, db.y2) - max(da.y1, db.y1)
+                if iy <= 0:
+                    continue
+                b_area = (db.x2 - db.x1) * (db.y2 - db.y1) + 1e-5
+                inter = ix * iy
+                iou = inter / (a_area + b_area - inter + 1e-5)
+                if iou > SCRFD_NMS_IOU:
+                    kept[b_pos] = False
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Quantization.
+# ---------------------------------------------------------------------------
+
 
 def build_input(bgr_image: np.ndarray) -> np.ndarray:
-    """Production SCRFD input tensor: direct-stretch 640x640, BGR planar,
-    (p - 127.5) / 128 (calibrate.py:238-252)."""
+    """Production SCRFD input tensor: direct-stretch 512x512, BGR planar,
+    (p - 127.5) / 128 (mirrors onnx_models.cpp:241-252)."""
     resized = cv2.resize(bgr_image, (SCRFD_INPUT_SIZE, SCRFD_INPUT_SIZE),
                          interpolation=cv2.INTER_LINEAR)
     tensor = (resized.astype(np.float32).transpose(2, 0, 1) -
-              calibrate.SCRFD_NORM_MEAN) / calibrate.SCRFD_NORM_DIVISOR
+              SCRFD_NORM_MEAN) / SCRFD_NORM_DIVISOR
     return tensor.reshape(1, 3, SCRFD_INPUT_SIZE, SCRFD_INPUT_SIZE)
 
 
@@ -58,7 +291,7 @@ def load_images(images_root: Path, limit: int) -> list[np.ndarray]:
         for img_path in sorted(person_dir.iterdir()):
             if img_path.suffix.lower() not in exts:
                 continue
-            bgr = calibrate.load_image(img_path)
+            bgr = load_image(img_path)
             if bgr is None:
                 continue
             imgs.append(bgr)
@@ -136,9 +369,9 @@ def main() -> int:
           file=sys.stderr)
     int8 = ort.InferenceSession(str(out), sess_options=opts,
                                 providers=["CPUExecutionProvider"])
-    fp32_det = calibrate.ScrfdDetector(args.model)
+    fp32_det = ScrfdDetector(args.model)
     fp32_det._session = fp32
-    int8_det = calibrate.ScrfdDetector(args.model)
+    int8_det = ScrfdDetector(args.model)
     int8_det._session = int8
 
     agree, missed_fp32, missed_int8 = 0, 0, 0

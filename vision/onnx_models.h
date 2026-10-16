@@ -1,0 +1,152 @@
+#pragma once
+
+#include <onnxruntime_cxx_api.h>
+#include "../common/frame_image.h"
+#include <string>
+#include <vector>
+#include <memory>
+#include <optional>
+#include "liveness_types.h"
+
+namespace facelogin {
+
+// ONNX-based face recognition using the pinned OpenCV SFace model.
+// Embedding dimension: 128 (validated against the pinned model contract).
+class OnnxRecognizer {
+public:
+    OnnxRecognizer() = default;
+    ~OnnxRecognizer();
+
+    bool Initialize(const std::wstring& modelPath);
+
+    // Compute 128-D embedding from a face chip (already aligned, 112x112 RGB).
+    // Returns empty vector on failure. When outPreNorm is non-null it receives
+    // the embedding's L2 norm BEFORE normalization (unchanged on failure) — a
+    // MagFace-style quality signal (higher norm = cleaner chip). The returned
+    // vector is always unit-length, so the raw norm is unrecoverable from the
+    // return value alone.
+    std::vector<float> ComputeEmbedding(const FrameImage& faceChip,
+                                        float* outPreNorm = nullptr);
+
+    // Convenience: compute embedding from a full frame + the 5 SCRFD
+    // keypoints (source-pixel coordinates). Aligns to 112×112 internally
+    // via a similarity transform (see face_align.h).
+    std::vector<float> ComputeEmbedding(const FrameImage& image,
+                                        const float kps[10],
+                                        float* outPreNorm = nullptr);
+
+    bool IsInitialized() const { return m_initialized; }
+
+private:
+    std::unique_ptr<Ort::Session> m_session;
+    std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
+    bool m_initialized = false;
+
+    // Input/output names (cached after session creation)
+    std::string m_inputName;
+    std::string m_outputName;
+};
+
+// ONNX-based face detection using InsightFace SCRFD.
+// Much faster than dlib HOG and more robust against non-live faces.
+class OnnxDetector {
+public:
+    OnnxDetector() = default;
+    ~OnnxDetector();
+
+    bool Initialize(const std::wstring& modelPath);
+
+    struct Detection {
+        float x1, y1, x2, y2;  // bounding box in pixel coordinates
+        float score;             // confidence
+        float kps[10];           // 5 keypoints (x,y pairs): left-eye, right-eye, nose, left-mouth, right-mouth
+    };
+
+    // Detect faces. Returns detections sorted by confidence (highest first).
+    std::vector<Detection> Detect(const FrameImage& image);
+
+    // Detect the largest face (by area). Returns nullopt if none found.
+    std::optional<Detection> DetectLargestFace(const FrameImage& image);
+
+    bool IsInitialized() const { return m_initialized; }
+
+private:
+    std::unique_ptr<Ort::Session> m_session;
+    std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
+    bool m_initialized = false;
+
+    std::string m_inputName;
+    std::vector<std::string> m_outputNames;
+
+    // Preprocess: direct resize to 512×512 (no letterbox), BGR planar,
+    // normalized to [-1, 1] with (pixel-127.5)/128. Matches the model's
+    // native input; insightface SCRFD is exported this way.
+    // Because the resize DISTORTS non-square frames (e.g. 1280×720 → 512×512),
+    // the x and y scales are DIFFERENT. scaleX/scaleY map 512-space back to
+    // source pixels: srcX = detX * scaleX, srcY = detY * scaleY.
+    std::vector<float> Preprocess(const FrameImage& image,
+                                   float& outScaleX, float& outScaleY);
+};
+
+// One MiniFASNet ONNX model. The reference implementation expands the SCRFD
+// face box, resizes it to the model input, feeds raw BGR NCHW values, and uses
+// softmax class 1 as the real-face probability.
+class MiniFasEvaluator {
+public:
+    MiniFasEvaluator() = default;
+    ~MiniFasEvaluator();
+
+    MiniFasEvaluator(const MiniFasEvaluator&) = delete;
+    MiniFasEvaluator& operator=(const MiniFasEvaluator&) = delete;
+
+    bool Initialize(const std::wstring& modelPath, float cropScale);
+    float Predict(const FrameImage& image,
+                  const FaceRect& faceRect);
+    bool IsInitialized() const { return m_initialized; }
+
+private:
+    std::unique_ptr<Ort::Session> m_session;
+    std::unique_ptr<Ort::MemoryInfo> m_memoryInfo;
+    std::string m_inputName;
+    std::string m_outputName;
+    int m_inputHeight = 0;
+    int m_inputWidth = 0;
+    float m_cropScale = 0.0f;
+    bool m_initialized = false;
+};
+
+// Production PAD: MiniFASNetV2 (2.7x crop) and MiniFASNetV1SE (4.0x crop)
+// evaluated concurrently (each owns its own session; all sessions share the
+// process-lifetime ONNX environment), then fused with an equal-weight
+// arithmetic mean. If either model fails, the fused prediction fails closed.
+class OnnxAntiSpoof {
+public:
+    OnnxAntiSpoof() = default;
+    ~OnnxAntiSpoof();
+
+    bool Initialize(const std::wstring& miniFasV2Path,
+                    const std::wstring& miniFasV1SePath);
+
+    // Returns the 50/50 fused real-face probability, or -1 on any model error.
+    float Predict(const FrameImage& image,
+                  const FaceRect& rect);
+
+    bool IsInitialized() const { return m_initialized; }
+
+private:
+    std::unique_ptr<MiniFasEvaluator> m_miniFasV2;
+    std::unique_ptr<MiniFasEvaluator> m_miniFasV1Se;
+    bool m_initialized = false;
+};
+
+// One throwaway inference per session so ORT's first-run costs (arena growth,
+// thread-pool spin-up, per-input-shape memory planning) are paid during model
+// preload instead of on the first authentication frame. Dummy inputs reuse the
+// exact production input shapes; results are discarded and never influence an
+// auth decision. Warmup failures only log — the auth path stays the fail-closed
+// authority for real inference errors.
+void WarmupInference(OnnxDetector& detector,
+                     OnnxRecognizer& recognizer,
+                     OnnxAntiSpoof& antiSpoof);
+
+} // namespace facelogin

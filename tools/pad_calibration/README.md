@@ -81,14 +81,9 @@ python scripts\analyze_pad_calibration.py $csv `
 ```
 
 By default the tool reads `DataPath` from `HKLM\SOFTWARE\FaceLogin`, loads the
-active `config.json`, and reuses its camera and rotation settings. The
-`low_light_enhance` value is read only to record it as CSV metadata — it is
-**not** applied to PAD preprocessing, because the production PAD path
-(`OnnxAntiSpoof`) has no low-light preprocessing; low-light enhancement only
-affects the recognition embedding (`OnnxRecognizer`). So flipping
-`low_light_enhance` does not change the recorded PAD scores.
-Use `--data-dir`, `--models`, `--camera-device`, `--rotation`, or
-`--low-light-enhance` only for an intentional controlled comparison.
+active `config.json`, and reuses its camera and rotation settings.
+Use `--data-dir`, `--models`, `--camera-device`, or `--rotation` only for an
+intentional controlled comparison.
 
 Collect separate sessions for printed photos and screens, normal/low/back
 lighting, near/far distance, glasses, and the supported head poses. Formal
@@ -96,7 +91,7 @@ validation must use new sessions (ideally another day and additional people)
 with `--split validation`; frames from a tuning session are correlated and are
 not a valid holdout set.
 
-The tool uses the same DirectShow capture path as enrollment, standalone, and
+The tool uses the same DirectShow capture path as enrollment and
 the lock-screen service, so its captures are directly representative.
 
 The CSV contains biometric-derived scores and metadata. Keep it local, restrict

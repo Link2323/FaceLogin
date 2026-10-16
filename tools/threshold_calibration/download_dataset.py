@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Download a small LFW subset for threshold calibration.
+"""Download a small LFW subset for SCRFD INT8 quantization calibration.
 
-LFW (Labeled Faces in the Wild) gives the other-person distance distribution
-that docs/todo.md ui1 was missing: hundreds of different people, organized as
-one folder per identity. This script fetches the dataset, keeps the first N
-identities with at most M images each, and writes them to a folder layout
-that calibrate.py consumes directly:
+LFW (Labeled Faces in the Wild) gives the real-photo calibration inputs for
+quantize_scrfd.py: hundreds of different people, organized as one folder per
+identity. This script fetches the dataset, keeps the first N identities with
+at most M images each, and writes them to a folder layout that
+quantize_scrfd.py consumes directly:
 
     <out>/<identity_name>/<image>.jpg
 
@@ -21,11 +21,11 @@ reachable:
 
 If both fail (DNS, CDN reset, etc.), the script prints a clear message and
 exits non-zero so you can drop in any per-identity image folder manually —
-calibrate.py does not care where the images come from.
+quantize_scrfd.py does not care where the images come from.
 
 Usage:
   python download_dataset.py [--num-identities 30] [--max-per-identity 8]
-                              [--out data/lfw_subset]
+                             [--out data/lfw_subset]
 """
 
 from __future__ import annotations
@@ -361,7 +361,7 @@ def main() -> int:
         if ok and args.out.is_dir() and any(args.out.iterdir()):
             print(
                 f"\nDone. Dataset ready at {args.out}\n"
-                f"Next: python scripts/threshold_calibration/calibrate.py "
+                f"Next: python tools/threshold_calibration/quantize_scrfd.py "
                 f"--images {args.out}",
                 file=sys.stderr,
             )
@@ -376,11 +376,12 @@ def main() -> int:
         "         2. Use a VPN/proxy and retry.\n"
         "         3. Download any per-identity face image folder yourself\n"
         "            (LFW, CelebA, or photos of friends/family) and point\n"
-        "            calibrate.py at it with --images <folder>. The script\n"
-        "            only needs <folder>/<identity>/*.jpg — source does not\n"
-        "            matter.\n"
+        "            quantize_scrfd.py at it with --images <folder>. The\n"
+        "            script only needs <folder>/<identity>/*.jpg — source\n"
+        "            does not matter.\n"
         "         4. For small tests, copy photos of a few different people\n"
-        "            into my_faces/<person_name>/ and rerun calibrate.py.",
+        "            into my_faces/<person_name>/ and rerun\n"
+        "            quantize_scrfd.py.",
         file=sys.stderr,
     )
     return 3

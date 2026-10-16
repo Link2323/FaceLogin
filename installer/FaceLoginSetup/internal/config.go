@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	defaultMatchThreshold     = 0.80
+	defaultMatchThreshold     = 1.00
 	defaultAntiSpoofThreshold = 0.28
 )
 
@@ -22,11 +22,18 @@ func EnsureConfigDefaults(configPath string) error {
 	}
 
 	cfg := map[string]any{
-		"match_threshold":      defaultMatchThreshold,
-		"anti_spoof_threshold": defaultAntiSpoofThreshold,
-		"low_light_enhance":    true,
-		"camera_rotation":      0,
-		"camera_device":        "",
+		"recognizer_model":          "opencv-sface-2021dec",
+		"match_threshold":           defaultMatchThreshold,
+		"anti_spoof_threshold":      defaultAntiSpoofThreshold,
+		"camera_rotation":           0,
+		"camera_device":             "",
+		"ema_learning":              false,
+		"failure_learning":          false,
+		"learning_alpha":            0.10,
+		"learning_distance_gate":    0.65,
+		"learning_norm_floor":       19.1,
+		"learning_min_interval_sec": 60,
+		"fast_unlock":               false,
 	}
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

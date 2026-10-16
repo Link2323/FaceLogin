@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FaceLogin Console</title>
+<style>@ENROLLMENT_CSS@</style>
+</head>
+<body>
+
+<!-- ================================================================== -->
+<!-- Camera Screen                                                       -->
+<!-- ================================================================== -->
+<div id="screen-cam" class="screen active">
+  <div class="header">
+    <h1>FaceLogin Console</h1>
+    <p>人脸识别登录系统 · SFace 试用版</p>
+  </div>
+  <div class="tabs">
+    <span class="tab active" onclick="switchTab('cam')">录入</span>
+    <span class="tab" onclick="switchTab('faces')">人脸</span>
+    <span class="tab" onclick="switchTab('settings')">设置</span>
+    <span class="tab" onclick="switchTab('logs')">日志</span>
+  </div>
+  <div class="cam-body">
+    <div class="banner" id="cam-banner"></div>
+    <div class="cam-viewport" id="viewport">
+      <div class="loading-overlay" id="cam-loading">
+        <div class="spinner-dark"></div>
+        <span class="loading-text">正在启动摄像头...</span>
+      </div>
+      <canvas id="bg-canvas"></canvas>
+      <canvas id="face-canvas"></canvas>
+      <div class="cam-caption" id="cam-caption">请将面部置于取景框内，确保光线充足。</div>
+    </div>
+    <label class="chk-row" title="正面、左转 30°、右转 30° 各录 5 帧，侧脸角度也能解锁">
+      <input type="checkbox" id="chk-multi-angle" checked> 多角度录入（推荐，侧脸可解锁）
+    </label>
+    <div id="cap-progress">
+      <div class="progress-bar"><div class="fill" id="cap-fill" style="width:0%"></div></div>
+    </div>
+    <button class="btn btn-primary" id="btn-capture" onclick="onCapture()">
+      <span class="spinner" id="cap-spinner"></span>
+      <span id="cap-btn-text">开始采集</span>
+    </button>
+  </div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- Password Screen                                                     -->
+<!-- ================================================================== -->
+<div id="screen-pwd" class="screen">
+  <div class="header">
+    <h1>FaceLogin Console</h1>
+    <p>人脸识别登录系统 · SFace 试用版</p>
+  </div>
+  <div class="tabs"><span class="tab active">录入</span></div>
+  <div class="pwd-body">
+    <div class="banner" id="pwd-banner"></div>
+    <h2>完成录入</h2>
+    <div class="field">
+      <label>用户名 (UPN)</label>
+      <input type="text" id="fld-user" readonly>
+    </div>
+    <div class="field">
+      <label>账户类型</label>
+      <input type="text" id="fld-acct-type" readonly>
+    </div>
+    <p class="sid-note" id="fld-sid-note">SID：<span id="fld-sid"></span></p>
+    <div class="field">
+      <label id="fld-pass-label">Windows 密码</label>
+      <input type="password" id="fld-pass" placeholder="输入你的登录密码" autofocus>
+    </div>
+    <div class="field">
+      <label>给这张脸命名</label>
+      <input type="text" id="fld-face-label" placeholder="可留空，默认如“脸1”" maxlength="32">
+    </div>
+    <p class="dim">你的密码将使用 DPAPI 加密，仅存储在本机。</p>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-primary" id="btn-save" onclick="onSave()" style="flex:1">
+        <span class="spinner" id="save-spinner"></span>
+        保存并录入
+      </button>
+      <button class="btn btn-secondary" id="btn-save-cancel" onclick="onPwdCancel()" style="flex:1">取消</button>
+    </div>
+  </div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- Faces (multi-face management) Screen                                 -->
+<!-- ================================================================== -->
+<div id="screen-faces" class="screen">
+  <div class="header">
+    <h1>FaceLogin Console</h1>
+    <p>人脸识别登录系统 · SFace 试用版</p>
+  </div>
+  <div class="tabs">
+    <span class="tab" onclick="switchTab('cam')">录入</span>
+    <span class="tab active" onclick="switchTab('faces')">人脸</span>
+    <span class="tab" onclick="switchTab('settings')">设置</span>
+    <span class="tab" onclick="switchTab('logs')">日志</span>
+  </div>
+  <div class="faces-body">
+    <div class="banner" id="faces-banner"></div>
+    <div class="faces-head">
+      <h2>人脸管理</h2>
+      <span class="samples-tag" id="faces-count">0 / 3 张</span>
+    </div>
+    <p class="dim">当前账号：<span id="faces-user">-</span></p>
+    <div class="face-list" id="face-list"></div>
+    <div class="faces-actions">
+      <button class="btn btn-primary" onclick="goAddFace()">添加新人脸</button>
+      <button class="btn btn-secondary" onclick="onClearAllFaces()">清空全部</button>
+    </div>
+  </div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- Append Face (add a face to an existing account) Screen              -->
+<!-- ================================================================== -->
+<div id="screen-append" class="screen">
+  <div class="header">
+    <h1>FaceLogin Console</h1>
+    <p>人脸识别登录系统 · SFace 试用版</p>
+  </div>
+  <div class="tabs"><span class="tab active">录入</span></div>
+  <div class="pwd-body">
+    <div class="banner" id="append-banner"></div>
+    <h2 id="append-title">添加新人脸</h2>
+    <div class="field">
+      <label>用户名 (UPN)</label>
+      <input type="text" id="append-user" readonly>
+    </div>
+    <p class="sid-note" id="append-sid-note">SID：<span id="append-sid"></span></p>
+    <div class="field" id="append-label-field">
+      <label>给这张脸命名</label>
+      <input type="text" id="append-face-label" placeholder="可留空，默认如“脸N”" maxlength="32">
+    </div>
+    <p class="dim" id="append-info">当前账号已有 N 张脸，将追加第 N+1 张。追加无需再次输入密码。</p>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-primary" id="btn-append" onclick="onAppendConfirm()" style="flex:1">
+        <span class="spinner" id="append-spinner"></span>
+        <span id="btn-append-text">确认追加</span>
+      </button>
+      <button class="btn btn-secondary" id="btn-append-cancel" onclick="onAppendCancel()" style="flex:1">取消</button>
+    </div>
+  </div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- Settings Screen                                                     -->
+<!-- ================================================================== -->
+<div id="screen-settings" class="screen">
+  <div class="header">
+    <h1>FaceLogin Console</h1>
+    <p>人脸识别登录系统 · SFace 试用版</p>
+  </div>
+  <div class="tabs">
+    <span class="tab" onclick="switchTab('cam')">录入</span>
+    <span class="tab" onclick="switchTab('faces')">人脸</span>
+    <span class="tab active">设置</span>
+    <span class="tab" onclick="switchTab('logs')">日志</span>
+  </div>
+  <div class="banner" id="settings-banner"></div>
+  <div class="settings-scroll">
+    <div class="pwd-body settings-body" style="width:100%;max-width:640px">
+    <h2>系统设置</h2>
+    <p class="dim">保存后立即生效，无需重启。</p>
+
+    <div class="set-group">
+      <h3>摄像头</h3>
+      <div class="field">
+        <label>摄像头设备</label>
+        <select id="cfg-camera">
+          <option value="">默认（第一个设备）</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="label-row">
+          <label>摄像头旋转</label>
+          <span class="hint">正常安装无需调整</span>
+        </div>
+        <select id="cfg-rotation">
+          <option value="0">不旋转 (0°)</option>
+          <option value="90">顺时针 90°</option>
+          <option value="180">180°</option>
+          <option value="270">顺时针 270°</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>识别与安全</h3>
+      <div class="field">
+        <label class="switch-row">
+          <input type="checkbox" id="cfg-fastunlock" class="switch-input">
+          <span class="switch-track"></span>
+          <span>快速解锁</span>
+        </label>
+        <p class="dim">解锁更快，但反欺诈检测次数变少。可在安全条件下启用。</p>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label>识别容差</label>
+          <span class="set-val" id="cfg-threshold-val">1.00</span>
+        </div>
+        <input type="range" id="cfg-threshold" min="0.70" max="1.00" value="1.00" step="0.01"
+               oninput="document.getElementById('cfg-threshold-val').textContent=parseFloat(this.value).toFixed(2)">
+        <div class="slider-ends"><span>严（少误认）</span><span>松（少拒认）</span></div>
+      </div>
+
+      <div class="field" id="field-antispoof-threshold">
+        <div class="label-row">
+          <label>反欺诈阈值</label>
+          <span class="set-val" id="cfg-asthr-val">0.28</span>
+        </div>
+        <input type="range" id="cfg-antispoof-threshold" min="0.15" max="0.50" value="0.28" step="0.01"
+               oninput="document.getElementById('cfg-asthr-val').textContent=parseFloat(this.value).toFixed(2)">
+        <div class="slider-ends"><span>松（易被照片骗过）</span><span>严（可能误拒真人）</span></div>
+      </div>
+    </div>
+
+    <div class="set-group">
+      <h3>渐进式学习 <span class="badge">实验性</span></h3>
+      <div class="field">
+        <label class="switch-row">
+          <input type="checkbox" id="cfg-learning" class="switch-input" disabled>
+          <span class="switch-track"></span>
+          <span>认证成功后自动微调人脸模板</span>
+        </label>
+        <p class="dim">SFace 的自动更新参数正在验证，试用期间暂时关闭。</p>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label>自动更新幅度</label>
+          <span class="set-val" id="cfg-learn-gate-val">0.65</span>
+        </div>
+        <input type="range" id="cfg-learn-gate" disabled min="0.60" max="0.68" value="0.65" step="0.01"
+               oninput="document.getElementById('cfg-learn-gate-val').textContent=parseFloat(this.value).toFixed(2)">
+        <div class="slider-ends"><span>保守（更新少）</span><span>积极（更新多）</span></div>
+      </div>
+    </div>
+
+    <div class="set-actions">
+      <button class="btn btn-secondary" onclick="onResetDefaults()">恢复默认</button>
+      <button class="btn btn-primary" id="btn-save-settings" onclick="onSaveSettings()">
+        <span class="spinner" id="settings-spinner"></span>
+        保存设置
+      </button>
+    </div>
+    </div>
+  </div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p><button onclick="openLicenseViewer()">许可声明</button></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- Logs Screen                                                          -->
+<!-- ================================================================== -->
+<div id="screen-logs" class="screen">
+  <div class="header">
+    <h1>FaceLogin Console</h1>
+    <p>人脸识别登录系统 · SFace 试用版</p>
+  </div>
+  <div class="tabs">
+    <span class="tab" onclick="switchTab('cam')">录入</span>
+    <span class="tab" onclick="switchTab('faces')">人脸</span>
+    <span class="tab" onclick="switchTab('settings')">设置</span>
+    <span class="tab active">日志</span>
+  </div>
+  <div class="logs-body" style="width:100%;max-width:640px">
+    <div class="logs-toolbar">
+      <h2>运行日志</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="log-source" onchange="refreshLogs()" style="font-size:12px;padding:4px 8px;border:1px solid #e5e7eb;background:#f9fafb">
+          <option value="console">控制台(console.log)</option>
+          <option value="service">解锁结果(service.log)</option>
+          <option value="worker">识别过程(auth_worker.log)</option>
+          <option value="cp">锁屏界面(credential_provider.log)</option>
+          <option value="learning">学习状态</option>
+        </select>
+        <button class="btn btn-secondary" id="btn-copy-log" onclick="copyLogs()">复制</button>
+        <button class="btn btn-secondary" id="btn-clear-log" onclick="clearLogs()"
+                title="清空当前来源的当日日志（按天轮转的历史文件保留）">清空日志</button>
+      </div>
+    </div>
+    <div class="log-viewer" id="log-viewer"></div>
+  </div>
+  <div class="footer"><p>FaceLogin Console · v__APP_VERSION__</p></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- First-run Camera Picker Modal                                        -->
+<!-- ================================================================== -->
+<div class="cam-picker-overlay" id="cam-picker-overlay">
+  <div class="cam-picker">
+    <h2>选择摄像头</h2>
+    <p class="dim">检测到多台摄像头。请选择用于人脸录入与登录的摄像头。</p>
+    <select id="cam-picker-select"></select>
+    <button class="btn btn-primary" id="cam-picker-confirm" onclick="onCamPickerConfirm()">
+      使用此摄像头
+    </button>
+    <button class="btn btn-secondary" id="cam-picker-skip" onclick="onCamPickerSkip()">
+      稍后选择（使用默认第一个设备）
+    </button>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- Stale MSA→local Account Refresh Modal                               -->
+<!-- ================================================================== -->
+<div class="cam-picker-overlay" id="refresh-overlay">
+  <div class="cam-picker">
+    <h2 id="refresh-title">账号身份已变更</h2>
+    <p class="dim" id="refresh-info">
+      检测到该账号曾使用微软账号（MSA）登录，现已切换为本地账号。
+      为使人脸登录继续生效，需要刷新已保存的账号信息（人脸数据将保留），
+      并更新本地密码。请输入当前 Windows 登录密码。
+    </p>
+    <input type="password" id="refresh-pass" placeholder="输入当前 Windows 登录密码"
+           style="width:100%;border:1px solid #e5e7eb;padding:8px 12px;font-size:13px;outline:none;background:#f9fafb;color:#1f2937;margin-bottom:8px">
+    <button class="btn btn-primary" id="refresh-confirm" onclick="onRefreshConfirm()">
+      <span class="spinner" id="refresh-spinner"></span>
+      刷新并保留人脸
+    </button>
+    <button class="btn btn-secondary" id="refresh-dismiss" onclick="onRefreshDismiss()">
+      暂不处理
+    </button>
+  </div>
+</div>
+
+<!-- In-app modal: replaces native confirm()/prompt(), which render Chromium's
+     out-of-place script dialogs. Callback-driven — see showAppModal(). -->
+<div class="cam-picker-overlay" id="modal-overlay">
+  <div class="cam-picker app-modal">
+    <h2 id="modal-title"></h2>
+    <p class="dim" id="modal-message" style="display:none"></p>
+    <input type="text" id="modal-input" style="display:none" maxlength="32">
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="modal-cancel" onclick="onModalCancel()">取消</button>
+      <button class="btn btn-secondary" id="modal-mid" onclick="onModalMid()" style="display:none"></button>
+      <button class="btn btn-primary" id="modal-ok" onclick="onModalOk()">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="cam-picker-overlay" id="license-overlay" role="dialog" aria-modal="true" aria-labelledby="license-title">
+  <div class="license-modal">
+    <div class="license-head">
+      <h2 id="license-title">许可声明</h2>
+      <button onclick="closeLicenseViewer()">关闭</button>
+    </div>
+    <div class="license-docs" role="tablist" aria-label="许可文件">
+      <button class="active" data-license="LICENSE.txt" onclick="showLicenseDocument(this)">项目许可</button>
+      <button data-license="THIRD_PARTY_NOTICES.txt" onclick="showLicenseDocument(this)">第三方声明</button>
+      <button data-license="MODEL_LICENSES.txt" onclick="showLicenseDocument(this)">模型许可</button>
+    </div>
+    <div class="license-content" id="license-content" tabindex="0">正在读取许可文件…</div>
+  </div>
+</div>
+
+<script>@ENROLLMENT_JS@</script>
+</body>
+</html>

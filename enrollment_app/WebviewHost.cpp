@@ -1,10 +1,14 @@
 #include "WebviewHost.h"
 #include "EnrollmentWizard.h"
 #include "../common/logger.h"
+#include "../common/secure_clear.h"
 #include "resource.h"
 #include "version.h"
 #include <wtsapi32.h>
 #include <shlobj.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "wtsapi32.lib")
@@ -64,6 +68,22 @@ STDMETHODIMP CtrlCallback::Invoke(HRESULT hr, ICoreWebView2Controller* ctrl) {
     if (settings) {
         settings->put_AreDefaultContextMenusEnabled(FALSE);
         settings->put_AreDevToolsEnabled(FALSE);
+        // The page is a fixed-form tool UI (no responsive fallback): one
+        // accidental Ctrl+wheel shrinks the CSS viewport and pushes the
+        // capture/save buttons outside the overflow-hidden body, with no way
+        // to scroll to them. Zoom has no user value here — disable it.
+        settings->put_IsZoomControlEnabled(FALSE);
+        // Kill the browser accelerator set entirely: F5/Ctrl+R would reload the
+        // page and reset all enrollment state mid-capture, Ctrl+P pops a print
+        // dialog, F3/Ctrl+F are find keys with no find UI behind them. Keys the
+        // UI relies on (Enter submit, Esc cancel, Tab focus, IME composition,
+        // Ctrl+C/V/A editing in fields and the log viewer) are page-level, not
+        // browser accelerators, and keep working.
+        ICoreWebView2Settings3* settings3 = nullptr;
+        if (SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings3)))) {
+            settings3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
+            settings3->Release();
+        }
         settings->Release();
     }
 
@@ -257,6 +277,31 @@ LRESULT WebviewHost::HandleMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
             nullptr, wv2DataDir.empty() ? nullptr : wv2DataDir.c_str(), nullptr, cb);
         return 0;
     }
+    case WM_GETMINMAXINFO: {
+        // The layout is designed for one size (client 680x600 CSS px) and has
+        // no responsive fallback: a shorter window clips the capture/save
+        // buttons below the non-scrolling screens (pwd page content is 575px
+        // tall), a taller one leaves dead space between the button and the
+        // footer. Clamp the draggable range around the design height instead.
+        // Track sizes are physical px — apply the monitor DPI scale the same
+        // way Run() does for the initial size, so this stays correct if the
+        // user changes display scaling while the app is open.
+        HDC hdc = GetDC(nullptr);
+        float dpiScale = GetDeviceCaps(hdc, LOGPIXELSY) / 96.0f;
+        ReleaseDC(nullptr, hdc);
+        DWORD style = static_cast<DWORD>(GetWindowLongW(hWnd, GWL_STYLE));
+        RECT rcMin = {0, 0, static_cast<int>(420 * dpiScale), static_cast<int>(600 * dpiScale)};
+        RECT rcMax = {0, 0, static_cast<int>(680 * dpiScale), static_cast<int>(600 * dpiScale)};
+        AdjustWindowRect(&rcMin, style, FALSE);
+        AdjustWindowRect(&rcMax, style, FALSE);
+        MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lp);
+        mmi->ptMinTrackSize.x = rcMin.right - rcMin.left;
+        mmi->ptMinTrackSize.y = rcMin.bottom - rcMin.top;
+        mmi->ptMaxTrackSize.x = rcMax.right - rcMax.left;
+        mmi->ptMaxTrackSize.y = rcMax.bottom - rcMax.top;
+        return 0;
+    }
+
     case WM_SIZE:
         ResizeWebView(hWnd);
         return 0;
@@ -276,14 +321,26 @@ LRESULT WebviewHost::HandleMessage(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (m_wizard) {
             switch (wp) {
             case WTS_SESSION_LOCK:
-                // Win+L pressed — release camera so login credential provider can use it
-                FACELOGIN_INFO(L"WebviewHost: session locked — releasing camera");
+                // Win+L pressed — release camera so login credential provider can use it.
+                // Snapshot first: restore on unlock only if the UI had the
+                // preview running (it powers the camera off on non-cam tabs).
+                m_previewActiveAtLock = m_wizard->IsPreviewRunning();
+                FACELOGIN_INFO(L"WebviewHost: session locked — releasing camera "
+                               L"(preview was %s)",
+                               m_previewActiveAtLock ? L"active" : L"inactive");
                 m_wizard->StopPreview();
                 break;
             case WTS_SESSION_UNLOCK:
-                // User returned — restart preview
-                FACELOGIN_INFO(L"WebviewHost: session unlocked — restarting camera");
-                m_wizard->StartPreview();
+                // User returned — restart preview only if it was running when
+                // the session locked (cam tab active at that moment).
+                if (m_previewActiveAtLock) {
+                    FACELOGIN_INFO(L"WebviewHost: session unlocked — restarting camera");
+                    m_wizard->StartPreview();
+                } else {
+                    FACELOGIN_INFO(L"WebviewHost: session unlocked — camera stays off "
+                                   L"(preview was not active at lock)");
+                }
+                m_previewActiveAtLock = false;
                 break;
             }
         }
@@ -370,6 +427,9 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     else if (n == L"GetCredentialProviderLogLines") *ids = 33;
     else if (n == L"ClearFileLog") *ids = 34;
     else if (n == L"CancelCapture") *ids = 35;
+    else if (n == L"GetEnrollmentHint") *ids = 36;
+    else if (n == L"GetLearningStatus") *ids = 37;
+    else if (n == L"GetLicenseDocument") *ids = 38;
     else return DISP_E_UNKNOWNNAME;
     return S_OK;
 }
@@ -386,15 +446,35 @@ static std::wstring OptionalArg(DISPPARAMS* p, UINT argIdx) {
 static VARIANT MakeStr(const std::string& s) {
     VARIANT v; VariantInit(&v);
     if (!s.empty()) {
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+        if (wlen <= 0) {
+            v.vt = VT_BSTR;
+            v.bstrVal = SysAllocString(L"");
+            return v;
+        }
         v.vt = VT_BSTR;
-        v.bstrVal = SysAllocStringLen(nullptr, wlen - 1);
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, v.bstrVal, wlen);
+        v.bstrVal = SysAllocStringLen(nullptr, wlen);
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), v.bstrVal, wlen);
     } else { v.vt = VT_BSTR; v.bstrVal = SysAllocString(L""); }
     return v;
 }
 static VARIANT MakeBool(bool v) { VARIANT var; VariantInit(&var); var.vt = VT_BOOL; var.boolVal = v ? VARIANT_TRUE : VARIANT_FALSE; return var; }
 static VARIANT MakeInt(int v)  { VARIANT var; VariantInit(&var); var.vt = VT_I4; var.lVal = v; return var; }
+
+static std::string ReadLicenseDocument(const std::wstring& name) {
+    // Expose only the three canonical documents shipped beside the console.
+    // The allow-list also prevents path traversal through the WebView bridge.
+    if (name != L"LICENSE.txt" && name != L"THIRD_PARTY_NOTICES.txt" &&
+        name != L"MODEL_LICENSES.txt") return "Unsupported license document.";
+
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return "Unable to locate the console license files.";
+    const auto path = std::filesystem::path(exePath).parent_path() / name;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return "License document is unavailable. Reinstall FaceLogin or restore the license files beside FaceLoginConsole.exe.";
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
 
 STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS* p, VARIANT* res, EXCEPINFO*, UINT*) {
     if (!m_wizard) return E_FAIL;
@@ -436,6 +516,10 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 6: {
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
+            // The COM entry point owns the only plaintext password buffer on
+            // this path (everything downstream takes it by const&) — the
+            // guard zeroes it on every exit, including the DISP_E returns.
+            facelogin::SecureWStringGuard passGuard(pass);
             if (res) *res = MakeBool(m_wizard->ValidatePassword(pass));
             break;
         }
@@ -448,6 +532,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring label = OptionalArg(p, 0);
             std::wstring pass;
+            facelogin::SecureWStringGuard passGuard(pass);
             if (p->cArgs >= 2) {
                 pass = (p->rgvarg[1].vt == VT_BSTR) ? std::wstring(p->rgvarg[1].bstrVal) : L"";
             } else {
@@ -485,6 +570,9 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             break;
         }
         case 35: m_wizard->CancelCapture(); break;
+        case 36: if (res) *res = MakeStr(m_wizard->GetEnrollmentHint()); break;
+        case 37: if (res) *res = MakeStr(m_wizard->GetLearningStatus()); break;
+        case 38: if (res) *res = MakeStr(ReadLicenseDocument(OptionalArg(p, 0))); break;
         case 18: if (res) *res = MakeStr(m_wizard->GetUserSid()); break;
         case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
         case 20: if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces()); break;
@@ -516,6 +604,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             // ambiguity. Same access pattern as case 6.
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
+            facelogin::SecureWStringGuard passGuard(pass);
             if (res) *res = MakeBool(m_wizard->RefreshAccountIdentity(pass));
             break;
         }

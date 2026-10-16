@@ -121,26 +121,33 @@ std::string ConfigToJson(const AppConfig& cfg) {
     ss << "{\n";
     ss << "  "; jsonWriteString(ss, "match_threshold"); ss << ": " << cfg.match_threshold << ",\n";
     ss << "  "; jsonWriteString(ss, "anti_spoof_threshold"); ss << ": " << cfg.anti_spoof_threshold << ",\n";
-    ss << "  "; jsonWriteString(ss, "low_light_enhance"); ss << ": " << (cfg.low_light_enhance ? "true" : "false") << ",\n";
     ss << "  "; jsonWriteString(ss, "camera_rotation"); ss << ": " << cfg.camera_rotation << ",\n";
-    ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << "\n";
+    ss << "  "; jsonWriteString(ss, "camera_device"); ss << ": "; jsonWriteString(ss, cfg.camera_device); ss << ",\n";
+    ss << "  "; jsonWriteString(ss, "ema_learning"); ss << ": " << (cfg.ema_learning ? "true" : "false") << ",\n";
+    ss << "  "; jsonWriteString(ss, "failure_learning"); ss << ": " << (cfg.failure_learning ? "true" : "false") << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_alpha"); ss << ": " << cfg.learning_alpha << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_distance_gate"); ss << ": " << cfg.learning_distance_gate << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_norm_floor"); ss << ": " << cfg.learning_norm_floor << ",\n";
+    ss << "  "; jsonWriteString(ss, "learning_min_interval_sec"); ss << ": " << cfg.learning_min_interval_sec << ",\n";
+    ss << "  "; jsonWriteString(ss, "fast_unlock"); ss << ": " << (cfg.fast_unlock ? "true" : "false") << ",\n";
+    ss << "  "; jsonWriteString(ss, "recognizer_model"); ss << ": ";
+    jsonWriteString(ss, "opencv-sface-2021dec"); ss << "\n";
     ss << "}\n";
     return ss.str();
 }
 
 AppConfig ConfigFromJson(const std::string& json) {
     AppConfig cfg = DefaultConfig();
-    cfg.match_threshold = jsonGetFloat(json, "match_threshold", 0.80f);
-    // UI permits [0.70, 1.00] for 512-D (calibrated band; see
-    // docs/threshold-calibration.md). Enforce here too because config.json
-    // can be hand-edited. EmbeddingThresholdForDim re-clamps at match time,
-    // but bounding at load keeps the persisted value honest and the log clean.
+    const bool sfaceConfig = jsonGetString(json, "recognizer_model") == "opencv-sface-2021dec";
+    cfg.match_threshold = jsonGetFloat(json, "match_threshold", kDefaultMatchThreshold);
+    // SFace trial ceiling; legacy R50 thresholds are reset below.
     if (!std::isfinite(cfg.match_threshold) ||
         cfg.match_threshold < 0.70f || cfg.match_threshold > 1.00f) {
-        FACELOGIN_WARN(L"Unsafe match_threshold=%.3f; enforcing calibrated default 0.80",
+        FACELOGIN_WARN(L"Unsafe match_threshold=%.3f; enforcing SFace trial default 1.00",
                        cfg.match_threshold);
-        cfg.match_threshold = 0.80f;
+        cfg.match_threshold = kDefaultMatchThreshold;
     }
+    if (!sfaceConfig) cfg.match_threshold = kDefaultMatchThreshold;
     cfg.anti_spoof_threshold = jsonGetFloat(json, "anti_spoof_threshold", 0.28f);
     // The UI only permits [0.15, 0.50]. Enforce the same range in the
     // security boundary because config.json can also be edited by hand.
@@ -152,12 +159,6 @@ AppConfig ConfigFromJson(const std::string& json) {
                        cfg.anti_spoof_threshold);
         cfg.anti_spoof_threshold = 0.28f;
     }
-    // Missing key adopts the current default (true); an explicit value is
-    // honored as written. Configs persisted by older builds carry an explicit
-    // false and keep it — the loader must not silently flip user files.
-    const std::string enhance = jsonGetString(json, "low_light_enhance");
-    cfg.low_light_enhance = enhance.empty() ? cfg.low_light_enhance
-                                            : (enhance == "true");
     int rotation = jsonGetInt(json, "camera_rotation", 0);
     // Only accept 0/90/180/270; anything else silently does nothing in
     // RotateFrame, so fall back to 0 and log it — a configured-but-ignored
@@ -167,6 +168,55 @@ AppConfig ConfigFromJson(const std::string& json) {
             FACELOGIN_WARN(L"Invalid camera_rotation=%d in config, falling back to 0", rotation);
         rotation = 0;
     }
+    cfg.camera_rotation = rotation;
+
+    // ---- Template learning gates (docs/work/in-progress/progressive-learning-v2.md §1/§3).
+    // Missing keys adopt the calibrated defaults; hand-edited values outside
+    // the safe band snap back — the distance gate in particular must stay
+    // far below match_threshold or an impostor could poison templates.
+    // Red line 7 (2026-09-04): independent ema_learning/failure_learning
+    // switches. The legacy progressive_learning key is honored when
+    // ema_learning is absent so a disabled setup survives the rename.
+    const std::string emaLearning = jsonGetString(json, "ema_learning");
+    if (!emaLearning.empty()) {
+        cfg.ema_learning = (emaLearning == "true");
+    } else {
+        const std::string legacyLearning = jsonGetString(json, "progressive_learning");
+        if (!legacyLearning.empty()) cfg.ema_learning = (legacyLearning == "true");
+    }
+    const std::string failureLearning = jsonGetString(json, "failure_learning");
+    if (!failureLearning.empty()) cfg.failure_learning = (failureLearning == "true");
+    // SFace learning gates have not been validated; old configs cannot enable EMA.
+    cfg.ema_learning = kRecognizerLearningValidated && cfg.ema_learning;
+    cfg.failure_learning = kRecognizerLearningValidated && cfg.failure_learning;
+    cfg.learning_alpha = jsonGetFloat(json, "learning_alpha", 0.10f);
+    if (!std::isfinite(cfg.learning_alpha) ||
+        cfg.learning_alpha < 0.05f || cfg.learning_alpha > 0.15f) {
+        FACELOGIN_WARN(L"Unsafe learning_alpha=%.3f; enforcing 0.10",
+                       cfg.learning_alpha);
+        cfg.learning_alpha = 0.10f;
+    }
+    cfg.learning_distance_gate = jsonGetFloat(json, "learning_distance_gate", 0.65f);
+    if (!std::isfinite(cfg.learning_distance_gate) ||
+        cfg.learning_distance_gate < 0.35f || cfg.learning_distance_gate > 0.68f) {
+        FACELOGIN_WARN(L"Unsafe learning_distance_gate=%.3f; enforcing 0.65",
+                       cfg.learning_distance_gate);
+        cfg.learning_distance_gate = 0.65f;
+    }
+    cfg.learning_norm_floor = jsonGetFloat(json, "learning_norm_floor", 19.1f);
+    if (!std::isfinite(cfg.learning_norm_floor) ||
+        cfg.learning_norm_floor < 15.0f || cfg.learning_norm_floor > 25.0f) {
+        FACELOGIN_WARN(L"Unsafe learning_norm_floor=%.3f; enforcing 19.1",
+                       cfg.learning_norm_floor);
+        cfg.learning_norm_floor = 19.1f;
+    }
+    cfg.learning_min_interval_sec = jsonGetInt(json, "learning_min_interval_sec", 60);
+    if (cfg.learning_min_interval_sec < 10 || cfg.learning_min_interval_sec > 3600) {
+        FACELOGIN_WARN(L"Unsafe learning_min_interval_sec=%d; enforcing 60",
+                       cfg.learning_min_interval_sec);
+        cfg.learning_min_interval_sec = 60;
+    }
+    cfg.fast_unlock = (jsonGetString(json, "fast_unlock") == "true");
     cfg.camera_rotation = rotation;
     auto cam = jsonGetString(json, "camera_device");
     if (!cam.empty()) cfg.camera_device = cam;
@@ -187,18 +237,7 @@ AppConfig LoadConfig(const std::wstring& dataDir) {
     if (!file.is_open()) {
         FACELOGIN_INFO(L"No config.json found, using defaults + registry");
         AppConfig cfg = DefaultConfig();
-        // Fall back to registry match threshold if set
-        float regThresh = 0.80f;
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, FACELOGIN_REG_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-            DWORD val = 0, size = sizeof(val);
-            if (RegQueryValueExW(hKey, L"MatchThreshold", nullptr, nullptr,
-                                 reinterpret_cast<LPBYTE>(&val), &size) == ERROR_SUCCESS) {
-                regThresh = val / 100.0f;
-            }
-            RegCloseKey(hKey);
-        }
-        cfg.match_threshold = regThresh;
+        // The old R50 registry threshold is not applicable to SFace.
         return cfg;
     }
 

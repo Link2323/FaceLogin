@@ -313,7 +313,8 @@ func (a *App) Uninstall() map[string]interface{} {
 		a.emit(50, "注销登录组件", "done", "")
 	}
 
-	// Step 3: Delete installed program files AND user data (data/, log/) and
+	// Step 3: Delete installed program files AND user data (data/, log/,
+	// camera_tune.state) and
 	// remove the install directory if it becomes empty. This is a FULL purge —
 	// enrolled faces, config, and logs are gone (the frontend warns about this
 	// before uninstall). The directory itself is only removed after every file

@@ -1,19 +1,9 @@
-# README
+# FaceLogin Setup
 
-## About
+FaceLogin Setup 是 Go/Wails 安装与卸载程序，不参与运行时认证。
 
-This is the official Wails Vue-TS template.
+- 完整构建、资源同步与打包流程：[`docs/BUILD.md`](../../docs/BUILD.md)
+- 安装器职责、生命周期和安全边界：[`docs/modules/installer.md`](../../docs/modules/installer.md)
+- 前端维护说明：[`frontend/README.md`](frontend/README.md)
 
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
-
-## Live Development
-
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
-
-## Building
-
-To build a redistributable, production mode package, use `wails build`.
+`resources/` 是构建载荷镜像，不是资源清单的事实源；`frontend/wailsjs/` 是生成绑定，不要手工编辑。

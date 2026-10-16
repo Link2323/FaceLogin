@@ -11,7 +11,3 @@ target_link_libraries(AuthWorkerProtocolTest PRIVATE
 target_include_directories(AuthWorkerProtocolTest PRIVATE
     ${CMAKE_SOURCE_DIR}/face_service
 )
-
-set_target_properties(AuthWorkerProtocolTest PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

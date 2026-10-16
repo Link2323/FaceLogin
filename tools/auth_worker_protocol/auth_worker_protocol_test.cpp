@@ -29,13 +29,13 @@ std::vector<float> UnitEmbedding() {
 
 std::vector<uint8_t> MakeConfigPayload(int32_t rotation,
                                        float threshold, int32_t timeout,
-                                       uint32_t lowLight) {
+                                       int32_t fastUnlock = 0) {
     facelogin::auth_worker::PayloadWriter writer;
     writer.WriteI32(rotation);
     writer.WriteFloat(threshold);
     writer.WriteI32(timeout);
-    writer.WriteU32(lowLight);
     writer.WriteWString(L"camera-path");
+    writer.WriteI32(fastUnlock);
     return writer.Data();
 }
 
@@ -45,8 +45,8 @@ void TestConfigRoundTrip() {
     input.cameraRotation = 270;
     input.antiSpoofThreshold = 0.381f;
     input.authTimeoutSeconds = 23;
-    input.lowLightEnhance = true;
     input.cameraDevice = L"\\\\?\\usb#test-camera";
+    input.fastUnlock = true;
 
     WorkerConfig output;
     const auto encoded = EncodeConfig(input);
@@ -54,20 +54,25 @@ void TestConfigRoundTrip() {
     Check(output.cameraRotation == input.cameraRotation &&
           std::fabs(output.antiSpoofThreshold - input.antiSpoofThreshold) < 0.0001f &&
           output.authTimeoutSeconds == input.authTimeoutSeconds &&
-          output.lowLightEnhance == input.lowLightEnhance &&
-          output.cameraDevice == input.cameraDevice,
+          output.cameraDevice == input.cameraDevice &&
+          output.fastUnlock == input.fastUnlock,
           "worker configuration round trip preserves every field");
 
-    Check(!DecodeConfig(MakeConfigPayload(45, 0.281f, 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(45, 0.281f, 15), output),
           "invalid camera rotation is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(0, std::numeric_limits<float>::quiet_NaN(), 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, std::numeric_limits<float>::quiet_NaN(), 15), output),
           "non-finite PAD threshold is rejected");
-    Check(!DecodeConfig(MakeConfigPayload(0, 0.10f, 15, 0), output),
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.10f, 15), output),
           "below-range PAD threshold is rejected");
-    Check(DecodeConfig(MakeConfigPayload(0, 0.15f, 15, 0), output),
+    Check(DecodeConfig(MakeConfigPayload(0, 0.15f, 15), output),
           "lower-bound PAD threshold 0.15 is accepted");
+    Check(!DecodeConfig(MakeConfigPayload(0, 0.281f, 61), output),
+          "above-range auth timeout is rejected");
     Check(!DecodeConfig(MakeConfigPayload(0, 0.281f, 15, 2), output),
-          "invalid low-light flag is rejected");
+          "non-binary fastUnlock flag is rejected");
+    Check(DecodeConfig(MakeConfigPayload(0, 0.281f, 15, 1), output) &&
+          output.fastUnlock,
+          "fastUnlock=1 decodes to fast mode");
 
     auto truncated = encoded;
     truncated.pop_back();
@@ -97,46 +102,94 @@ void TestMatchProbeValidation() {
     auto embedding = UnitEmbedding();
     unsigned int index = 99;
     std::vector<float> decoded;
-    Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding), index, decoded),
-          "valid normalized 512-D match probe decodes");
-    Check(index == 2 && decoded == embedding,
-          "match probe round trip preserves index and embedding");
+    float preNorm = 0.0f;
+    float yaw = 0.0f, pitch = 0.0f;
+    Check(DecodeMatchProbe(EncodeMatchProbe(2, embedding, 21.5f, -30.0f, 5.0f),
+                           index, decoded, preNorm, yaw, pitch),
+          "valid normalized 128-D match probe decodes");
+    Check(index == 2 && decoded == embedding && preNorm == 21.5f &&
+              std::fabs(yaw - (-30.0f)) < 1e-4f &&
+              std::fabs(pitch - 5.0f) < 1e-4f,
+          "match probe round trip preserves index, embedding, pre-norm and pose");
 
+    auto oldR50 = std::vector<float>(512, 0.0f);
+    oldR50[0] = 1.0f;
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, oldR50, 21.5f, 0.0f, 0.0f),
+                           index, decoded, preNorm, yaw, pitch),
+          "complete old R50 probe cannot cross the SFace boundary");
     auto invalid = embedding;
     invalid[17] = std::numeric_limits<float>::quiet_NaN();
-    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "NaN embedding value is rejected");
     invalid = embedding;
     invalid[17] = std::numeric_limits<float>::infinity();
-    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(1, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "infinite embedding value is rejected");
     Check(!DecodeMatchProbe(EncodeMatchProbe(0,
-          std::vector<float>(kEmbeddingDimension, 0.0f)), index, decoded),
+          std::vector<float>(kEmbeddingDimension, 0.0f), 21.5f, 0.0f, 0.0f),
+          index, decoded, preNorm, yaw, pitch),
           "zero-norm embedding is rejected");
     invalid = embedding;
     for (float& value : invalid) value *= 0.5f;
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "abnormally small embedding norm is rejected");
     invalid = embedding;
     for (float& value : invalid) value *= 2.0f;
-    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid), index, decoded),
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, invalid, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "abnormally large embedding norm is rejected");
 
     PayloadWriter shortWriter;
     shortWriter.WriteU32(0);
-    shortWriter.WriteFloatVector(std::vector<float>(511, 0.0f));
-    Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded),
-          "511-D match probe is rejected");
+    shortWriter.WriteFloatVector(std::vector<float>(127, 0.0f));
+    Check(!DecodeMatchProbe(shortWriter.Data(), index, decoded, preNorm, yaw, pitch),
+          "127-D match probe is rejected");
     PayloadWriter longWriter;
     longWriter.WriteU32(0);
-    longWriter.WriteFloatVector(std::vector<float>(513, 0.0f));
-    Check(!DecodeMatchProbe(longWriter.Data(), index, decoded),
-          "513-D match probe is rejected");
-    Check(!DecodeMatchProbe(EncodeMatchProbe(3, embedding), index, decoded),
+    longWriter.WriteFloatVector(std::vector<float>(129, 0.0f));
+    Check(!DecodeMatchProbe(longWriter.Data(), index, decoded, preNorm, yaw, pitch),
+          "129-D match probe is rejected");
+    PayloadWriter noNormWriter;
+    noNormWriter.WriteU32(0);
+    noNormWriter.WriteFloatVector(embedding);
+    Check(!DecodeMatchProbe(noNormWriter.Data(), index, decoded, preNorm, yaw, pitch),
+          "probe without trailing pre-norm (v3 payload) is rejected");
+    PayloadWriter v4Writer;
+    v4Writer.WriteU32(0);
+    v4Writer.WriteFloatVector(embedding);
+    v4Writer.WriteFloat(21.5f);
+    Check(!DecodeMatchProbe(v4Writer.Data(), index, decoded, preNorm, yaw, pitch),
+          "probe without pose angles (v4 payload) is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding,
+          std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f),
+          index, decoded, preNorm, yaw, pitch),
+          "NaN pre-norm is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 0.0f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
+          "zero pre-norm is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(3, embedding, 21.5f, 0.0f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
           "out-of-range binding index is rejected");
-    auto trailing = EncodeMatchProbe(0, embedding);
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f,
+          std::numeric_limits<float>::quiet_NaN(), 0.0f),
+          index, decoded, preNorm, yaw, pitch),
+          "NaN yaw estimate is rejected");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f, 0.0f,
+          std::numeric_limits<float>::infinity()),
+          index, decoded, preNorm, yaw, pitch),
+          "infinite pitch estimate is rejected");
+    Check(DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f, -90.0f, 90.0f),
+                           index, decoded, preNorm, yaw, pitch),
+          "physical range boundary yaw/pitch +/-90 is accepted");
+    Check(!DecodeMatchProbe(EncodeMatchProbe(0, embedding, 21.5f, 90.5f, 0.0f),
+                            index, decoded, preNorm, yaw, pitch),
+          "out-of-physical-range yaw is rejected");
+    auto trailing = EncodeMatchProbe(0, embedding, 21.5f, 0.0f, 0.0f);
     trailing.push_back(0);
-    Check(!DecodeMatchProbe(trailing, index, decoded),
+    Check(!DecodeMatchProbe(trailing, index, decoded, preNorm, yaw, pitch),
           "match probe trailing bytes are rejected");
 }
 

@@ -1,0 +1,2 @@
+add_executable(EnrollmentSupportTest enrollment_support_test.cpp)
+target_link_libraries(EnrollmentSupportTest PRIVATE facelogin_enrollment_support)

@@ -1,129 +1,109 @@
 # 人脸认证服务
 
-本文解释 `face_service/` 的跨文件行为和修改边界。实现入口是 [`face_service/FaceService.cpp`](../../face_service/FaceService.cpp)；Credential Provider 公共协议、worker 私有协议与持久化分别见 [`IPC 契约`](../contracts/ipc.md)、[`auth-worker IPC 契约`](../contracts/auth-worker-ipc.md) 和 [`users.dat 契约`](../contracts/users-dat.md)。
+本文说明 `face_service/` 的进程边界和认证约束。实现入口为 [`FaceService.cpp`](../../face_service/FaceService.cpp)。公共 IPC、worker 私有 IPC 和数据库格式分别以 [`IPC 契约`](../contracts/ipc.md)、[`worker IPC 契约`](../contracts/auth-worker-ipc.md) 和 [`users.dat 契约`](../contracts/users-dat.md) 为准。
 
-## 责任边界
+服务目录保留生命周期、认证流程、worker、管道和学习调度。相机、模型推理、对齐与曝光控制由共享目录 [`vision/`](../../vision/) 提供；凭据数据库与匹配由 [`storage/`](../../storage/) 提供。服务和注册程序链接同一份静态库实现，各进程仍独立持有实例和运行状态；构建依赖见 [`BUILD.md`](../BUILD.md#c-构建)。
 
-`FaceLoginService.exe` 是自动启动的 Windows 服务，也支持 standalone 开发模式。它负责：
+## 职责与生命周期
 
-- 安全解析 DataPath
-- 父进程加载配置、凭据数据库并维持公开命名管道
-- 锁屏时预加载一个私有认证子进程；子进程独占四个 ONNX 模型和摄像头
-- 检测、PAD、身份一致性和匹配
-- 通过事件驱动命名管道向 Credential Provider 返回终态，并以 2 秒有界 `AUTH_ACK` 确认交付
+服务父进程负责 DataPath、配置、`users.dat`、公开命名管道和身份匹配。锁屏期间异步预载一个 `-auth-worker`，worker 持有 ONNX 模型并在认证请求后打开摄像头，完成一次请求即退出。父进程不持有 ONNX Session，也不会在认证前打开摄像头。
 
-服务不负责注册人脸、验证用户输入的 Windows 密码或安装 COM DLL。
+`authentication_residency.*` 的 `AuthenticationResidency` 管理生命周期线程、驻留引用、加载失败、认证使用计数与配置版本。会话事件只调用 `RequestLoad/RequestUnload`；认证通过 `Acquire` 使用原始截止时间获取带作用域的使用凭证，凭证在准备与认证期间阻止解锁回收。实际 worker 创建由宿主的加载入口提供，加载及资源释放不持有状态锁。服务主线程退出或初始化失败时先停止驻留模块，再销毁加载入口依赖。
 
-## 生命周期
+`ReloadConfig` 统一处理锁屏 worker 替换与版本确认；已排队的重试或替换不能被上一轮的 `Ready/Failed` 提前结束。未锁屏且有意卸载时，配置重载不唤醒模型。worker 的最终回收仍由父服务在公共认证结果确定后执行：失败按锁屏状态补建，成功先交付凭据并等待 ACK，再回收，后续认证请求负责重新加载。
+
+worker 预载诊断在 `auth_worker.log` 输出当前 Session 与显式电源限流标志、三个模型组各自的 SHA-256 校验/初始化耗时，以及模型加预热、相机图骨架和总预载耗时。电源标志不等于实际 CPU 频率，也不足以排除自动调度限制；桌面探针不能替代锁屏 Session 0 测量。桌面加载实验见 [`sface-performance.md`](../work/completed/sface-performance.md)。
+
+认证流水线的曝光诊断在本轮退出时汇总输出：`Exposure phase timing` 拆分预热结束后的检测收集、失效 seed 重抓、参数重放后的稳定等待、触发诊断、调节入口和状态交付；`trigger_query` 单列诊断查询耗时，`query_before_seed_wait` 表示查询是否安排在检测收集前。此时 `seed_wait` 只计查询之后的剩余等待，`trigger` 不再包含提前执行的查询。`Exposure sensor timing` 按重放、重放稳定检查、触发诊断、调节及认证循环分组，记录每类传感器回调的调用次数、失败次数、累计及最大耗时。计时覆盖宿主回调全程（包括 DirectShow QI/Get/GetRange/Release），不是单个驱动内部操作；不记录画面、向量或凭据。分项和调用耗时有包含关系，不能重复相加。
+
+worker 的纯诊断快照通过一次 `GetExposure` 同时读取曝光值和模式；宿主未提供合并回调时使用原来的独立读取。未发生参数重放写入且有待收集检测时，在相机原 COM 线程上先读取诊断参数，与已有异步 SCRFD 重叠；发生重放写入时，仍在稳定等待/重测之后读取。快照仅用于日志，不供调节器作控制判断；调节器继续读取当前模式，曝光诊断本身不改变检测帧选择、新鲜度检查、计帧间隔与认证规则。阶段对照与故障路径检查见 [`sface-performance.md`](../work/completed/sface-performance.md)。
+
+预热循环先判断当前样本是否打开稳定门，再决定是否启动当前帧检测。在无控制重放写入的稳定窗口内，自动曝光策略已确认 AE 活跃，或在预热前通过当前传感器回调确认手动曝光时，若已有来自紧邻上一预热样本的已完成人脸检测，年龄不超过 400 ms，且旧帧与当前帧在旧人脸框内的亮度均处于 50–120、差不超过 10，则复用已有 seed；模式未知、查询失败或其他条件不满足时保留原来的最新或待完成检测流程。手动模式查询在相机原 COM 线程上执行，不使用诊断快照作控制判断。亮度检查先按配置旋转当前帧，后续过期丢弃、控制写入后失效、身份绑定、PAD 和 60 ms pacing 仍执行。异步检测 future 在输入帧释放之前收敛，包括取消退出路径。
+
+`Exposure phase timing` 的 `preparation` 记录预热前的传感器准备（策略判断、缓存重放和手动模式确认），与首帧等待窗口存在重叠，不能额外加到 pipeline 首帧时间上。`seed_reused` 标识上述已完成结果复用分支，`seed_seq` 和 `seed_age` 记录预热门后、过期丢弃和曝光调节之前的 seed 选择；不代表该帧最终已计入认证。自动曝光试用包记录见 [种子调度试用](../work/completed/sface-performance.md#ready-seed-trial)，手动曝光扩展与首帧诊断见 [当前优化记录](../work/in-progress/unlock-performance.md)。
+
+种子调度试用包安装后的 7 次已 ready 的 Session 0 请求全部由 Windows 确认成功，6 次走新增复用分支，全部选择第一帧且 seed 剩余等待为 0 ms；pipeline 中位数 430.3 ms，CP 请求到 Windows ReportResult 为 619 ms。与前批 7 次比较不是受控 A/B，完整差值不能全部归因于调度，首轮相机初始化慢尾仍在。逐轮和限制见 [安装后记录](../work/completed/sface-performance.md#ready-seed-installed)。
+
+ONNX Runtime 的 Warning/Error 通过自定义 Env 日志回调写入宿主的项目日志，使用原有分级刷盘；回调不向 ORT 的 C 接口抛出异常。保留默认 Warning 级别及原有模型加载顺序，避免无控制台 Session 0 中默认 `std::wclog` 输出让 SFace 初始化多付约 1 秒。性能对照与输出一致性证据见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
 ```text
-ServiceMain / RunStandalone
-  └─ Initialize
-      ├─ ResolveSecureDataDir（拒绝不可信路径）
-      ├─ LoadConfig
-      ├─ CredentialStore::LoadDatabase
-      ├─ 创建 PipeServer
-      ├─ 启动模型生命周期线程
-      ├─ 登录界面/锁定会话：异步启动并预加载 `-auth-worker`
-      └─ 已解锁桌面：保持模型未加载
-  └─ Run
-      ├─ SESSION_LOCK / LOGOFF → 异步启动一个已加载模型的 worker
-      ├─ AUTH_REQUEST → worker 打开相机、运行一次完整管线并退出
-      ├─ SESSION_UNLOCK / LOGON → 关闭/终止未使用 worker
-      └─ WaitForClient → ReadMessage → 分派请求 → Disconnect
+Initialize → 校验路径/加载配置和数据库/启动管道与生命周期线程
+锁屏       → 异步预载 worker 与模型
+AUTH_REQUEST → worker 打开相机并认证 → 父进程匹配 SID、构造认证结果
+解锁/登录   → 关闭未使用的 worker
 ```
 
-父服务不在 `Initialize` 中打开摄像头，也不持有 ONNX Session。worker 在锁屏时只加载模型和运行库，并在 READY 前对四个会话各跑一次 dummy 推理预热（把 ORT 首跑懒初始化移出认证关键路径，见 [`performance-baseline.md`](../performance-baseline.md) 实验 8）；`AUTH_REQUEST` 到达后才允许枚举并激活摄像头，认证成功、失败、超时或通信异常后都退出。不存在提前打开摄像头的配置开关。父进程通过私有继承匿名管道取得最多三条 512-D embedding 并在本地匹配 SID；`users.dat`、DPAPI 密码和 `AUTH_SUCCESS` 构造始终留在父进程。
+认证成功、失败、超时或通信异常后，worker 都会退出；服务在锁屏期间按需补建。模型不完整或加载失败时拒绝认证。父进程通过私有管道接收最多三条 SFace embedding，密码解密及 `AUTH_SUCCESS` 构造留在父进程。worker 生命周期和消息字段见私有 IPC 契约。
 
-四个 ONNX 会话也不在已解锁桌面常驻：锁屏事件先异步预加载 worker；认证请求只在事件延迟或丢失时等待其启动。一次 worker 只处理一个请求，失败/超时会在锁屏期间后台补建，成功则等待下一次 `AUTH_REQUEST`；Windows `SESSION_UNLOCK` / `LOGON` 关闭未使用 worker。父进程用模型使用租约避免在认证控制通道未完成时并发终止 worker。模型始终按完整包发布，任一完整性校验或初始化失败都不允许部分认证。
+生产服务路径必须解析到 EXE 所在安装目录，不可信重定向会被拒绝。EXE 位于开发目录时的路径规则见 [`DEVELOPMENT.md` 路径表](../../DEVELOPMENT.md#sec-paths)。
 
-模型会话与 ONNX 运行时资源由 worker 私有持有：每个 worker 完成一次认证后进程退出，因此 DirectShow `BindToObject` 遗留的驱动 `EtwRegistration` 和 ORT/Windows 堆高水位随进程一并回收。成功终态会先回传父进程，worker 随即由系统终止；因此不会把可能较慢的 DirectShow `Stop` 放在解锁关键路径。父进程仍使用 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 作为孤儿 worker 的最终保护。子进程内部可使用共享全局 `Ort::Env`/线程池和 `DisablePerSessionThreads()`；这些对象不会进入常驻父服务。私有协议对配置、request ID、binding 顺序、embedding 维度/有限值/L2 范数做强校验，完整线格式见私有契约。
+## 认证流水线
 
-生产 EXE 位于 Program Files 时，DataPath 只允许解析到 EXE 目录；异常重定向会使服务拒绝启动。非生产 standalone 允许 EXE 目录、ProgramData 和显式开发 hint，完整顺序见 `DEVELOPMENT.md` 的路径表。
+`AuthPipelineResult` 与父端的 `AuthWorkerResult` 使用同一个内部 `AuthOutcome` 终态：失败、成功、取消、超时；默认失败，单次结果只能表示一个终态。worker 和父服务分别映射到已有 IPC 消息或取消处理，枚举不写入管道，线格式保持现有契约。
 
-## 认证主循环
+`AuthPipeline` 是 worker 的认证实现，也由确定性推理替身测试直接执行。主要约束如下：
 
-认证算法只实现于 `AuthPipeline`：生产服务由一次性 worker 调用，standalone 由
-`FaceService::ProcessAuthRequest` 在本进程调用。两条入口共用以下不变量，不能再复制一份
-独立的检测/PAD/绑定循环：
+1. 没有已注册账户时直接失败；双 MiniFAS 活体检测始终启用，任何模型错误都按失败处理。
+2. 摄像头启动后先做曝光预热。人脸亮度出带时，按设备能力调节曝光和增益；有增益时优先用增益细调，无增益时优先保持或恢复驱动自动曝光。指定 `DevicePath` 时必须使用该设备，找不到即失败，不得回退到其他相机。
+3. 调节器须等待可观察的亮度响应与稳定；没有响应证据至少等待 900 ms，持续漂移或未稳定时不确认结果。稳定调节结果可写入 DataPath 根目录的 `camera_tune.state`；取消、丢脸或未稳定不得覆盖旧记录。失败轮进度例外（2026-10-16）：认证失败、取消或超时的轮次，若本轮发生过旋钮写入且带人脸背书的进展证据——出带起点的稳定测量向带内移动超过稳定容差，或无脸起点在轮内恢复出可信人脸（亮度 10–230）——则把最后一次写入目标（写入成功后的寄存器组合，而非失败时刻的驱动回读）写入缓存，供下一 worker 进程接力；带内起点的失败轮不写缓存，其问题在姿态或距离而非采集。写入目标即使未经生效确认也可保存：寄存器值即目标值，下一轮重放后由触发测量重新验证效果，错误猜测一轮内自愈。缓存使用 `exposure`、`gain` 及可选的 `exposure_manual=0|1`：数值相同但模式丢失时也要恢复模式，已处于自动模式时不把缓存中的自动曝光读数锁成手动值。旧两行缓存继续按数值重放，后续调节保存时补充可查询的模式。接管自动曝光后亮度已落入 50–120 时不再为了增益余量继续上调；亮度余量允许时回收过长曝光，但不能低于人脸亮度底线。
+4. 无脸且画面大面积饱和，或中央三分之一区域中最暗四分之一样本的平均亮度不低于 180（过曝但达不到严格饱和判据的场景；2026-10-16 12:39 曾因该缺口在白天对暗光缓存组合每轮空场景失败、零旋钮写入）时，可以有限下调曝光以恢复检测。中央最暗部证据与暗光判据对称：最暗四分位都已这么亮，说明画面里没有可被压暗的暗主体，逆光暗脸不受影响。无脸且中央三分之一区域中最暗四分之一样本的平均亮度不高于 30（避免亮背景淹没较小的暗脸，同时排除少数孤立暗像素）时，先确认暗光稳定，再有限提高增益；自动/未知曝光模式先固定当前曝光值，增益不可用、耗尽或无响应时再按单个驱动步长提高曝光，并受现有曝光上限约束。每次暗光恢复最多写入两次（包含模式接管），该中央暗部亮度达到 50 后停止无脸试探；每次写入等待响应与稳定，出脸后另行确认人脸亮度稳定，再交回人脸优先调节。无脸恢复本身不保存参数；失败终态的人脸背书进度规则（第 3 条）是唯一例外。认证在预环或首个计帧前可尝试暗光恢复，每轮最多进入一次；取消、断开及全局 5 秒截止时间继续生效。注册预览使用同一调节逻辑，并在采集期间跳过后台调节。
+5. 预环后若首个计帧前检测到迟到入场或亮度漂移，可纠正曝光，最多两次并丢弃触发帧重抓。计帧开始后不再修改传感器参数；纠正期间暂停并平移 PAD 计时，全局 5 秒时限继续计时。
+6. 每个计入的帧都必须通过双 MiniFAS PAD。默认 5 帧，首、中、末绑定帧必须匹配同一 SID；非绑定帧以 bbox IoU 保持连续性。`fast_unlock` 模式使用 3 帧且每帧绑定。相邻计帧采集至少间隔 60 ms，帧序号必须递增。等待新序号时也检查取消、客户端断开、认证时限及 8 秒 PAD 窗口；相机持续返回旧缓冲帧不能绕过这些退出条件。
+7. 最佳身份须同时通过距离阈值和最佳/次佳比门控。成功后才生成认证结果；失败时清除敏感数据。
 
-1. 无注册账号直接返回错误。
-2. 双 MiniFAS 活体检测强制启用；没有可切换的方法或关闭开关。
-3. 延迟初始化摄像头并做自适应曝光预热（`exposure_warmup.h`：按帧序号去重采样均值亮度，稳定窗口即通过，2–10 帧）。
-4. 在同一融合循环中完成 SCRFD 检测、双 MiniFAS PAD 和身份一致性。
-5. 所有计入的 PAD 帧都必须通过。
-6. 首个身份锚点锁定 SID，中间和末尾绑定帧必须匹配同一 SID。
-7. 非绑定帧只用 bbox IoU 维持人脸连续性。
-8. 末帧身份锚点同时是最终身份门，不再追加独立 post-liveness embedding。
-9. 成功后才构造 `AUTH_SUCCESS`；失败路径不得泄漏或遗留明文密码。
+身份绑定返回 `Retry` 时，该帧不计入认证证据，并启动独立的 2 秒身份匹配失败计时；再次接受身份绑定时重置。即使此前已有活体帧通过，连续重试仍在该预算耗尽后的下一次身份拒绝时失败，不再只等 8 秒 PAD 窗口。首绑前曝光纠正会暂停该计时；无帧、无脸或 embedding 计算失败不会单独启动它。已有部分身份绑定后持续匹配失败，提示调整位置或光照后重试；窗口结束时若已计入的 PAD 帧全通过但仍有待完成的身份重试，也按身份未完成报告。日志用 `Authentication evidence incomplete` 分别记录身份绑定数和 PAD 通过/计帧数，避免将证据不足统一记成活体拒绝。
 
-全局认证时限和 PAD 独立窗口同时生效。无人脸、持续 PAD 拒绝还有挂钟式快速失败，避免低频 CPU 上按帧计数造成等待时间漂移。
+每轮已有的 embedding 范数日志附带 `Binding capture sequence`：记录实际绑定尝试次数、相邻尝试重复序号次数及首末序号，用于区分持续身份不匹配和重复读取相机旧缓冲帧；不记录画面或向量。
 
-主循环按单预取槽软件流水线调度：PAD(N) 在 async 线程跑时，主线程预取帧 N+1 的抓帧 + SCRFD 检测，判定逻辑与逐帧顺序不变，只有调度顺序改变。帧 pacing 由显式抓帧守卫保证（相邻已计帧采集间隔 ≥60 ms 且帧序号严格递增，锚点在预取前乐观前移到当前帧），每轮结束记录实际最小采集间隔日志。
+认证准备阶段位于 `face_service/auth_frame_preparation.*`，集中处理曝光重放、预热异步检测、种子帧过期与调节；`auth_pipeline.cpp` 保留截止时间和身份/PAD 主循环。准备阶段使用主流程传入的中断检查，不重置预算。异步检测对象同时持有输入帧和 future，退出时先等待检测结束再释放帧；调节恢复状态在整轮认证期间保持固定地址。帧采集节奏由 `auth_frame_stream.*` 管理：计入证据的帧采集间隔至少 60 ms，序号严格递增；身份 Retry 和其他丢弃帧不推进锚点。主循环在身份/连续性检查通过后、预取下一帧前推进锚点，保持 PAD 与下一帧检测重叠。
 
-## 摄像头
+预热与传感器控制实现见 `exposure_warmup.h`、`face_gain_tune.h` 和 `auth_pipeline.cpp`。状态类型与文件读写集中在 `vision/tune_state.*`；`face_gain_tune.h` 保留设备重放与调节策略。认证的传感器诊断快照由 `auth_pipeline_diagnostics.h` 封装，在原相机线程读取且不参与调节判断。曝光探针的使用方法见 [`BUILD.md`](../BUILD.md)。
 
-所有运行期和开发工具均使用 `webcam_capture_dshow.*` 的 DirectShow 实现：服务 worker、standalone、Enrollment 预览与 PAD 标定共享同一条相机路径。worker/standalone 在 MTA 中运行，Enrollment 预览复用 WebView2 UI 的 STA；实现必须只在自身初始化的同一线程调用 `CoUninitialize`。设备的**枚举与图骨架**（FilterGraph/SampleGrabber/Null Renderer，注册表级读取）在 worker 锁屏预载期完成（`WebcamCaptureDS::Preload`，不激活设备、不亮 LED）；**设备激活**（BindToObject/连接/Run）只在 `AUTH_START` 或用户启动预览后。修改相机实现时必须验证 Session 0 和 Desktop 预览两种宿主。
+当前落带参数和已确认调节进度的保存发生在最终身份/PAD 判断前；参数的有效性以曝光测量和稳定依据为准，认证失败本身不否定参数有效，认证成功也不保证参数适合下一轮的新光照。失败轮进度规则在 `AuthPipeline::Run` 的全部非成功终态（含取消、预环中止）统一结算：判定逻辑集中在 `EvaluateFailedRoundTuneProgress`（`vision/face_gain_tune.h`），写入记录由 `TuneWriteTracker` 承载（核心调节、无脸恢复与迟到纠正路径在写入成功后登记寄存器组合，稳定测量登记亮度）；日志行为 `Failed-round tune progress saved/not saved`。环境切换记录、重复恢复的待验证机制及后续提速候选见 [曝光问题与解锁提速方向](../work/in-progress/exposure-issues-and-speedups.md)。
 
-## ONNX 管线
+调节写入因丢脸或样本预算耗尽而未确认时，共享调节器保留本次写入的亮度背景、方向和参数快照。认证在首个计帧前遇到落带人脸时最多接续复核一次：独立稳定门只采纳严格递增的新帧，使用原认证截止时间，复核前后参数及可查询的手动模式须与快照一致；通过后才更新缓存。复核不写硬件、不计身份/PAD 帧，不依赖认证结果，失败不得通过单帧落带分支补存。无脸恢复的场景亮度不能证明人脸响应，须按无响应回退条件重新确认人脸。正常稳定轮次不进入接续复核。
 
-| 类 | 正式模型 | 输入/输出 | 角色 |
-|---|---|---|---|
-| `OnnxDetector` | `det_10g_gnkps.onnx` | 512×512 → bbox + 5 点 | SCRFD 检测 |
-| `OnnxRecognizer` | `w600k_r50.onnx` | 112×112 → 512-D L2 embedding | 身份识别 |
-| `OnnxAntiSpoof` | `MiniFASNetV2.onnx` + `MiniFASNetV1SE.onnx` | 2.7×/4.0× crop → 融合分数 | 静默 PAD |
+## 摄像头与模型
 
-SCRFD 5 点经 [`face_align.h`](../../face_service/face_align.h) 做相似变换和偏航角估计。不存在 dlib 检测器、68 点模型或当前 128-D 识别器。
+SFace 正式运行导出已移除 174 个 initializer graph inputs，保留权重、节点和真正的图像输入；因此不再产生这组 ORT WARN。运行哈希由 `common/model_hashes.h` 固定，与原始上游哈希不同；来源及转换记录见 `third_party/models/sface/provenance.json`。已有 V6/SFC1 人脸库保持兼容，本次不改识别阈值或要求重录。原生输出与旧库对照、初始化/推理取舍见 [`sface-performance.md`](../work/completed/sface-performance.md)。
 
-生产 worker 与 standalone 都在构造 ONNX Session 前校验四个模型的 SHA-256，C++ 常量集中在 `common/model_hashes.h`；安装器还会在提取前后独立校验同一组模型。模型已在当前工作区准备完成，普通构建不要重新下载或量化。
+所有运行期相机路径使用 DirectShow。锁屏预载只枚举设备并准备图骨架，不激活设备；设备仅在认证请求或用户启动预览后激活。worker 在 MTA，Enrollment 预览在 UI STA；DirectShow COM 初始化和释放必须留在同一线程。改动相机生命周期时要覆盖 Session 0 与桌面预览。
 
-模型生命周期状态为 `Unloaded → Loading → Ready/Failed`，其中 `Ready` 表示私有 worker 的 Hello/Init/Ready 握手已经完成。`HandlerEx` 只提交加载/释放请求，构造/关闭由长期生命周期线程完成；`AUTH_REQUEST` 是锁屏通知之外的加载兜底。`CONFIG_RELOAD` 在桌面已解锁时只更新下一次 worker 的配置；锁屏时会以配置代次替换 worker，确认新 worker 已就绪后才回复成功。`service.log` 记录父进程资源和成功终态计时，`auth_worker.log` 记录 worker 的模型加载、预热选择、相机/PAD 过程以及失败终态；成功路径不在 worker 内同步写终态日志。身份不匹配的失败轮会补齐诊断字段：父进程 WARN 附"closest identity distance=…, threshold=…"(该轮最近身份距离，`FindBestIdentity` 出参收集)，worker 的 unknown-face 快速失败与成功终态行附"width=… px, face luma=…"(首次身份 miss / 末次绑定帧的人脸宽与亮度)，用于区分"差一点过阈值"与"完全不是本人"、以及光照域差问题。`CameraLifecycleTest` 用 DirectShow 的 inproc/child 模式确认驱动与隔离边界；`AuthWorkerProtocolTest` 验证私有协议与畸形输入；`AuthWorkerLifecycleTest` 覆盖 supervisor 故障、Job 清理和 100 次模拟认证退出；`CredentialStoreTest` 覆盖 identity-only 匹配、最终单次解密和仅 V4 的 fail-closed 读取。
+图骨架可预载设备无关的软件 AVI Decompressor。激活后，已读取的当前输入类型为 YUY2 时优先直接连接 capture → AVI Decompressor → RGB24 SampleGrabber；转换器不可用、输入为其他类型或直接连接失败时，删除可选滤镜并使用原 Intelligent Connect。直接连接失败须先断开两段连接的双方；清理失败则初始化失败，不在残留连接上重试，也不切换设备。`DirectShow webcam initialized` 日志用 `(AVI direct)` 或 `(Intelligent Connect)` 标识实际路径。预载不绑定设备、不连接相机引脚或启动采集。
 
-## 当前认证常量
+`Auth pipeline first valid frame ... after camera ready` 的实际计时起点是 `AuthPipeline::Run` 内的 `pipelineStart`，终点是首次成功 `grabFrame` 返回；它包含前置传感器准备、轮询和 RGB 拷贝，不直接测量 `Run()` 返回到流线程首回调。当前 warmup 仍用 10 ms 轮询。桌面首帧复审发现事件取帧候选，用户放弃其约 5–6 ms 收益；MF 桌面首样本成绩不足以推翻其历史完整 Session 0 回归，继续保留 DirectShow，见 [首帧复审](../work/completed/sface-performance.md#first-frame-review)。后续桌面调查发现预载同一软件转换器并直接连接可使初始化约省 21–23 ms；用户同意试用后已实施上述兼容回退，并确认安装后的 4 次 Session 0 锁屏均使用直接连接且成功。其初始化中位数 164.2 ms，完整解锁 648.5 ms；与早先小批次比较不是受控 A/B，长期收益仍待验证，见 [试用实现及锁屏记录](../work/completed/sface-performance.md#camera-direct-trial)。
 
-这些值用于定位行为；修改前必须回到代码和标定文档复核。
+| 模型 | 输入/输出 | 用途 |
+|---|---|---|
+| `det_10g_gnkps.onnx` | 512×512，框与 5 个关键点 | SCRFD 检测、相似变换对齐 |
+| `face_recognition_sface_2021dec.onnx` | 112×112，128 维 embedding | SFace 身份识别 |
+| `MiniFASNetV2.onnx`、`MiniFASNetV1SE.onnx` | 2.7× / 4.0× 人脸裁剪 | 双模型融合 PAD |
 
-| 参数 | 当前值 | 事实源 |
-|---|---:|---|
-| 512-D 匹配默认阈值 | 0.80 | `AppConfig::match_threshold` |
-| 匹配安全带 | [0.70, 1.00]，越界回退 0.80 | `EmbeddingThresholdForDim` / config normalize |
-| best/second-best 拒绝比 | `>= 0.75` | `CredentialStore::FindMatch` |
-| 双 MiniFAS 权重 | 0.5 / 0.5 | `OnnxAntiSpoof` |
-| PAD 阈值 | 0.28（UI 可调 0.15–0.50，标定点 0.281） | `AppConfig::anti_spoof_threshold` |
-| 服务相机后端 | DirectShow | `webcam_capture_dshow.*` |
-| 锁屏摄像头预热 | 禁止；只在 `AUTH_START` 后打开 | `RunAuthenticationWorker` |
-| worker 电源策略 | `AUTH_START` 起解除 EcoQoS 限流（EXECUTION_SPEED opt-out；A/B 实测慢机防 P 核被压至 1466–1833/2200 MHz，插电也会发生） | `RunAuthenticationWorker` |
-| 私有管道轮询定时器精度 | 认证窗口 1 ms（worker 自 READY 后空闲环起、父服务自 `StartAuth` 写入起；默认 ~15.6 ms 节拍下 `Sleep(1)` 实睡一拍，双机埋点实测拾取等待合计开发机 ~40 ms/慢机 ~20 ms；Win11 起提精度仅作用于本进程） | `ScopedTimerResolution`（`timer_resolution.h`） |
-| PAD 计帧 | 5/5 全过 | `liveness_types.h` |
-| 已计帧采集间隔 | ≥60 ms + 帧序号严格递增（显式抓帧守卫） | `AuthPipeline::Run`（`auth_pipeline.cpp`） |
-| 全局认证时限 | 15 s | `m_authTimeoutSeconds` |
-| PAD 窗口 | 8 s | `ProcessAuthRequest` |
-| 全程无人脸快速失败 | 2.5 s | `ProcessAuthRequest` |
-| 持续 PAD 拒绝快速失败 | 2.0 s，自首次检测到人脸起算 | `LivenessTiming`（`liveness_types.h`） |
+worker 在创建 Session 前校验四个模型的 SHA-256；C++ 哈希见 `common/model_hashes.h`，安装器提取时也会校验。普通构建复用现有模型，不要重新下载或量化。
 
-`FaceService.h` 中 `m_matchThreshold = 0.30f` 的成员初始化器会在 Initialize/reload 立即被配置覆盖，不是运行时默认值。
+worker 的模型状态为 `Unloaded → Loading → Ready/Failed`。加载、释放由生命周期线程串行处理；配置重载会替换锁屏 worker，并在新 worker 就绪后确认。服务与 worker 分别写 `service.log`、`auth_worker.log`；排障步骤见 [`运维手册`](../operations/operations.md)。
 
-## 性能决策
+`DirectShow first frame timing` 单独记录采集启动边界：`run_call` 为 `IMediaControl::Run` 调用耗时；`run_to_callback` 从调用 Run 前到首个有效 BufferCB 入口；`callback_copy` 包含该回调锁等待、缓冲分配和拷贝；`ready_to_grab` 从首缓冲写好到应用首次成功取帧取得锁并准备拷贝；`grab_lock_wait` 为该次取帧的锁等待；`grab_copy` 为 RGB 转换拷贝。回调只记录 QPC 时间戳，日志在首次成功取帧释放锁后输出，每次 Run 最多一条。`run_call`、`grab_lock_wait` 与其他分项有重叠，不能全部相加；这些是采集链路边界，不直接指认固件内部成本。诊断只记录时间，不保存画面或改变采集调度。
 
-当前基准显示 CPU 频率是主要决定变量，多帧全嵌入在降频机器上不可行。除非有新的可复现实验，不做逐机阈值/帧数调优，也不要恢复独立 post-liveness embedding。
+## 当前关键值
 
-迁移前的性能实验与嵌入优化见 [`performance-baseline.md`](../performance-baseline.md)；当前 worker 性能、资源和后端决策见 [`auth-worker-migration-completion.md`](../auth-worker-migration-completion.md)。阈值修改必须走 [`threshold-calibration.md`](../threshold-calibration.md) 的标定流程，不能凭主观体验调整。
+| 项目 | 当前值 |
+|---|---|
+| SFace 匹配阈值 | 默认 1.00，试用范围 [0.70, 1.00]；非生产标定 |
+| 最佳/次佳比门控 | 0.75 |
+| PAD 融合与阈值 | 双 MiniFAS 各 0.5；默认 0.28（标定点 0.281） |
+| PAD 计帧 | 默认 5；`fast_unlock` 为 3 |
+| 全局认证时限 | 5 秒共用预算，包含模型等待、相机与曝光准备；PAD 原独立窗口 8 秒受总时限约束 |
+| 无脸 / 持续 PAD 拒绝快速失败 | 2.5 秒 / 2 秒 |
+| 连续身份匹配重试预算 | 2 秒；身份接受时重置，与 PAD 通过次数无关 |
 
-## 错误与日志
+阈值的标定证据见 [`threshold-calibration.md`](../work/completed/threshold-calibration.md)；SFace 试用限制见 [`sface-trial.md`](../work/in-progress/sface-trial.md)。
 
-- 模型缺失或 PAD 推理异常：fail-closed；模型加载/完整性失败按类别输出锁屏文案（检测/识别/活体完整性 vs 普通加载失败），单一来源 `face_service/model_failure.h`，worker 与 standalone 共用
-- 不可信 DataPath：拒绝启动
-- 无人脸/PAD/身份不一致：`AUTH_ERROR:message`
-- 全局时限耗尽：`AUTH_TIMEOUT`
-- 客户端中途断开：停止认证并清除敏感数据
+## 故障处理与修改检查
 
-生产日志：`<DataPath>\log\service.log` 和 `<DataPath>\log\auth_worker.log`。standalone 默认启用 Debug；初始化成功只表示公开管道和 worker 生命周期线程已启动。锁屏/登录界面应出现 `Authentication worker ready in ... ms`；成功认证时 `service.log` 应先出现 `Credentials sent ...`，随后记录 `Authentication worker timing ... cleanup=...`，子进程应已退出。已解锁时父进程只保留公开管道、凭据库和基础线程。连续循环要比较父进程句柄/线程/private bytes/working set 是否稳定，确认每轮 worker PID 均已退出且无孤儿 Job，不能再以子进程的临时高水位判定父服务泄漏。
+- 模型缺失、哈希不符、PAD 推理异常或 worker 通信失败：拒绝人脸认证，保留 Windows 密码登录。
+- DataPath 不可信：服务拒绝启动。
+- 无人脸、PAD 失败或身份不一致：返回认证错误；全局时限耗尽：返回超时。
+- 修改认证顺序时检查 IPC、凭据匹配和密码清零；修改模型时同步哈希、安装器校验和标定文档；修改相机时覆盖 child 生命周期、Session 0 和桌面预览。
 
-## 修改检查表
-
-- 认证顺序变化：检查 IPC、CredentialStore、密码清零和性能基准
-- 相机变化：验证 DirectShow 的 child 生命周期、Session 0 与 Desktop 预览
-- 模型生命周期变化：验证锁屏预加载、密码解锁释放、快速锁定兜底、连续循环和服务停止
-- 模型变化：同步 C++ hash、Go 资源校验、下载/转换脚本和标定文档
-- 阈值变化：更新默认配置、钳制、安装器迁移和标定结论
-- 最低验证：Release 构建 + 三个 worker/凭据测试；涉及相机先跑 DirectShow child 生命周期，再补 Session 0/锁屏验证
+最低验证命令见 [`BUILD.md`](../BUILD.md)。相机、Credential Provider 和锁屏行为还需按实际设备验收；自动化测试不能替代实机认证。

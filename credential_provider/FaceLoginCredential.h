@@ -149,7 +149,7 @@ private:
     std::wstring m_statusText;
 
     // Auth timeout tracking (so we don't block LogonUI forever)
-    LONGLONG m_authStartTime = 0;  // 100ns units, 0 = not yet started
+    std::atomic<facelogin::ipc::AuthDeadline> m_authDeadline{};
 
     // Selects the edge-policy semantics for the watcher. The initial lock
     // round accepts an ordinary orphan BREAK because the wallpaper may have
@@ -174,5 +174,4 @@ private:
 
     // Synchronization
     CRITICAL_SECTION m_cs;
-    bool m_csInitialized = false;
 };

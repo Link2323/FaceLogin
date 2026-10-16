@@ -65,7 +65,7 @@ private:
     // recreated under a just-deleted/renamed name inherits the old creation
     // time) keeps the stale birth date alive and re-triggers rotation on every
     // write, destroying all but the newest line.
-    static constexpr int kMaxLogDays = 3;   // keep up to 3 days of logs
+    static constexpr int kMaxLogDays = 14;  // progressive-learning calibration needs a ≥2-week window; volume is ~1 MB/day
 
     void CheckRotation();   // rotate if m_logPath is stale (older than kMaxLogDays)
     void MaybeCheckRotation();  // throttled CheckRotation for the per-write path

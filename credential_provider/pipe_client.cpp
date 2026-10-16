@@ -9,8 +9,6 @@ namespace facelogin {
 
 namespace {
 
-constexpr DWORD kPipeWriteTimeoutMs = 5000;
-
 bool IsPipeClosedError(DWORD error) {
     return error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA ||
            error == ERROR_PIPE_NOT_CONNECTED;
@@ -28,6 +26,21 @@ PipeClient::~PipeClient() {
         CloseHandle(m_hReadStop);
         m_hReadStop = nullptr;
     }
+}
+
+void PipeClient::NotifyReadFailure() {
+    m_connected = false;
+    // The callback can destroy this client. Copy it before invoking it and
+    // do not access members afterwards, including at the call site.
+    auto onResponse = m_onResponse;
+    if (onResponse) onResponse(false, L"");
+}
+
+void PipeClient::NotifyReadTimeout() {
+    // Close the pipe before calling back; the callback may destroy this client.
+    auto onResponse = m_onResponse;
+    Disconnect();
+    if (onResponse) onResponse(true, ipc::MSG_AUTH_TIMEOUT);
 }
 
 void PipeClient::CleanupReadThread() {
@@ -52,10 +65,12 @@ void PipeClient::CleanupReadThread() {
 bool PipeClient::Connect(DWORD timeoutMs, const wchar_t* pipeName) {
     Disconnect();
 
-    auto startTime = std::chrono::steady_clock::now();
+    const auto deadline = ipc::MakeAuthDeadline(timeoutMs);
     const wchar_t* name = pipeName ? pipeName : ipc::PIPE_NAME;
 
     while (true) {
+        const DWORD remainingMs = ipc::RemainingAuthTimeMs(deadline);
+        if (remainingMs == 0) return false;
         m_hPipe = CreateFileW(
             name,
             GENERIC_READ | GENERIC_WRITE,
@@ -78,24 +93,24 @@ bool PipeClient::Connect(DWORD timeoutMs, const wchar_t* pipeName) {
         DWORD err = GetLastError();
 
         if (err == ERROR_PIPE_BUSY) {
-            if (!WaitNamedPipeW(name, 200)) {
-                auto elapsed = std::chrono::steady_clock::now() - startTime;
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() >= timeoutMs) {
+            if (!WaitNamedPipeW(name, remainingMs < 200 ? remainingMs : 200)) {
+                const DWORD retryMs = ipc::RemainingAuthTimeMs(deadline);
+                if (retryMs == 0) {
                     FACELOGIN_WARN(L"Pipe connection timed out (pipe busy)");
                     return false;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                std::this_thread::sleep_for(std::chrono::milliseconds(retryMs < 100 ? retryMs : 100));
             }
             continue;
         }
 
         if (err == ERROR_FILE_NOT_FOUND) {
-            auto elapsed = std::chrono::steady_clock::now() - startTime;
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() >= timeoutMs) {
+            const DWORD retryMs = ipc::RemainingAuthTimeMs(deadline);
+            if (retryMs == 0) {
                 FACELOGIN_WARN(L"Pipe connection timed out (pipe not found)");
                 return false;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::this_thread::sleep_for(std::chrono::milliseconds(retryMs < 500 ? retryMs : 500));
             continue;
         }
 
@@ -104,7 +119,7 @@ bool PipeClient::Connect(DWORD timeoutMs, const wchar_t* pipeName) {
     }
 }
 
-bool PipeClient::SendMessage(const std::wstring& message) {
+bool PipeClient::SendMessage(const std::wstring& message, DWORD timeoutMs) {
     if (!m_connected || m_hPipe == INVALID_HANDLE_VALUE) return false;
 
     DWORD byteSize = static_cast<DWORD>((message.size() + 1) * sizeof(wchar_t));
@@ -121,7 +136,7 @@ bool PipeClient::SendMessage(const std::wstring& message) {
                             nullptr, &overlapped);
     DWORD error = result ? ERROR_SUCCESS : GetLastError();
     if (!result && error == ERROR_IO_PENDING) {
-        const DWORD wait = WaitForSingleObject(writeEvent, kPipeWriteTimeoutMs);
+        const DWORD wait = WaitForSingleObject(writeEvent, timeoutMs);
         if (wait == WAIT_OBJECT_0) {
             result = GetOverlappedResult(m_hPipe, &overlapped,
                                          &bytesWritten, FALSE);
@@ -144,7 +159,7 @@ bool PipeClient::SendMessage(const std::wstring& message) {
         if (IsPipeClosedError(error)) {
             FACELOGIN_WARN(L"Pipe broken during send");
         } else if (error == ERROR_TIMEOUT) {
-            FACELOGIN_WARN(L"Pipe write timed out after %lu ms", kPipeWriteTimeoutMs);
+            FACELOGIN_WARN(L"Pipe write timed out after %lu ms", timeoutMs);
         } else {
             FACELOGIN_ERROR(L"Overlapped WriteFile on pipe failed: %lu", error);
         }
@@ -167,9 +182,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
     HANDLE readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!readEvent) {
         FACELOGIN_ERROR(L"CreateEvent for pipe read failed: %lu", GetLastError());
-        self->m_connected = false;
-        auto onResponse = self->m_onResponse;
-        if (onResponse) onResponse(false, L"");
+        self->NotifyReadFailure();
         return 0;
     }
 
@@ -177,9 +190,14 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
     // alive until every pending read has either completed or been cancelled
     // and reaped with GetOverlappedResult.
     wchar_t buffer[4096] = {};
+    const auto deadline = self->m_authDeadline;
     while (true) {
         if (WaitForSingleObject(self->m_hReadStop, 0) == WAIT_OBJECT_0) {
-            FACELOGIN_INFO(L"Background read: stop signaled — exiting");
+            FACELOGIN_DEBUG(L"Background read: stop signaled — exiting");
+            break;
+        }
+        if (ipc::RemainingAuthTimeMs(deadline) == 0) {
+            self->NotifyReadTimeout();
             break;
         }
 
@@ -200,12 +218,12 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             // into a credential whose owner is being destroyed.
             HANDLE waits[] = { self->m_hReadStop, readEvent };
             const DWORD wait = WaitForMultipleObjects(ARRAYSIZE(waits), waits,
-                                                      FALSE, INFINITE);
+                                                      FALSE, ipc::RemainingAuthTimeMs(deadline));
             if (wait == WAIT_OBJECT_0) {
                 CancelIoEx(self->m_hPipe, &overlapped);
                 DWORD ignored = 0;
                 GetOverlappedResult(self->m_hPipe, &overlapped, &ignored, TRUE);
-                FACELOGIN_INFO(L"Background read: stop signaled — I/O cancelled");
+                FACELOGIN_DEBUG(L"Background read: stop signaled — I/O cancelled");
                 break;
             }
             if (wait == WAIT_OBJECT_0 + 1) {
@@ -216,6 +234,11 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
                 CancelIoEx(self->m_hPipe, &overlapped);
                 DWORD ignored = 0;
                 GetOverlappedResult(self->m_hPipe, &overlapped, &ignored, TRUE);
+                if (wait == WAIT_TIMEOUT) {
+                    SecureZeroMemory(buffer, sizeof(buffer));
+                    self->NotifyReadTimeout();
+                    break;
+                }
                 error = GetLastError();
                 result = FALSE;
             }
@@ -228,7 +251,12 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
         // Disconnect may race an immediately-completed read. Teardown wins;
         // discard the completed message instead of issuing a late callback.
         if (WaitForSingleObject(self->m_hReadStop, 0) == WAIT_OBJECT_0) {
-            FACELOGIN_INFO(L"Background read: stop won completion race");
+            FACELOGIN_DEBUG(L"Background read: stop won completion race");
+            break;
+        }
+        if (ipc::RemainingAuthTimeMs(deadline) == 0) {
+            SecureZeroMemory(buffer, sizeof(buffer));
+            self->NotifyReadTimeout();
             break;
         }
 
@@ -239,9 +267,7 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
             } else {
                 FACELOGIN_WARN(L"Background overlapped read failed: %lu", error);
             }
-            self->m_connected = false;
-            auto onResponse = self->m_onResponse;
-            if (onResponse) onResponse(false, L"");
+            self->NotifyReadFailure();
             break;
         }
 
@@ -258,8 +284,8 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
         // log without a special-cased redaction branch.
         if (msg.starts_with(ipc::MSG_STATUS_PREFIX)) {
             std::wstring statusText = msg.substr(wcslen(ipc::MSG_STATUS_PREFIX));
-            FACELOGIN_INFO(L"Background read received: STATUS:%s (len=%zu)",
-                           statusText.substr(0, 80).c_str(), len);
+            FACELOGIN_INFO(L"Background read received: STATUS:%s",
+                           statusText.substr(0, 80).c_str());
             if (self->m_onStatus) {
                 self->m_onStatus(statusText);
             }
@@ -272,8 +298,13 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
         // terminal result already received by LogonUI; the server will time
         // out and close its side after a bounded wait.
         SecureZeroMemory(buffer, sizeof(buffer));
-        if (!self->SendMessage(ipc::MSG_AUTH_ACK)) {
+        if (!self->SendMessage(ipc::MSG_AUTH_ACK, ipc::RemainingAuthTimeMs(deadline))) {
             FACELOGIN_WARN(L"Failed to acknowledge terminal pipe message");
+        }
+        if (ipc::RemainingAuthTimeMs(deadline) == 0) {
+            SecureZeroMemory(msg.data(), msg.size() * sizeof(wchar_t));
+            self->NotifyReadTimeout();
+            break;
         }
 
         // Deliver via callback, then scrub the remaining plaintext wstring
@@ -293,7 +324,8 @@ DWORD WINAPI PipeClient::ReadThreadProc(LPVOID param) {
 }
 
 bool PipeClient::StartBackgroundRead(OnResponseCallback onResponse,
-                                     OnStatusCallback onStatus) {
+                                     OnStatusCallback onStatus,
+                                     ipc::AuthDeadline deadline) {
     if (!m_connected || m_hPipe == INVALID_HANDLE_VALUE) return false;
 
     // Join any previous thread
@@ -303,6 +335,7 @@ bool PipeClient::StartBackgroundRead(OnResponseCallback onResponse,
     ResetEvent(m_hReadStop);
     m_onResponse = std::move(onResponse);
     m_onStatus   = std::move(onStatus);
+    m_authDeadline = deadline == ipc::AuthDeadline{} ? ipc::MakeAuthDeadline() : deadline;
 
     m_hReadThread = CreateThread(
         nullptr, 0,

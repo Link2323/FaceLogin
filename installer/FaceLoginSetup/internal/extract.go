@@ -41,10 +41,10 @@ var requiredModels = []requiredModel{
 		sha256:       "07b62718eb454ee1881465c12d0d0546f2e916e3bb549f142dc221729bf7f4dc",
 	},
 	{
-		embeddedPath: "resources/models/w600k_r50.onnx",
-		fileName:     "w600k_r50.onnx",
-		size:         43805153,
-		sha256:       "b9b2ea32afaa88dfd226255f354ea241c3a744abf75b3dbdcf00c95f7f00e185",
+		embeddedPath: "resources/models/face_recognition_sface_2021dec.onnx",
+		fileName:     "face_recognition_sface_2021dec.onnx",
+		size:         38688787,
+		sha256:       "ae6a6ac44d2bdc87924e75fb23d8212430dd24f037f5e035c21deff99afc8b61",
 	},
 	{
 		embeddedPath: "resources/models/MiniFASNetV2.onnx",
@@ -74,11 +74,21 @@ var currentRootPayloadFiles = []string{
 	"libprotobuf.dll",
 	"onnxruntime.dll",
 	"re2.dll",
+	"LICENSE.txt",
+	"THIRD_PARTY_NOTICES.txt",
+	"MODEL_LICENSES.txt",
+}
+
+// Created at runtime beside data/ and log/, not shipped in the payload.
+// Upgrades preserve these files; full uninstall removes them by exact name.
+var rootRuntimeDataFiles = []string{
+	"camera_tune.state",
 }
 
 // Files deployed by earlier releases but intentionally absent from the current
 // manifest. Upgrade and uninstall remove only these exact legacy names.
 var legacyModelFiles = []string{
+	"w600k_r50.onnx",
 	"OULU_Protocol_2_model_0_0.onnx",
 }
 
@@ -201,9 +211,10 @@ func ExtractResource(embeddedPath, destPath string) error {
 //	  FaceLoginService.exe
 //	  FaceLoginCredentialProvider.dll
 //	  FaceLoginConsole.exe
-//	  openblas.dll  (etc.)
+//	  five runtime DLLs
+//	  LICENSE.txt, THIRD_PARTY_NOTICES.txt, MODEL_LICENSES.txt
 //	  models/
-//	    *.dat, *.onnx  (model files)
+//	    four production *.onnx models
 func ExtractAll(destDir string, progressFn func(step, total int, name string)) error {
 	// Create target directories
 	modelsDir := filepath.Join(destDir, "models")
@@ -370,8 +381,9 @@ func removeAllOrScheduleReboot(path string) (rebootRequired bool, err error) {
 }
 
 // RemoveInstalledFiles removes the current payload plus explicitly known
-// legacy files. It reports immediate removals separately from verified
-// pending-reboot removals, and never suppresses a real deletion error.
+// legacy files, and runtime data when requested. It reports immediate removals
+// separately from verified pending-reboot removals, and never suppresses a real
+// deletion error.
 func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, rebootRequired bool, err error) {
 	var firstErr error
 	recordErr := func(err error) {
@@ -435,6 +447,9 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, reb
 	}
 
 	if removeUserData {
+		for _, name := range rootRuntimeDataFiles {
+			removeKnownFile(filepath.Join(destDir, name))
+		}
 		for _, sub := range []string{"data", "log"} {
 			dir := filepath.Join(destDir, sub)
 			if !DirExists(dir) {
@@ -469,8 +484,8 @@ func RemoveInstalledFiles(destDir string, removeUserData bool) (removed int, reb
 	return removed, rebootRequired, firstErr
 }
 
-func isKnownRootPayload(name string) bool {
-	for _, names := range [][]string{currentRootPayloadFiles, legacyRuntimeFiles, legacyToolFiles} {
+func isKnownRootFile(name string) bool {
+	for _, names := range [][]string{currentRootPayloadFiles, rootRuntimeDataFiles, legacyRuntimeFiles, legacyToolFiles} {
 		for _, known := range names {
 			if strings.EqualFold(name, known) {
 				return true
@@ -498,7 +513,7 @@ func isOwnedSubdir(name string) bool {
 }
 
 // RemoveInstalledDir finalizes the verified FaceLogin install directory. Only
-// known root payload files and installer-owned subdirectories are touched;
+// known root payload/runtime files and installer-owned subdirectories are touched;
 // unknown entries produce an explicit error. If any child is pending deletion,
 // the root directory is also verified as pending so no empty shell is left
 // after reboot.
@@ -527,7 +542,7 @@ func RemoveInstalledDir(destDir string) (removed, rebootRequired bool, err error
 			continue
 		}
 
-		if !isKnownRootPayload(entry.Name()) {
+		if !isKnownRootFile(entry.Name()) {
 			return false, rebootRequired, fmt.Errorf("install directory contains unknown file: %s", entry.Name())
 		}
 		_, pending, removeErr := removeFileOrScheduleReboot(entryPath)

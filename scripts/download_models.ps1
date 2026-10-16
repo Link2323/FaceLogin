@@ -23,8 +23,12 @@ $ErrorActionPreference = 'Stop'
 # normalizes it, then quantizes it in place.
 $detectorRaw = @{
     Name = 'det_10g_gnkps.onnx.raw-download'
-    Url = 'https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/main/scrfd_10g_gnkps_fp32.onnx'
+    # Publisher's Apache-2.0 declaration and provenance: docs/model-licenses.md.
+    # Pin the source revision as well as the original bytes; never infer weight
+    # terms from the SCRFD architecture name or from InsightFace's code license.
+    Url = 'https://hf-mirror.com/kunkunlin1221/face-detection_scrfd-10g-gnkps/resolve/eb0e349519cd951b2a9423dac45b39e8ce5a71b8/scrfd_10g_gnkps_fp32.onnx'
     RawSize = 16273449
+    RawSha256 = '2112D066C1DCE6CC648670E69CF90561B9287BB1945153F3B461A487131255B9'
 }
 $detectorFp32 = @{
     Name = 'det_10g_gnkps.fp32.onnx'
@@ -36,21 +40,15 @@ $detectorInt8 = @{
     Size = 4257451
     Sha256 = '07B62718EB454EE1881465C12D0D0546F2E916E3BB549F142DC221729BF7F4DC'
 }
-# The release recognizer is a locally-quantized INT8 build (static QDQ,
-# per-tensor) of the pinned FP32 artifact — see
-# tools/threshold_calibration/quantize_r50.py for the experiment + calibration
-# that validated it (same-angle p50 0.665 -> 0.694, 1.68x on the dev CPU).
-# This script downloads the pinned FP32 model, then quantizes it in place.
-$recognizerFp32 = @{
-    Name = 'w600k_r50.fp32.onnx'
-    Url = 'https://hf-mirror.com/richarrrddd/w600k_r50_v1/resolve/main/w600k_r50.onnx'
-    Size = 174383860
-    Sha256 = '4C06341C33C2CA1F86781DAB0E829F88AD5B64BE9FBA56E56BC9EBDEFC619E43'
-}
-$recognizerInt8 = @{
-    Name = 'w600k_r50.onnx'
-    Size = 43805153
-    Sha256 = 'B9B2EA32AFAA88DFD226255F354EA241C3A744ABF75B3DBDC00C95F7F00E185'
+# Pinned OpenCV SFace FP32 export; remove initializer graph inputs only.
+# Pixel normalization remains inside ONNX; weights/nodes are unchanged.
+$recognizer = @{
+    Name = 'face_recognition_sface_2021dec.onnx'
+    Url = 'https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx'
+    RawSize = 38696353
+    RawSha256 = '0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79'
+    Size = 38688787
+    Sha256 = 'AE6A6AC44D2BDC87924E75FB23D8212430DD24F037F5E035C21DEFF99AFC8B61'
 }
 
 function Test-PinnedFile {
@@ -108,8 +106,8 @@ else {
         Write-Host "[DOWNLOAD] raw SCRFD export" -ForegroundColor Yellow
         try {
             Download-File -Url $detectorRaw.Url -Destination $rawDetectorPath
-            if ((Get-Item -LiteralPath $rawDetectorPath).Length -ne $detectorRaw.RawSize) {
-                throw "Raw detector size is unexpected: $rawDetectorPath"
+            if (-not (Test-PinnedFile -Path $rawDetectorPath -ExpectedSize $detectorRaw.RawSize -ExpectedSha256 $detectorRaw.RawSha256)) {
+                throw "Raw detector did not match the pinned publisher artifact: $rawDetectorPath"
             }
 
             $normalizer = Join-Path $PSScriptRoot 'normalize_scrfd_export.py'
@@ -145,36 +143,36 @@ else {
     Write-Host "[OK] $($detectorInt8.Name) quantized and verified." -ForegroundColor Green
 }
 
-$recognizerFp32Path = Join-Path $ModelsDir $recognizerFp32.Name
-$recognizerPath = Join-Path $ModelsDir $recognizerInt8.Name
-if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizerInt8.Size -ExpectedSha256 $recognizerInt8.Sha256) {
-    Write-Host "[SKIP] $($recognizerInt8.Name) is already the verified INT8 artifact." -ForegroundColor Green
-}
-else {
-    # 1. Fetch + pin the canonical FP32 model.
-    if (Test-PinnedFile -Path $recognizerFp32Path -ExpectedSize $recognizerFp32.Size -ExpectedSha256 $recognizerFp32.Sha256) {
-        Write-Host "[SKIP] $($recognizerFp32.Name) is already verified." -ForegroundColor Green
-    }
-    else {
-        Write-Host "[DOWNLOAD] $($recognizerFp32.Name)" -ForegroundColor Yellow
-        Download-File -Url $recognizerFp32.Url -Destination $recognizerFp32Path
-        if (-not (Test-PinnedFile -Path $recognizerFp32Path -ExpectedSize $recognizerFp32.Size -ExpectedSha256 $recognizerFp32.Sha256)) {
-            throw "Recognizer did not match the pinned artifact: $recognizerFp32Path"
+$recognizerPath = Join-Path $ModelsDir $recognizer.Name
+if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256) {
+    Write-Host "[SKIP] $($recognizer.Name) is already verified." -ForegroundColor Green
+} else {
+    # Stage away from production directories; install only the fully checked
+    # derivative. Reuse a verified original already on disk without download.
+    $recognizerStage = Join-Path ([System.IO.Path]::GetTempPath()) ("FaceLogin-SFace-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $recognizerStage | Out-Null
+    $rawRecognizerPath = Join-Path $recognizerStage 'upstream.onnx'
+    $normalizedRecognizerPath = Join-Path $recognizerStage 'normalized.onnx'
+    try {
+        if (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizer.RawSize -ExpectedSha256 $recognizer.RawSha256) {
+            Copy-Item -LiteralPath $recognizerPath -Destination $rawRecognizerPath
+        } else {
+            Download-File -Url $recognizer.Url -Destination $rawRecognizerPath
         }
-        Write-Host "[OK] $($recognizerFp32.Name) verified." -ForegroundColor Green
+        if (-not (Test-PinnedFile -Path $rawRecognizerPath -ExpectedSize $recognizer.RawSize -ExpectedSha256 $recognizer.RawSha256)) {
+            throw 'Raw SFace recognizer did not match the pinned OpenCV artifact.'
+        }
+        $normalizer = Join-Path $PSScriptRoot 'normalize_sface_export.py'
+        & $PythonExe $normalizer $rawRecognizerPath $normalizedRecognizerPath
+        if ($LASTEXITCODE -ne 0) { throw "SFace normalization failed with exit code $LASTEXITCODE." }
+        if (-not (Test-PinnedFile -Path $normalizedRecognizerPath -ExpectedSize $recognizer.Size -ExpectedSha256 $recognizer.Sha256)) {
+            throw 'Normalized SFace recognizer did not match the pinned runtime artifact.'
+        }
+        Move-Item -LiteralPath $normalizedRecognizerPath -Destination $recognizerPath -Force
+    } finally {
+        Remove-Item -LiteralPath $rawRecognizerPath,$normalizedRecognizerPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $recognizerStage -Force -ErrorAction SilentlyContinue
     }
-
-    # 2. Quantize in place to the release INT8 artifact.
-    Write-Host "[QUANTIZE] $($recognizerFp32.Name) -> $($recognizerInt8.Name)" -ForegroundColor Yellow
-    $quantizer = Join-Path $PSScriptRoot '..\tools\threshold_calibration\quantize_r50.py'
-    & $PythonExe $quantizer --recognizer $recognizerFp32Path --output $recognizerPath --images $CalibImages --no-bench
-    if ($LASTEXITCODE -ne 0) {
-        throw "r50 quantization failed with exit code $LASTEXITCODE. Pass -CalibImages to point at a folder of real face photos (one subdir per person)."
-    }
-    if (-not (Test-PinnedFile -Path $recognizerPath -ExpectedSize $recognizerInt8.Size -ExpectedSha256 $recognizerInt8.Sha256)) {
-        throw "Quantized recognizer did not match the pinned artifact: $recognizerPath"
-    }
-    Write-Host "[OK] $($recognizerInt8.Name) quantized and verified." -ForegroundColor Green
 }
 
 # The shared downloader pins and verifies both calibrated MiniFAS models.
@@ -183,4 +181,4 @@ $miniFasDownloader = Join-Path $PSScriptRoot 'download_minifas_models.ps1'
 
 Write-Host ''
 Write-Host 'All four canonical runtime models are verified.' -ForegroundColor Green
-Write-Host 'For standalone/service debugging, copy assets\models\*.onnx to the configured DataPath\models directory.'
+Write-Host 'For service debugging, copy assets\models\*.onnx to the configured DataPath\models directory.'

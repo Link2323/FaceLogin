@@ -48,6 +48,8 @@ target_include_directories(FaceLoginCredentialProvider PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
+# Static CRT (/MT) — overrides the tree-wide /MD default set in the root
+# CMakeLists; rationale in the comment block above.
 set_target_properties(FaceLoginCredentialProvider PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )

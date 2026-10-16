@@ -3,8 +3,8 @@
 #include "auth_pipeline.h"
 #include "auth_worker_protocol.h"
 #include "timer_resolution.h"
-#include "webcam_capture_dshow.h"
-#include "onnx_models.h"
+#include "../vision/webcam_capture_dshow.h"
+#include "../vision/onnx_models.h"
 #include "model_failure.h"
 #include "performance_affinity.h"
 #include "../common/data_path.h"
@@ -64,39 +64,63 @@ bool SendFatal(Channel& channel, const std::wstring& message) {
 }
 
 std::unique_ptr<WorkerModels> LoadModels(const std::wstring& modelsDir,
-                                         const WorkerConfig& config,
                                          ModelLoadFailure& failure) {
     auto models = std::make_unique<WorkerModels>();
     failure = ModelLoadFailure::Load;
 
+    // Aggregate once after loading: per-call logging can distort short stages.
+    // Keep integrity checks and session construction in their established order.
+    const auto loadStart = std::chrono::steady_clock::now();
+    double detectorHashMs = 0.0, detectorInitMs = 0.0;
+    double recognizerHashMs = 0.0, recognizerInitMs = 0.0;
+    double padHashMs = 0.0, padInitMs = 0.0;
+    const auto measure = [](double& elapsedMs, auto&& operation) {
+        const auto start = std::chrono::steady_clock::now();
+        const bool ok = operation();
+        elapsedMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        return ok;
+    };
+
     const std::wstring detectorPath = modelsDir + L"\\det_10g_gnkps.onnx";
-    if (!VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector")) {
+    if (!measure(detectorHashMs, [&] {
+            return VerifyModelIntegrity(detectorPath, model_hashes::kDetector, L"SCRFD detector");
+        })) {
         failure = ModelLoadFailure::DetectorIntegrity;
         return {};
     }
     models->detector = std::make_unique<OnnxDetector>();
-    if (!models->detector->Initialize(detectorPath)) return {};
+    if (!measure(detectorInitMs, [&] { return models->detector->Initialize(detectorPath); })) return {};
 
-    const std::wstring recognizerPath = modelsDir + L"\\w600k_r50.onnx";
-    if (!VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
-                              L"InsightFace w600k_r50 recognizer")) {
+    const std::wstring recognizerPath = modelsDir + L"\\face_recognition_sface_2021dec.onnx";
+    if (!measure(recognizerHashMs, [&] {
+            return VerifyModelIntegrity(recognizerPath, model_hashes::kRecognizer,
+                                        L"OpenCV SFace recognizer");
+        })) {
         failure = ModelLoadFailure::RecognizerIntegrity;
         return {};
     }
     models->recognizer = std::make_unique<OnnxRecognizer>();
-    if (!models->recognizer->Initialize(recognizerPath)) return {};
-    models->recognizer->SetLowLightEnhance(config.lowLightEnhance);
+    if (!measure(recognizerInitMs, [&] { return models->recognizer->Initialize(recognizerPath); })) return {};
 
     const std::wstring v2Path = modelsDir + L"\\MiniFASNetV2.onnx";
     const std::wstring v1SePath = modelsDir + L"\\MiniFASNetV1SE.onnx";
-    if (!VerifyModelIntegrity(v2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") ||
-        !VerifyModelIntegrity(v1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)")) {
+    if (!measure(padHashMs, [&] {
+            return VerifyModelIntegrity(v2Path, model_hashes::kMiniFasV2, L"MiniFASNetV2 (PAD)") &&
+                   VerifyModelIntegrity(v1SePath, model_hashes::kMiniFasV1Se, L"MiniFASNetV1SE (PAD)");
+        })) {
         failure = ModelLoadFailure::PadIntegrity;
         return {};
     }
     models->antiSpoof = std::make_unique<OnnxAntiSpoof>();
-    if (!models->antiSpoof->Initialize(v2Path, v1SePath)) return {};
+    if (!measure(padInitMs, [&] { return models->antiSpoof->Initialize(v2Path, v1SePath); })) return {};
     failure = ModelLoadFailure::None;
+    FACELOGIN_INFO(L"Auth worker model load: detector_hash=%.1f ms, detector_init=%.1f ms, "
+                   L"recognizer_hash=%.1f ms, recognizer_init=%.1f ms, "
+                   L"pad_hash=%.1f ms, pad_init=%.1f ms, total=%.1f ms",
+                   detectorHashMs, detectorInitMs, recognizerHashMs, recognizerInitMs,
+                   padHashMs, padInitMs, std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - loadStart).count());
     return models;
 }
 
@@ -139,6 +163,248 @@ int SendTerminalAndExit(Channel& channel, MessageType type, uint64_t requestId,
     return static_cast<int>(exitCode);  // Only reachable if TerminateProcess fails.
 }
 
+// Preload phase, run while the desktop is locked and idle: verify and load
+// the models, pay ORT's first-run cost, and build the camera graph skeleton.
+// Camera device ACTIVATION stays behind AUTH_START, so the camera is not
+// opened here; on preload failure the AUTH_START path falls back to the full
+// legacy construction. Model failure is fatal (caller sends the message).
+bool PreloadWorker(const WorkerConfig& config, const std::wstring& dataDir,
+                   std::unique_ptr<WorkerModels>& models,
+                   std::unique_ptr<WebcamCaptureDS>& camera,
+                   ModelLoadFailure& failure) {
+    const auto preloadStart = std::chrono::steady_clock::now();
+    DWORD sessionId = 0;
+    const bool haveSessionId = ProcessIdToSessionId(GetCurrentProcessId(), &sessionId) != FALSE;
+    PROCESS_POWER_THROTTLING_STATE power{};
+    power.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    const bool havePowerState = GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                                                      &power, sizeof(power)) != FALSE;
+    FACELOGIN_INFO(L"Auth worker preload policy: session=%lu (known=%d), "
+                   L"power_control=0x%lx, power_state=0x%lx (known=%d)",
+                   sessionId, haveSessionId, power.ControlMask,
+                   power.StateMask, havePowerState);
+
+    models = LoadModels(dataDir + L"\\models", failure);
+    if (!models || !models->detector || !models->recognizer || !models->antiSpoof)
+        return false;
+    // Pay ORT's first-run cost (arena/thread-pool/per-shape planning) during
+    // preload, not on the first authenticated frame.
+    WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);
+    const auto warmupDoneAt = std::chrono::steady_clock::now();
+
+    camera = std::make_unique<WebcamCaptureDS>();
+    if (!camera->Preload(config.cameraDevice)) {
+        FACELOGIN_WARN(L"Camera preload failed — full initialization at AUTH_START");
+    }
+    const auto skeletonDoneAt = std::chrono::steady_clock::now();
+    FACELOGIN_INFO(L"Auth worker preload timing: models_and_warmup=%.1f ms, "
+                   L"camera_skeleton=%.1f ms, total=%.1f ms",
+                   std::chrono::duration<double, std::milli>(warmupDoneAt - preloadStart).count(),
+                   std::chrono::duration<double, std::milli>(skeletonDoneAt - warmupDoneAt).count(),
+                   std::chrono::duration<double, std::milli>(skeletonDoneAt - preloadStart).count());
+    return true;
+}
+
+// Channel handshake before any work: Hello → Init → config decode, then the
+// secure data dir and the worker log. Returns false with *exitCode set
+// (the fatal message is already sent on protocol failures).
+bool InitializeWorkerSession(Channel& channel, WorkerConfig& config,
+                             std::wstring& dataDir, int& exitCode) {
+    if (!channel.Write(MessageType::Hello, 0)) {
+        exitCode = ERROR_BROKEN_PIPE;
+        return false;
+    }
+
+    Message init;
+    if (!ReadExpected(channel, init, 10000, MessageType::Init, 0)) {
+        SendFatal(channel, L"工作进程初始化协议失败");
+        exitCode = ERROR_INVALID_DATA;
+        return false;
+    }
+
+    if (!auth_worker::DecodeConfig(init.payload, config)) {
+        SendFatal(channel, L"工作进程配置无效");
+        exitCode = ERROR_INVALID_DATA;
+        return false;
+    }
+
+    std::wstring dataDirReason;
+    dataDir = ResolveSecureDataDir(L"", &dataDirReason);
+    if (dataDir.empty()) {
+        SendFatal(channel, L"模型数据目录验证失败");
+        exitCode = ERROR_ACCESS_DENIED;
+        return false;
+    }
+    Logger::Instance().SetLogFile(dataDir + L"\\log\\auth_worker.log");
+    Logger::Instance().SetMinLevel(LogLevel::Info);
+    FACELOGIN_INFO(L"=== Authentication worker starting (pid=%lu, DirectShow) ===",
+                   GetCurrentProcessId());
+    return true;
+}
+
+enum class CommandWait { StartAuth, Cancelled, Invalid, Broken };
+
+// The idle command loop: pick up the one allowed AUTH_START (Cancel exits
+// cleanly, anything else is a protocol violation for the caller to report).
+CommandWait AwaitAuthCommand(Channel& channel, Message& commandOut) {
+    for (;;) {
+        const ReadStatus status = channel.Read(commandOut, 1000);
+        if (status == ReadStatus::Timeout) continue;
+        if (status != ReadStatus::Ok) return CommandWait::Broken;
+        if (commandOut.type == MessageType::Cancel && commandOut.requestId == 0 &&
+            commandOut.payload.empty()) {
+            return CommandWait::Cancelled;
+        }
+        if (commandOut.type != MessageType::StartAuth || commandOut.requestId == 0 ||
+            !commandOut.payload.empty()) {
+            return CommandWait::Invalid;
+        }
+        return CommandWait::StartAuth;
+    }
+}
+
+// One binding round trip with the parent: push the identity probe, await the
+// verdict. Every protocol failure marks the channel dead and returns Reject —
+// the pipeline treats Reject as terminal, so a broken exchange can never
+// release a password.
+BindingDecision ExchangeBindingVerdict(Channel& channel, std::atomic<bool>& channelHealthy,
+                                       uint64_t requestId, unsigned int bindingIndex,
+                                       const std::vector<float>& embedding, float preNorm,
+                                       float yawDeg, float pitchDeg) {
+    if (!channelHealthy.load() ||
+        !channel.Write(MessageType::MatchProbe, requestId,
+                       auth_worker::EncodeMatchProbe(bindingIndex, embedding,
+                                                     preNorm, yawDeg, pitchDeg))) {
+        channelHealthy.store(false);
+        return BindingDecision{BindingDecisionKind::Reject,
+                               L"认证通信失败，请使用密码登录"};
+    }
+
+    Message response;
+    const ReadStatus read = channel.Read(response, 2000, 1);
+    if (read != ReadStatus::Ok || response.requestId != requestId) {
+        channelHealthy.store(false);
+        return BindingDecision{BindingDecisionKind::Reject,
+                               L"认证服务未响应，请使用密码登录"};
+    }
+    if (response.type == MessageType::MatchAccept && response.payload.empty()) {
+        return BindingDecision{BindingDecisionKind::Accept, {}};
+    }
+    if (response.type == MessageType::MatchRetry && response.payload.empty()) {
+        return BindingDecision{BindingDecisionKind::Retry, {}};
+    }
+    if (response.type == MessageType::MatchReject) {
+        std::wstring error;
+        if (auth_worker::DecodeWString(response.payload, error)) {
+            return BindingDecision{BindingDecisionKind::Reject, std::move(error)};
+        }
+    }
+    channelHealthy.store(false);
+    return BindingDecision{BindingDecisionKind::Reject,
+                           L"认证通信协议异常，请使用密码登录"};
+}
+
+// Wires the camera, the private worker channel and the sensor knobs into the
+// inference-only pipeline. Frame grabs and sensor calls reuse the camera's
+// COM thread; verifyBinding crosses the pipe to the parent's credential
+// store, which owns the password.
+AuthPipelineCallbacks WireAuthCallbacks(WebcamCaptureDS& camera, Channel& channel,
+                                        std::atomic<bool>& channelHealthy,
+                                        uint64_t requestId) {
+    AuthPipelineCallbacks callbacks;
+    callbacks.grabFrame = [&camera](FrameImage& frame, unsigned long long& frameSequence) {
+        frameSequence = 0;
+        return camera.GrabFrame(frame, &frameSequence);
+    };
+    callbacks.isCancelled = [&channelHealthy]() { return !channelHealthy.load(); };
+    callbacks.sensorKnobs.exposureRange = [&camera](long& mn, long& mx, long& st) {
+        return camera.GetExposureRange(&mn, &mx, &st);
+    };
+    callbacks.sensorKnobs.exposureGet = [&camera](long& v) { return camera.GetExposure(&v); };
+    callbacks.sensorKnobs.exposureSet = [&camera](long v) { return camera.SetExposure(v); };
+    callbacks.sensorKnobs.exposureSetAuto = [&camera](long v) {
+        return camera.SetExposure(v, false);
+    };
+    callbacks.sensorKnobs.exposureIsManual = [&camera](bool& manual) {
+        long value = 0;
+        return camera.GetExposure(&value, &manual);
+    };
+    callbacks.readExposureState = [&camera](long& value, bool& manual) {
+        return camera.GetExposure(&value, &manual);
+    };
+    callbacks.sensorKnobs.gainRange = [&camera](long& mn, long& mx, long& st) {
+        return camera.GetGainRange(&mn, &mx, &st);
+    };
+    callbacks.sensorKnobs.gainGet = [&camera](long& v) { return camera.GetGain(&v); };
+    callbacks.sensorKnobs.gainSet = [&camera](long v) { return camera.SetGain(v); };
+    callbacks.isClientDisconnected = []() { return false; };
+    callbacks.reportStatus = [&channel, &channelHealthy, requestId](const std::wstring& text) {
+        if (!channel.Write(MessageType::Status, requestId, auth_worker::EncodeWString(text))) {
+            channelHealthy.store(false);
+        }
+    };
+    callbacks.verifyBinding = [&channel, &channelHealthy, requestId](
+        const std::vector<float>& embedding, unsigned int bindingIndex, float preNorm,
+        float yawDeg, float pitchDeg) {
+        return ExchangeBindingVerdict(channel, channelHealthy, requestId, bindingIndex,
+                                      embedding, preNorm, yawDeg, pitchDeg);
+    };
+    return callbacks;
+}
+
+// Keep this one-shot worker out of Windows' power-throttling (EcoQoS)
+// policy for the auth burst — pinning the affinity does not. A/B measured
+// on the slow test laptop (2026-09-01, three instrumented builds): without
+// the opt-out ~80% of rounds ran the P-cores at 1466-1833 of 2200 MHz for
+// the whole loop (face detect 150-177 ms/frame, E2E ~1.9 s), on battery
+// AND occasionally on AC; with the opt-out every round held 2200 MHz
+// (detect 44-78 ms, E2E ~1.2 s). The heuristic targets this Session-0
+// background child exactly when the desktop is locked and idle. The
+// process self-terminates right after its terminal message, so the
+// unthrottled window is bounded to the single authentication; failure is
+// non-fatal — the burst merely runs at whatever clock the policy grants.
+void OptOutOfPowerThrottling() {
+    PROCESS_POWER_THROTTLING_STATE unthrottle{};
+    unthrottle.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    unthrottle.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+    unthrottle.StateMask = 0;  // 0 = never throttle execution speed
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                               &unthrottle, sizeof(unthrottle))) {
+        FACELOGIN_WARN(L"Power-throttle opt-out failed: %lu — authentication "
+                       L"may run at reduced clocks", GetLastError());
+    }
+}
+
+// Sends the terminal reply before potentially slow camera/process teardown.
+// The Cancelled outcome returns without writing — the caller releases the
+// camera and exits through normal destruction.
+int SendAuthTerminal(Channel& channel, uint64_t requestId, const AuthPipelineResult& result,
+                     const auth_worker::AuthTiming& timing) {
+    switch (result.outcome) {
+    case AuthOutcome::Cancelled:
+        return ERROR_CANCELLED;
+    case AuthOutcome::Succeeded:
+        return SendTerminalAndExit(channel, MessageType::AuthSucceeded,
+                                   requestId,
+                                   auth_worker::EncodeAuthTiming(timing),
+                                   ERROR_SUCCESS);
+    case AuthOutcome::Failed:
+    case AuthOutcome::TimedOut:
+        break;
+    }
+    FACELOGIN_INFO(L"Auth worker timing: camera_init=%.1f ms, pipeline=%.1f ms, total=%.1f ms",
+                   timing.cameraInitMs, timing.pipelineMs, timing.totalMs);
+    if (result.outcome == AuthOutcome::TimedOut) {
+        FACELOGIN_INFO(L"Auth worker sending timeout before process reclamation");
+        return SendTerminalAndExit(channel, MessageType::AuthTimedOut,
+                                   requestId, {}, ERROR_TIMEOUT);
+    }
+    FACELOGIN_INFO(L"Auth worker sending failure before process reclamation");
+    return SendTerminalAndExit(channel, MessageType::AuthFailed, requestId,
+                               auth_worker::EncodeWString(result.errorMessage),
+                               ERROR_ACCESS_DENIED);
+}
+
 } // namespace
 
 int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
@@ -148,49 +414,20 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
 
     Channel channel(parentToWorker, workerToParent);
     if (!channel.IsValid()) return ERROR_INVALID_HANDLE;
-    if (!channel.Write(MessageType::Hello, 0)) return ERROR_BROKEN_PIPE;
-
-    Message init;
-    if (!ReadExpected(channel, init, 10000, MessageType::Init, 0)) {
-        SendFatal(channel, L"工作进程初始化协议失败");
-        return ERROR_INVALID_DATA;
-    }
 
     WorkerConfig config;
-    if (!auth_worker::DecodeConfig(init.payload, config)) {
-        SendFatal(channel, L"工作进程配置无效");
-        return ERROR_INVALID_DATA;
+    std::wstring dataDir;
+    int exitCode = ERROR_SUCCESS;
+    if (!InitializeWorkerSession(channel, config, dataDir, exitCode)) {
+        return exitCode;
     }
 
-    std::wstring dataDirReason;
-    const std::wstring dataDir = ResolveSecureDataDir(L"", &dataDirReason);
-    if (dataDir.empty()) {
-        SendFatal(channel, L"模型数据目录验证失败");
-        return ERROR_ACCESS_DENIED;
-    }
-    Logger::Instance().SetLogFile(dataDir + L"\\log\\auth_worker.log");
-    Logger::Instance().SetMinLevel(LogLevel::Info);
-    FACELOGIN_INFO(L"=== Authentication worker starting (pid=%lu, DirectShow) ===",
-                   GetCurrentProcessId());
-
+    std::unique_ptr<WorkerModels> models;
+    std::unique_ptr<WebcamCaptureDS> camera;
     ModelLoadFailure modelFailure = ModelLoadFailure::Load;
-    auto models = LoadModels(dataDir + L"\\models", config, modelFailure);
-    if (!models || !models->detector || !models->recognizer || !models->antiSpoof) {
+    if (!PreloadWorker(config, dataDir, models, camera, modelFailure)) {
         SendFatal(channel, ModelLoadFailureMessage(modelFailure));
         return ERROR_FILE_NOT_FOUND;
-    }
-    // Pay ORT's first-run cost (arena/thread-pool/per-shape planning) during
-    // preload, not on the first authenticated frame.
-    WarmupInference(*models->detector, *models->recognizer, *models->antiSpoof);
-
-    // Camera preload during lock-screen idle: registry-level device
-    // enumeration + graph skeleton (device-independent filters). The device
-    // ACTIVATION (BindToObject) stays behind AUTH_START, so the camera is
-    // not opened here. On preload failure the AUTH_START path falls back to
-    // the full legacy construction.
-    auto camera = std::make_unique<WebcamCaptureDS>();
-    if (!camera->Preload(config.cameraDevice)) {
-        FACELOGIN_WARN(L"Camera preload failed — full initialization at AUTH_START");
     }
     bool cameraReady = false;
     const auto initializeCamera = [&camera, &cameraReady, &config]() {
@@ -229,48 +466,24 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     // one AUTH_START, then exits so camera-driver and heap high-water are
     // reclaimed even if the user repeatedly retries face authentication.
     Message command;
-    for (;;) {
-        const ReadStatus status = channel.Read(command, 1000);
-        if (status == ReadStatus::Timeout) continue;
-        if (status != ReadStatus::Ok) return ERROR_BROKEN_PIPE;
-        if (command.type == MessageType::Cancel && command.requestId == 0 &&
-            command.payload.empty()) {
-            releaseCamera();
-            return ERROR_SUCCESS;
-        }
-        if (command.type != MessageType::StartAuth || command.requestId == 0 ||
-            !command.payload.empty()) {
-            SendFatal(channel, L"工作进程收到了无效认证命令");
-            return ERROR_INVALID_DATA;
-        }
+    switch (AwaitAuthCommand(channel, command)) {
+    case CommandWait::StartAuth:
         break;
+    case CommandWait::Cancelled:
+        releaseCamera();
+        return ERROR_SUCCESS;
+    case CommandWait::Invalid:
+        SendFatal(channel, L"工作进程收到了无效认证命令");
+        return ERROR_INVALID_DATA;
+    case CommandWait::Broken:
+        return ERROR_BROKEN_PIPE;
     }
 
     // Preserve the established hybrid-CPU optimization for the complete
     // AUTH_START window, including camera activation and all inference. The
     // persistent parent is never affinity-pinned.
     const ScopedPerformanceCoreAffinity affinityGuard(GetPerformanceCoreMask());
-
-    // Keep this one-shot worker out of Windows' power-throttling (EcoQoS)
-    // policy for the auth burst — pinning the affinity does not. A/B measured
-    // on the slow test laptop (2026-09-01, three instrumented builds): without
-    // the opt-out ~80% of rounds ran the P-cores at 1466-1833 of 2200 MHz for
-    // the whole loop (face detect 150-177 ms/frame, E2E ~1.9 s), on battery
-    // AND occasionally on AC; with the opt-out every round held 2200 MHz
-    // (detect 44-78 ms, E2E ~1.2 s). The heuristic targets this Session-0
-    // background child exactly when the desktop is locked and idle. The
-    // process self-terminates right after its terminal message, so the
-    // unthrottled window is bounded to the single authentication; failure is
-    // non-fatal — the burst merely runs at whatever clock the policy grants.
-    PROCESS_POWER_THROTTLING_STATE unthrottle{};
-    unthrottle.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-    unthrottle.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
-    unthrottle.StateMask = 0;  // 0 = never throttle execution speed
-    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
-                               &unthrottle, sizeof(unthrottle))) {
-        FACELOGIN_WARN(L"Power-throttle opt-out failed: %lu — authentication "
-                       L"may run at reduced clocks", GetLastError());
-    }
+    OptOutOfPowerThrottling();
 
     const auto authStart = std::chrono::steady_clock::now();
     const auto cameraStart = authStart;
@@ -283,56 +496,15 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
     const auto cameraReadyAt = std::chrono::steady_clock::now();
 
     std::atomic<bool> channelHealthy{true};
-    AuthPipelineCallbacks callbacks;
-    callbacks.grabFrame = [&camera](FrameImage& frame, unsigned long long& frameSequence) {
-        frameSequence = 0;
-        return camera->GrabFrame(frame, &frameSequence);
-    };
-    callbacks.isCancelled = [&channelHealthy]() { return !channelHealthy.load(); };
-    callbacks.isClientDisconnected = []() { return false; };
-    callbacks.reportStatus = [&channel, &channelHealthy, requestId = command.requestId](const std::wstring& text) {
-        if (!channel.Write(MessageType::Status, requestId, auth_worker::EncodeWString(text))) {
-            channelHealthy.store(false);
-        }
-    };
-    callbacks.verifyBinding = [&channel, &channelHealthy, requestId = command.requestId](
-        const std::vector<float>& embedding, unsigned int bindingIndex) {
-        if (!channelHealthy.load() ||
-            !channel.Write(MessageType::MatchProbe, requestId,
-                           auth_worker::EncodeMatchProbe(bindingIndex, embedding))) {
-            channelHealthy.store(false);
-            return BindingDecision{BindingDecisionKind::Reject,
-                                   L"认证通信失败，请使用密码登录"};
-        }
-
-        Message response;
-        const ReadStatus read = channel.Read(response, 2000, 1);
-        if (read != ReadStatus::Ok || response.requestId != requestId) {
-            channelHealthy.store(false);
-            return BindingDecision{BindingDecisionKind::Reject,
-                                   L"认证服务未响应，请使用密码登录"};
-        }
-        if (response.type == MessageType::MatchAccept && response.payload.empty()) {
-            return BindingDecision{BindingDecisionKind::Accept, {}};
-        }
-        if (response.type == MessageType::MatchRetry && response.payload.empty()) {
-            return BindingDecision{BindingDecisionKind::Retry, {}};
-        }
-        if (response.type == MessageType::MatchReject) {
-            std::wstring error;
-            if (auth_worker::DecodeWString(response.payload, error)) {
-                return BindingDecision{BindingDecisionKind::Reject, std::move(error)};
-            }
-        }
-        channelHealthy.store(false);
-        return BindingDecision{BindingDecisionKind::Reject,
-                               L"认证通信协议异常，请使用密码登录"};
-    };
-
+    AuthPipelineCallbacks callbacks =
+        WireAuthCallbacks(*camera, channel, channelHealthy, command.requestId);
     AuthPipeline pipeline(*models->detector, *models->recognizer, *models->antiSpoof,
                           AuthPipelineConfig{config.antiSpoofThreshold,
                                              config.authTimeoutSeconds,
-                                             config.cameraRotation},
+                                             config.cameraRotation,
+                                             config.fastUnlock,
+                                             dataDir + L"\\camera_tune.state",
+                                             authStart + std::chrono::seconds(config.authTimeoutSeconds)},
                           std::move(callbacks));
     const AuthPipelineResult result = pipeline.Run();
     const auto pipelineDoneAt = std::chrono::steady_clock::now();
@@ -344,31 +516,12 @@ int RunAuthenticationWorker(HANDLE parentToWorker, HANDLE workerToParent) {
         static_cast<float>(std::chrono::duration<double, std::milli>(
             pipelineDoneAt - authStart).count())};
 
-    if (!channelHealthy.load() || result.cancelled) {
+    if (!channelHealthy.load()) {
         releaseCamera();
         return ERROR_CANCELLED;
     }
-
-    // Do not synchronously stop a DirectShow graph before the terminal reply:
-    // some drivers spend hundreds of milliseconds in IMediaControl::Stop(),
-    // which would put camera teardown on the unlock critical path.
-    if (result.succeeded) {
-        return SendTerminalAndExit(channel, MessageType::AuthSucceeded,
-                                   command.requestId,
-                                   auth_worker::EncodeAuthTiming(timing),
-                                   ERROR_SUCCESS);
-    }
-    FACELOGIN_INFO(L"Auth worker timing: camera_init=%.1f ms, pipeline=%.1f ms, total=%.1f ms",
-                   timing.cameraInitMs, timing.pipelineMs, timing.totalMs);
-    if (result.timedOut) {
-        FACELOGIN_INFO(L"Auth worker sending timeout before process reclamation");
-        return SendTerminalAndExit(channel, MessageType::AuthTimedOut,
-                                   command.requestId, {}, ERROR_TIMEOUT);
-    }
-    FACELOGIN_INFO(L"Auth worker sending failure before process reclamation");
-    return SendTerminalAndExit(channel, MessageType::AuthFailed, command.requestId,
-                               auth_worker::EncodeWString(result.errorMessage),
-                               ERROR_ACCESS_DENIED);
+    if (result.outcome == AuthOutcome::Cancelled) releaseCamera();
+    return SendAuthTerminal(channel, command.requestId, result, timing);
 }
 
 } // namespace facelogin

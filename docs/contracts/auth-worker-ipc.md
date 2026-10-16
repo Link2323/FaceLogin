@@ -1,5 +1,7 @@
 # 认证 worker 私有 IPC 契约
 
+当前协议版本为 **8**：只接受 128 维 SFace 嵌入。
+
 本文是 `FaceLoginService.exe` 父服务与同一 EXE 的 `-auth-worker` 模式之间的线协议事实源。它不替代 Credential Provider 使用的公共命名管道；公共协议见 [`ipc.md`](ipc.md)。实现位于 `face_service/auth_worker_protocol.*`，父端状态机位于 `auth_worker_client.*`。
 
 ## 通道与安全边界
@@ -8,7 +10,7 @@
 - `CreateProcessW` 使用绝对 EXE 路径、完整引号、`CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT`。
 - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只允许继承两只 worker 管道句柄。父进程先把子进程加入带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job，再恢复主线程。
 - worker 必须以 LocalSystem 运行，并在取得有效继承句柄、完成 `HELLO → INIT → READY` 握手后才进入就绪态；任一条件不成立立即退出。
-- 通道只承载配置、状态文本、三条 512-D embedding 和判定结果。用户名、SID、密码、DPAPI 密文、`users.dat` 记录及完整 `AUTH_SUCCESS` 永不进入 worker 通道。
+- 通道只承载配置、状态文本、三条 128-D SFace embedding 和判定结果。用户名、SID、密码、DPAPI 密文、`users.dat` 记录及完整 `AUTH_SUCCESS` 永不进入 worker 通道。
 - worker 仍位于服务的 Session 0；该协议不授予它进入交互用户 Session 的能力。
 
 ## 固定头
@@ -18,7 +20,7 @@
 ```cpp
 struct MessageHeader {
     uint32_t magic;       // 0x4B574C46，即 "FLWK"
-    uint16_t version;     // 3
+    uint16_t version;     // 8
     uint16_t type;
     uint64_t requestId;
     uint32_t payloadSize;
@@ -48,6 +50,8 @@ struct MessageHeader {
 
 设计中的 `MATCH_DECISION` 在 v1 线上拆为 `MatchAccept/MatchRetry/MatchReject`，`AUTH_COMPLETE` 拆为 `AuthSucceeded/AuthFailed/AuthTimedOut`，使每个终态的合法 payload 可单独校验。`Cancel` 是父端停止、解锁、服务退出或客户端断开时的协议意图；父端同时终止 Job，因此不会等待被驱动或推理阻塞的 worker 自愿退出。
 
+生产认证共用 5 秒预算：父服务从公共 `AUTH_REQUEST` 起计时，有界等待 worker 就绪，再把原截止时间传给本地 supervisor；相机初始化和私有 IPC 等待计入剩余预算。supervisor 的读取等待截断为剩余时间，读取或身份回调返回后再次检查截止时间，迟到结果不能认证成功。worker 配置默认 `authTimeoutSeconds=5`，其 pipeline 继承从相机初始化前开始的截止时间，曝光准备和调节不重置它。截止时间在父进程内传递，不新增线上字段；协议仍为 v8，工具用配置字段的既有 `[1, 60]` 编解码范围保持不变。父端到时终止 Job；进程退出确认属于资源回收，不延长 CP 的认证等待上限。
+
 ## Payload 编码
 
 字符串编码为 `uint32_t charCount`，随后是恰好 `charCount` 个 UTF-16LE `wchar_t`；不带 NUL。通用字符串上限为 2048 个字符，解码后必须正好耗尽 payload。
@@ -58,19 +62,28 @@ struct MessageHeader {
 int32  cameraRotation      // 0/90/180/270
 float  antiSpoofThreshold // 有限值，[0.15, 0.50]
 int32  authTimeoutSeconds // [1, 60]
-uint32 lowLightEnhance     // 0/1
 wstring cameraDevice
+int32  fastUnlock          // 0/1（v7，2026-09-13）：快速解锁模式——3 个计帧、
+                           // 每帧绑定身份；默认 0 = 5 帧标定策略
 ```
 
-`MatchProbe` 的 payload 为：
+v5 及之前的线上在该表 `cameraDevice` 之前还有一个 `uint32 lowLightEnhance`；
+识别器侧暗光增强删除后（v6，2026-09-13）移除该字段。v7 在表尾追加
+`fastUnlock`（config `fast_unlock`）；两种模式下绑定序列相同（bindingIndex
+仍严格 0 → 1 → 2，父端 `AuthExchangeValidator` 契约不变）。
+
+`MatchProbe` 的 payload 为（v4 起附带范数，v5 起附带姿态角）：
 
 ```text
 uint32 bindingIndex       // 线上严格为 0 → 1 → 2；日志显示为 1/3 → 2/3 → 3/3
-uint32 embeddingCount     // 必须恰好 512
-float  embedding[512]
+uint32 embeddingCount     // 必须恰好 128
+float  embedding[128]
+float  preNorm            // 归一化前的识别器输出范数（质量信号，必须有限且 >0）
+float  yawDeg             // 帧姿态 yaw 估计（度，有限且 |v| ≤ 90）    ← v5
+float  pitchDeg           // 帧姿态 pitch 估计（同上）                 ← v5
 ```
 
-每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
+每个 embedding 元素必须 `isfinite`，L2 范数必须处于 `[0.90, 1.10]`；`preNorm` 保留归一化前范数，不可从归一化向量恢复。`yawDeg`/`pitchDeg` 由 worker 侧 `EstimateYawDeg`/`EstimatePitchDeg`（`face_align.h` 弱透视模型，与录入同源）从绑定帧关键点估计，供姿态门控使用。父端只在本地调用 `FindBestIdentity`，worker 只收到 accept/retry/reject，不知道匹配到的 SID。
 
 `AuthSucceeded` 的 `AuthTiming` 顺序固定为：
 
@@ -91,7 +104,7 @@ spawn suspended → assign Job → resume
   子加载四模型；默认不打开相机
   子 Ready(0)
   父 StartAuth(requestId)
-  子按需打开相机并运行 PAD 5/5
+  子按需打开相机并运行 PAD N/N（默认 5 帧；fastUnlock=1 时 3 帧）
   子 MatchProbe(0) ↔ 父 decision
   子 MatchProbe(1) ↔ 父 decision
   子 MatchProbe(2) ↔ 父 decision
@@ -106,4 +119,4 @@ worker 每次最多处理一个 `StartAuth`。成功、失败或超时终态写�
 
 ## 验证入口
 
-`AuthWorkerProtocolTest` 覆盖消息往返、超长/截断、magic/version/type、配置边界、512 维、NaN/Inf/异常范数、binding 越序/重复/缺失和 request ID 不一致。`AuthWorkerLifecycleTest` 使用同一父端 supervisor 的 mock worker 覆盖启动失败、模型失败、崩溃、超时、断管、取消、100 次创建/认证/退出以及父进程退出时 Job 杀死子进程。
+`AuthWorkerProtocolTest` 覆盖消息往返、超长/截断、magic/version/type、配置边界、128 维 SFace、NaN/Inf/异常范数、binding 越序/重复/缺失和 request ID 不一致。worker 生命周期需另行通过进程/Job 故障注入验证启动失败、模型失败、崩溃、超时、断管、取消、重复创建/认证/退出以及父进程退出时 Job 杀死子进程。

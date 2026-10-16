@@ -14,7 +14,3 @@ target_link_libraries(facelogin_common PUBLIC
     kernel32
     crypt32
 )
-
-set_target_properties(facelogin_common PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)

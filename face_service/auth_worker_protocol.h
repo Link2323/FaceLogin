@@ -1,6 +1,8 @@
 #pragma once
 
 #include <windows.h>
+#include "../common/recognizer_profile.h"
+#include "../common/ipc_protocol.h"
 
 #include <cstdint>
 #include <string>
@@ -9,9 +11,18 @@
 namespace facelogin::auth_worker {
 
 inline constexpr uint32_t kProtocolMagic = 0x4B574C46; // "FLWK"
-inline constexpr uint16_t kProtocolVersion = 3;
+// v8: pinned SFace 128-D probes; mixed R50/SFace binaries fail version checks.
+// v7: WorkerConfig gained the trailing fastUnlock flag (fast unlock mode:
+// 3 counted PAD frames, every frame binds — AppConfig fast_unlock). v6:
+// WorkerConfig dropped the lowLightEnhance flag (recognizer-side
+// low-light stretch deleted 2026-09-13 — the sensor-level exposure
+// governor owns dark scenes now; face-service.md). v5: MatchProbe gained
+// two trailing floats — the frame's yaw/pitch pose estimates (progressive-
+// learning pose-cone gate, docs/work/in-progress/progressive-learning-v2.md §3). v4
+// appended the pre-normalization recognizer norm.
+inline constexpr uint16_t kProtocolVersion = 8;
 inline constexpr uint32_t kMaxPayloadBytes = 16 * 1024;
-inline constexpr uint32_t kEmbeddingDimension = 512;
+inline constexpr uint32_t kEmbeddingDimension = static_cast<uint32_t>(kRecognizerDimension);
 // The recognizer L2-normalizes every production embedding before it crosses
 // the worker boundary. Keep a little numerical tolerance, but reject zero,
 // denormalized and attacker-scaled vectors before the parent matcher sees them.
@@ -151,9 +162,11 @@ private:
 struct WorkerConfig {
     int cameraRotation = 0;
     float antiSpoofThreshold = 0.28f;
-    int authTimeoutSeconds = 15;
-    bool lowLightEnhance = false;
+    int authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
     std::wstring cameraDevice;
+    // v7 trailing field. Fast unlock: 3 counted PAD frames, every frame
+    // binds identity. Wire format: I32, must be 0 or 1.
+    bool fastUnlock = false;
 };
 
 // Success-path timing is returned with the terminal message so the worker can
@@ -173,10 +186,16 @@ bool DecodeWString(const std::vector<uint8_t>& payload, std::wstring& value,
                    uint32_t maxChars = 2048);
 
 std::vector<uint8_t> EncodeMatchProbe(unsigned int bindingIndex,
-                                      const std::vector<float>& embedding);
+                                      const std::vector<float>& embedding,
+                                      float preNorm,
+                                      float yawDeg,
+                                      float pitchDeg);
 bool DecodeMatchProbe(const std::vector<uint8_t>& payload,
                       unsigned int& bindingIndex,
-                      std::vector<float>& embedding);
+                      std::vector<float>& embedding,
+                      float& preNorm,
+                      float& yawDeg,
+                      float& pitchDeg);
 
 std::vector<uint8_t> EncodeAuthTiming(const AuthTiming& timing);
 bool DecodeAuthTiming(const std::vector<uint8_t>& payload, AuthTiming& timing);

@@ -4,9 +4,9 @@ setlocal enabledelayedexpansion
 REM ============================================================================
 REM FaceLogin - Unregister dev credential provider
 REM
-REM Undoes what scripts\start_standalone.bat did, so the "Face Login" tile
+REM Cleans up legacy development registrations, so the "Face Login" tile
 REM stops appearing on the lock screen:
-REM   1. Kills any running FaceLoginService (standalone process / SCM service)
+REM   1. Kills any running FaceLoginService (SCM service / worker)
 REM   2. Unregisters the credential provider DLL (regsvr32 /u)
 REM   3. Removes leftover registry registrations (safety net -- regsvr32 /u
 REM      can't run if the DLL is already gone, and reg delete covers that)
@@ -18,8 +18,7 @@ REM window flashes closed again you can read the log to see exactly how far the
 REM script got before dying.
 REM
 REM This is a dev-cleanup script only -- it does NOT touch the formal
-REM installer (FaceLoginSetup.exe). Re-run scripts\start_standalone.bat to
-REM re-register for testing.
+REM installer (FaceLoginSetup.exe). Use the installer for new deployments.
 REM
 REM (NOTE: keep this file pure-ASCII -- cmd.exe on a GBK codepage chokes on
 REM  multi-byte UTF-8 chars like em-dash and the whole script silently mis-parses.)

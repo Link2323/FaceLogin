@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <chrono>
 #include <string>
 
 // FaceLogin IPC Protocol Definitions
@@ -16,7 +17,21 @@ namespace ipc {
 constexpr wchar_t PIPE_NAME[] = L"\\\\.\\pipe\\FaceLoginPipe";
 constexpr DWORD PIPE_BUFFER_SIZE = 4096;
 constexpr DWORD PIPE_TIMEOUT_MS = 30000;
-constexpr DWORD AUTH_TIMEOUT_SECONDS = 15;
+constexpr DWORD AUTH_TIMEOUT_SECONDS = 5;
+constexpr DWORD AUTH_TIMEOUT_MS = AUTH_TIMEOUT_SECONDS * 1000;
+
+using AuthDeadline = std::chrono::steady_clock::time_point;
+
+inline AuthDeadline MakeAuthDeadline(DWORD timeoutMs = AUTH_TIMEOUT_MS) {
+    return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+}
+
+inline DWORD RemainingAuthTimeMs(AuthDeadline deadline) {
+    const auto remaining = deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) return 0;
+    const auto ms = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+    return ms > MAXDWORD ? MAXDWORD : static_cast<DWORD>(ms);
+}
 
 // Message types
 constexpr wchar_t MSG_AUTH_REQUEST[] = L"AUTH_REQUEST";
@@ -31,6 +46,10 @@ constexpr wchar_t MSG_CONFIG_RELOAD[] = L"CONFIG_RELOAD";
 constexpr wchar_t MSG_CONFIG_RELOAD_OK[] = L"CONFIG_RELOAD_OK";
 constexpr wchar_t MSG_CONFIG_RELOAD_ERROR[] = L"CONFIG_RELOAD_ERROR";
 constexpr wchar_t MSG_CONTROL_ACK[] = L"CONTROL_ACK";
+// Read-only learning-observability query (console → service). The response
+// is a single JSON document (no OK/ERROR suffix); no fragmentation layer —
+// the payload must stay within the client's read buffer.
+constexpr wchar_t MSG_LEARNING_STATUS[] = L"LEARNING_STATUS";
 constexpr DWORD PIPE_ACK_TIMEOUT_MS = 2000;
 
 // Parsed authentication result

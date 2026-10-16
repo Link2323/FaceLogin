@@ -1,0 +1,884 @@
+#include "face_gain_tune.h"
+
+#include <vector>
+#include <fstream>
+#include <sstream>
+
+using namespace facelogin;
+
+namespace {
+int failures = 0;
+void Check(bool ok, const char* label) {
+    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", label); ++failures; }
+}
+
+struct Sensor {
+    long exposure = -4;
+    long gain = 50;
+    std::vector<long> gainWrites;
+    SensorKnobs Knobs() {
+        return {
+            [](long& lo, long& hi, long& step) { lo = -7; hi = -1; step = 1; return true; },
+            [this](long& v) { v = exposure; return true; },
+            [this](long v) { exposure = v; return true; },
+            [](long& lo, long& hi, long& step) { lo = 0; hi = 63; step = 1; return true; },
+            [this](long& v) { v = gain; return true; },
+            [this](long v) { gain = v; gainWrites.push_back(v); return true; },
+            [](bool& manual) { manual = true; return true; }
+        };
+    }
+    float Luma() const { return 27.0f + static_cast<float>(gain - 50) * 2.5f; }
+};
+
+struct StateFile {
+    std::wstring path;
+    StateFile() {
+        wchar_t dir[MAX_PATH]{}, file[MAX_PATH]{};
+        if (GetTempPathW(MAX_PATH, dir) && GetTempFileNameW(dir, L"flt", 0, file)) path = file;
+        Check(!path.empty(), "create temporary state file");
+    }
+    ~StateFile() { if (!path.empty()) DeleteFileW(path.c_str()); }
+};
+
+GainTuneConfig Config(const StateFile& file) {
+    GainTuneConfig cfg;
+    cfg.persistPath = file.path;
+    cfg.settleMs = 0; // deterministic measurements; production keeps its 900 ms floor
+    return cfg;
+}
+const auto noCancel = [] { return false; };
+
+void TestConsecutiveDarkUnlocks() {
+    StateFile file;
+    Sensor sensor;
+    const auto knobs = sensor.Knobs();
+    auto cfg = Config(file);
+    cfg.maxSteps = 1; // force a budget-limited off-band checkpoint
+    Check(SaveTuneKnobState(file.path, knobs), "seed old in-band state");
+    const auto measure = [&](float& luma) { luma = sensor.Luma(); return true; };
+    Check(TuneFaceExposure(sensor.Luma(), knobs, measure, noCancel, cfg) == 1,
+          "first dark round exhausts its step budget");
+    Check(sensor.gain == 55 && sensor.Luma() < 50, "first round ends below target at gain 55");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.gain == 55,
+          "off-band settled progress replaces stale gain 50");
+    sensor.gainWrites.clear();
+    Check(!ApplyTuneKnobState(knobs, saved) && sensor.gainWrites.empty(),
+          "next graph preserves progress without rolling back");
+    cfg.maxSteps = 3;
+    Check(TuneFaceExposure(sensor.Luma(), knobs, measure, noCancel, cfg) <= 2,
+          "second round continues progress and reaches target within two steps");
+    Check(sensor.gain > 55 && sensor.Luma() >= 56, "second round converges with margin");
+    const long convergedGain = sensor.gain;
+    Check(LoadTuneKnobState(file.path, saved) && saved.gain == convergedGain, "converged state saved");
+    Check(!ApplyTuneKnobState(knobs, saved), "third graph does not rewrite intact controls");
+    Check(TuneFaceExposure(sensor.Luma(), knobs, measure, noCancel, cfg) == 0,
+          "third round needs no tuning");
+    sensor.gain = 0;
+    sensor.exposure = -5;
+    Check(ApplyTuneKnobState(knobs, saved) && sensor.gain == convergedGain && sensor.exposure == -4,
+          "power loss restores the latest converged state");
+}
+
+void TestMeasuredGainConvergesWithMargin() {
+    // Approximate the user's 11:41 trace: gain 50 gives luma 25, gain 58
+    // gives 46, gain 60 is borderline, gain 62 is stable around 55.
+    // The old controller needed five writes spread over three unlocks.
+    for (float slope : {2.4f, 4.0f}) {
+        StateFile file;
+        Sensor sensor;
+        const auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        const auto lumaNow = [&] { return 25.0f + (sensor.gain - 50) * slope; };
+        const auto measure = [&](float& luma) { luma = lumaNow(); return true; };
+        Check(TuneFaceExposure(lumaNow(), knobs, measure, noCancel, cfg) == 2,
+              "settled response converges in two gain writes in one round");
+        Check(sensor.exposure == -4 && sensor.gain <= 63,
+              "gain prediction respects physical range and avoids slower exposure");
+        Check(lumaNow() >= 56 && lumaNow() <= 90, "gain lands inside the band with margin");
+        sensor.gainWrites.clear();
+        Check(TuneFaceExposure(lumaNow() - 5.0f, knobs, measure, noCancel, cfg) == 0 &&
+              sensor.gainWrites.empty(), "small next-round brightness drop does not re-trigger");
+    }
+}
+
+void TestUnconfirmedProgressIsNotSaved() {
+    // Lost face, cancellation, oscillation and exhausted sample budget before
+    // the time floor must all preserve the previous checkpoint.
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        StateFile file;
+        Sensor sensor;
+        const auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        cfg.settleFrames = 4;
+        if (scenario == 3) cfg.settleMs = 60000;
+        Check(SaveTuneKnobState(file.path, knobs), "seed checkpoint before failed measurement");
+        int samples = 0;
+        bool cancelled = false;
+        const auto measure = [&](float& luma) {
+            ++samples;
+            if (scenario == 0) return false;
+            if (scenario == 1) cancelled = true;
+            luma = scenario == 2 ? (samples % 2 ? 10.0f : 100.0f) : 45.0f;
+            return true;
+        };
+        TuneFaceExposure(27.0f, knobs, measure, [&] { return cancelled; }, cfg);
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+              "unconfirmed/cancelled write does not replace checkpoint");
+        Check(sensor.gainWrites.size() == 1, "no further writes after unconfirmed measurement");
+    }
+}
+
+void TestPendingTuneConfirmation() {
+    // Exercise the shared entry used by worker and preview:
+    // changing the knobs is insufficient; resumption must measure and check
+    // the same manual combo before and after a fresh stable window.
+    for (int scenario = 0; scenario < 11; ++scenario) {
+        StateFile file;
+        Sensor sensor;
+        auto knobs = sensor.Knobs();
+        FaceTuneRecovery recovery;
+        auto cfg = Config(file);
+        cfg.recovery = &recovery;
+        Check(SaveTuneKnobState(file.path, knobs), "seed pending confirmation checkpoint");
+        TuneFaceExposure(27, knobs, [](float&) { return false; }, noCancel, cfg);
+        Check(recovery.pending && sensor.gain == 55, "lost settle measurement retains pending write");
+        cfg.settleMs = 900;
+        cfg.settleFrames = 10;
+        if (scenario == 4) sensor.gain = 56;
+        if (scenario == 5) knobs.exposureIsManual = [](bool& manual) { manual = false; return true; };
+        if (scenario == 6) { recovery.beforeLuma = 80; recovery.direction = 1; }
+        if (scenario == 9) knobs.exposureIsManual = [](bool&) { return false; };
+        if (scenario == 10) knobs.gainGet = [](long&) { return false; };
+        int samples = 0;
+        bool cancelled = false;
+        const auto measure = [&](float& luma) {
+            ++samples;
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            luma = scenario == 3 ? 60.0f + samples : scenario == 7 ? 130.0f : 80.0f;
+            if (scenario == 2) cancelled = true;
+            if (scenario == 8 && samples == 2) sensor.gain = 56;
+            return scenario != 1;
+        };
+        const bool confirmed = ConfirmPendingFaceTune(knobs, measure, [&] { return cancelled; }, cfg);
+        TuneKnobState saved;
+        Check(confirmed == (scenario == 0), "only unchanged, uncancelled stable in-band recovery confirms");
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == (scenario == 0 ? 55 : 50),
+              "lost, drifting, no-response, changed-mode/value or off-band recovery keeps checkpoint");
+        if (scenario != 0) {
+            TuneFaceExposure(80, knobs, measure, noCancel, cfg);
+            Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+                  "an in-band observation cannot bypass a failed independent confirmation");
+        }
+    }
+}
+
+void TestDarkFallbackAndBrightRecovery() {
+    StateFile file;
+    Sensor sensor;
+    const auto knobs = sensor.Knobs();
+    auto cfg = Config(file);
+    sensor.gain = 63;
+    auto darkMeasure = [&](float& luma) {
+        luma = 20.0f * std::pow(2.0f, static_cast<float>(sensor.exposure + 4));
+        return true;
+    };
+    Check(TuneFaceExposure(20.0f, knobs, darkMeasure, noCancel, cfg) > 0 && sensor.exposure > -4,
+          "exhausted gain still permits existing extreme-dark exposure fallback");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.exposure == sensor.exposure,
+          "fallback persists settled exposure");
+    const long before = sensor.exposure;
+    auto brightMeasure = [&](float& luma) {
+        luma = 170.0f * std::pow(2.0f, static_cast<float>(sensor.exposure - before));
+        return true;
+    };
+    Check(TuneFaceExposure(170.0f, knobs, brightMeasure, noCancel, cfg) == 1 && sensor.exposure < before,
+          "persisted dark-room state still adjusts down when room becomes bright");
+}
+
+void TestUnavailableGainFallsBackToExposure() {
+    // The integrated camera exposes exposure but no VideoProcAmp_Gain. The
+    // host still installs gain callbacks, whose DirectShow calls return false.
+    for (bool missingRange : {true, false}) {
+        StateFile file;
+        Sensor sensor;
+        auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        if (missingRange)
+            knobs.gainRange = [](long&, long&, long&) { return false; };
+        else
+            knobs.gainGet = [](long&) { return false; };
+        const auto measure = [&](float& luma) {
+            luma = 20.0f * std::exp2(static_cast<float>(sensor.exposure + 4));
+            return true;
+        };
+        Check(TuneFaceExposure(20.0f, knobs, measure, noCancel, cfg) == 2 &&
+                  sensor.exposure == -2,
+              "unavailable gain lets dark face pass exposure cap");
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.exposure == -2 &&
+                  (missingRange || !saved.hasGain),
+              "settled exposure is saved when gain cannot be tuned");
+    }
+}
+
+void TestGainlessCameraPrefersAutoExposure() {
+    Sensor sensor;
+    auto knobs = sensor.Knobs();
+    knobs.gainRange = [](long&, long&, long&) { return false; };
+    bool manual = true;
+    int manualWrites = 0, autoWrites = 0;
+    knobs.exposureIsManual = [&](bool& out) { out = manual; return true; };
+    knobs.exposureSet = [&](long v) {
+        sensor.exposure = v; manual = true; ++manualWrites; return true;
+    };
+    knobs.exposureSetAuto = [&](long v) {
+        Check(v == sensor.exposure, "AE restore does not change exposure value");
+        manual = false; ++autoWrites; return true;
+    };
+    sensor.exposure = -3;
+    TuneKnobState stale;
+    stale.hasExposure = true;
+    stale.exposure = -4;
+    Check(ApplyTuneKnobState(knobs, stale) && !manual && autoWrites == 1 &&
+              manualWrites == 0 && sensor.exposure == -3,
+          "gainless camera restores AE instead of replaying stale manual exposure");
+    const auto measure = [&](float& luma) { luma = 36.0f; return true; };
+    Check(TuneFaceExposure(36.0f, knobs, measure, noCancel) == 0 &&
+              autoWrites == 1 && manualWrites == 0,
+          "face tuning leaves gainless camera in AE");
+    Check(!detail::CanShortenExposure(118.0f, knobs, GainTuneConfig{}),
+          "AE cannot trigger manual exposure shortening");
+
+    // A driver that rejects AE restoration retains the manual fallback.
+    manual = true;
+    sensor.exposure = -4;
+    knobs.exposureSetAuto = [](long) { return false; };
+    const auto manualMeasure = [&](float& luma) {
+        luma = 20.0f * std::exp2(static_cast<float>(sensor.exposure + 4));
+        return true;
+    };
+    auto cfg = GainTuneConfig{};
+    cfg.settleMs = 0;
+    Check(TuneFaceExposure(20.0f, knobs, manualMeasure, noCancel, cfg) == 2 &&
+              sensor.exposure == -2,
+          "failed AE restoration retains bounded manual exposure fallback");
+}
+} // namespace
+
+void TestWhiteoutEvidence() {
+    FrameImage frame(100, 100);
+    Check(!IsSceneWhiteout(frame) && !IsSceneWhiteout(FrameImage{}),
+          "dark and empty frames do not trigger recovery");
+    for (long y = 0; y < frame.nr(); ++y)
+        for (long x = 0; x < frame.nc(); ++x) frame(y, x) = RgbPixel(255, 255, 255);
+    Check(IsSceneWhiteout(frame), "widespread clipping triggers recovery evidence");
+    for (long y = 40; y < 60; ++y)
+        for (long x = 40; x < 60; ++x) frame(y, x) = RgbPixel(30, 30, 30);
+    Check(!IsSceneWhiteout(frame), "bright background with dark central subject is excluded");
+    for (long y = 0; y < frame.nr(); ++y)
+        for (long x = 0; x < frame.nc(); ++x) frame(y, x) = RgbPixel(230, 230, 230);
+    Check(!IsSceneWhiteout(frame), "bright but unclipped empty scene is excluded");
+}
+
+void TestNoFaceRecovery() {
+    StateFile file;
+    Sensor sensor;
+    auto knobs = sensor.Knobs();
+    auto cfg = Config(file);
+    Check(SaveTuneKnobState(file.path, knobs), "save pre-recovery checkpoint");
+    float recovered = -1.0f;
+    int samples = 0;
+    auto measure = [&](WhiteoutSample& sample) {
+        ++samples;
+        sample = {sensor.exposure > -6, sensor.exposure <= -6 ? 80.0f : -1.0f};
+        return true;
+    };
+    Check(RecoverSceneWhiteout(knobs, measure, noCancel, recovered, cfg) == 2 &&
+          sensor.exposure == -6 && recovered == 80.0f && samples >= 6,
+          "no-face clipping reduces exposure until settled detection returns");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.exposure == -4,
+          "recovery alone never overwrites the face checkpoint");
+    Check(TuneFaceExposure(recovered, knobs, [](float&) { return false; }, noCancel, cfg) == 0 &&
+          LoadTuneKnobState(file.path, saved) && saved.exposure == -6,
+          "settled face handoff can persist the recovered in-band settings");
+
+    sensor.exposure = -4;
+    samples = 0;
+    auto transient = [&](WhiteoutSample& sample) {
+        sample = {++samples == 1, -1.0f}; return true;
+    };
+    Check(RecoverSceneWhiteout(knobs, transient, noCancel, recovered, cfg) == 0 &&
+          sensor.exposure == -4, "single clipped frame cannot trigger a write");
+
+    auto clipped = [](WhiteoutSample& sample) { sample = {true, -1.0f}; return true; };
+    cfg.maxSteps = 2;
+    Check(RecoverSceneWhiteout(knobs, clipped, noCancel, recovered, cfg) == 2 &&
+          sensor.exposure == -6 && recovered < 0,
+          "persistent clipping has a strict write budget and no face handoff");
+    sensor.exposure = -7;
+    Check(RecoverSceneWhiteout(knobs, clipped, noCancel, recovered, cfg) == 0,
+          "exposure lower bound is respected");
+    sensor.exposure = -4;
+    Check(RecoverSceneWhiteout(knobs, clipped, [] { return true; }, recovered, cfg) == 0,
+          "cancellation before recovery writes nothing");
+    Check(RecoverSceneWhiteout(knobs, clipped, [&] { return sensor.exposure < -4; },
+                              recovered, cfg) == 1 && recovered < 0,
+          "cancellation after a write stops without handoff");
+    sensor.exposure = -4;
+    Check(RecoverSceneWhiteout(knobs, [](WhiteoutSample&) { return false; },
+                              noCancel, recovered, cfg) == 0,
+          "dead camera does not change controls");
+    auto failedAfterWrite = [&](WhiteoutSample& sample) {
+        sample = {true, -1.0f}; return sensor.exposure == -4;
+    };
+    Check(RecoverSceneWhiteout(knobs, failedAfterWrite, noCancel, recovered, cfg) == 1 &&
+          recovered < 0, "lost camera after write prevents another write or handoff");
+    sensor.exposure = -4;
+    cfg.settleMs = 900;
+    cfg.settleFrames = 2;
+    Check(RecoverSceneWhiteout(knobs, clipped, noCancel, recovered, cfg) == 0,
+          "sample agreement before actuator lag expires cannot authorize a write");
+    cfg.settleMs = 0;
+    cfg.settleFrames = 4;
+    samples = 0;
+    auto unstableAfterWrite = [&](WhiteoutSample& sample) {
+        sample = {true, sensor.exposure < -4 ? (++samples % 2 ? 80.0f : 160.0f) : -1.0f};
+        return true;
+    };
+    Check(RecoverSceneWhiteout(knobs, unstableAfterWrite, noCancel, recovered, cfg) == 1 &&
+          recovered < 0, "unstable face readings prevent handoff and stacked writes");
+    sensor.exposure = -4;
+    knobs.exposureSet = {};
+    Check(RecoverSceneWhiteout(knobs, clipped, noCancel, recovered, cfg) == 0,
+          "unsupported exposure control is a no-op");
+}
+
+void TestResponseGate() {
+    GainTuneConfig cfg;
+    detail::FaceSettleGate fast(cfg, 30, 1);
+    for (int ms = 0; ms <= 120; ms += 40)
+        Check(!fast.Feed(30, ms), "unchanged old frames cannot complete early");
+    for (int ms = 160; ms < 360; ms += 40)
+        Check(!fast.Feed(60, ms), "directional response needs a full plateau");
+    Check(fast.Feed(60, 360), "real response and 200ms plateau finish before 900ms");
+    detail::FaceSettleGate delayed(cfg, 30, 1);
+    for (int ms = 0; ms < 900; ms += 50)
+        Check(!delayed.Feed(30, ms), "long stale plateau is not response evidence");
+    Check(delayed.Feed(30, 900), "no-response path retains original 900ms gate");
+    detail::FaceSettleGate transient(cfg, 30, 1);
+    Check(!transient.Feed(60, 100) && !transient.Feed(30, 150), "flash resets plateau");
+    for (int ms = 200; ms < 900; ms += 50)
+        Check(!transient.Feed(30, ms), "old frames after flash cannot finish early");
+    detail::FaceSettleGate wrong(cfg, 60, -1);
+    for (int ms = 0; ms < 900; ms += 50)
+        Check(!wrong.Feed(80, ms), "opposite-direction lighting change is not actuator evidence");
+    detail::FaceSettleGate ramp(cfg, 30, 1);
+    for (int ms = 0; ms < 900; ms += 40)
+        Check(!ramp.Feed(40.0f + ms / 20.0f, ms), "ongoing ramp does not satisfy plateau");
+    detail::FaceSettleGate slowDrift(cfg, 30, 1);
+    for (int ms = 0; ms < 1300; ms += 40)
+        Check(!slowDrift.Feed(60.0f - ms * 0.0035f, ms),
+              "small-range drift stays unconfirmed even after the 900ms fallback");
+}
+
+void TestDarkSceneEvidence() {
+    FrameImage frame(90, 90);
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(230, 230, 230);
+    Check(!IsSceneDark(frame) && !IsSceneDark(FrameImage{}),
+          "bright/invalid frames cannot authorize dark recovery");
+    for (long y = 30; y < 60; ++y)
+        for (long x = 30; x < 60; ++x) frame(y, x) = RgbPixel(20, 20, 20);
+    Check(IsSceneDark(frame) && CentralSceneLuma(frame) == 20,
+          "bright background cannot mask central darkness");
+    for (long y = 30; y < 60; ++y)
+        for (long x = 30; x < 60; ++x) frame(y, x) = RgbPixel(31, 31, 31);
+    Check(!IsSceneDark(frame), "ordinary no-face brightness is left alone");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(180, 180, 180);
+    for (long y = 30; y < 46; ++y)
+        for (long x = 30; x < 46; ++x) frame(y, x) = RgbPixel(20, 20, 20);
+    Check(FaceBoxLuma(frame, 30, 30, 59, 59) > 120 && IsSceneDark(frame),
+          "a small dark subject still triggers when most central pixels are bright");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(180, 180, 180);
+    frame(40, 40) = RgbPixel(0, 0, 0);
+    Check(!IsSceneDark(frame), "isolated black pixel cannot authorize a sensor write");
+}
+
+void TestNoFaceDarkRecovery() {
+    StateFile file;
+    Sensor sensor;
+    auto knobs = sensor.Knobs();
+    auto cfg = Config(file);
+    Check(SaveTuneKnobState(file.path, knobs), "seed checkpoint before dark bootstrap");
+    float recovered = -1;
+    int samples = 0;
+    const auto responsive = [&](DarkSceneSample& sample) {
+        ++samples;
+        sample.sceneLuma = 20.0f + (sensor.gain - 50) * 8;
+        sample.faceLuma = sample.sceneLuma >= 50 ? sample.sceneLuma : -1.0f;
+        return true;
+    };
+    Check(RecoverSceneDarkness(knobs, responsive, noCancel, recovered, cfg) == 1 &&
+          sensor.gain == 55 && recovered == 60 && samples >= 4,
+          "no face box needed to boost gain and hand off a settled face");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+          "dark bootstrap never persists unvalidated settings itself");
+
+    for (int scenario = 0; scenario < 8; ++scenario) {
+        sensor.gain = 50;
+        sensor.exposure = -5;
+        sensor.gainWrites.clear();
+        samples = 0;
+        cfg = Config(file);
+        auto candidate = sensor.Knobs();
+        if (scenario == 3) { cfg.settleMs = 900; cfg.settleFrames = 2; }
+        if (scenario == 7) { candidate.gainSet = {}; candidate.exposureSet = {}; }
+        const auto measure = [&](DarkSceneSample& sample) {
+            ++samples;
+            sample = {20.0f, -1.0f};
+            if (scenario == 1 && samples > 1) sample.sceneLuma = 80;
+            if (scenario == 2) return false;
+            if (scenario == 4 && !sensor.gainWrites.empty()) return false;
+            if (scenario == 5 && !sensor.gainWrites.empty())
+                sample.faceLuma = samples % 2 ? 60.0f : 100.0f;
+            return true;
+        };
+        const auto cancel = [&] {
+            return scenario == 0 || (scenario == 6 && !sensor.gainWrites.empty());
+        };
+        const int writes = RecoverSceneDarkness(candidate, measure, cancel, recovered, cfg);
+        Check(writes == (scenario >= 4 && scenario <= 6 ? 1 : 0) && recovered < 0,
+              "cancel/transient/dead camera/unsettled/unsupported never stack writes or hand off");
+    }
+    sensor.gain = 50;
+    sensor.exposure = -5;
+    cfg = Config(file);
+    samples = 0;
+    const auto emptyRoom = [&](DarkSceneSample& sample) {
+        sample = {20.0f + (sensor.gain - 50) * 2, -1.0f}; return true;
+    };
+    Check(RecoverSceneDarkness(knobs, emptyRoom, noCancel, recovered, cfg) == 2 && recovered < 0,
+          "persistent no-face scene obeys total write budget");
+    Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+          "empty room cannot overwrite the face checkpoint");
+
+    sensor.gain = 63;
+    sensor.exposure = -6;
+    const auto exposureResponse = [&](DarkSceneSample& sample) {
+        sample.sceneLuma = 20 * std::exp2(static_cast<float>(sensor.exposure + 6));
+        sample.faceLuma = sample.sceneLuma >= 50 ? sample.sceneLuma : -1;
+        return true;
+    };
+    Check(RecoverSceneDarkness(knobs, exposureResponse, noCancel, recovered, cfg) == 2 &&
+          sensor.exposure == -4 && recovered == 80,
+          "gain exhaustion uses single exposure steps until a settled face returns");
+    const auto darkness = [](DarkSceneSample& sample) { sample = {20, -1}; return true; };
+    sensor.exposure = -4;
+    Check(RecoverSceneDarkness(knobs, darkness, noCancel, recovered, cfg) == 0,
+          "blind exposure search respects frame-rate cap");
+    sensor.exposure = -5;
+    sensor.gain = 50;
+    Check(RecoverSceneDarkness(knobs, darkness, noCancel, recovered, cfg) == 2 &&
+          sensor.exposure == -4,
+          "confirmed dead gain switches to bounded exposure fallback");
+
+    sensor.gain = 50;
+    sensor.exposure = -5;
+    bool manual = false;
+    auto autoKnobs = sensor.Knobs();
+    autoKnobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    autoKnobs.exposureSet = [&](long value) { sensor.exposure = value; manual = true; return true; };
+    autoKnobs.gainSet = [&](long value) {
+        Check(manual, "dark bootstrap freezes AE before boosting gain");
+        sensor.gain = value; return true;
+    };
+    Check(RecoverSceneDarkness(autoKnobs, responsive, noCancel, recovered, cfg) == 2 &&
+          manual && recovered == 60,
+          "AE takeover and gain together obey the total two-write limit");
+}
+
+void TestShortExposurePolicy() {
+    StateFile file;
+    Sensor sensor;
+    auto knobs = sensor.Knobs();
+    auto cfg = Config(file);
+    sensor.exposure = -6;
+    const auto gainOnly = [&](float& luma) { luma = sensor.Luma(); return true; };
+    Check(TuneFaceExposure(27, knobs, gainOnly, noCancel, cfg) <= 2 && sensor.exposure == -6,
+          "dark face uses responsive gain without sacrificing short exposure");
+    sensor.gain = 50;
+    cfg.maxSteps = 1;
+    Check(TuneFaceExposure(27, knobs, gainOnly, noCancel, cfg) == 1 && sensor.exposure == -6,
+          "gain budget exhaustion is not evidence that longer exposure is necessary");
+    cfg.maxSteps = 3;
+    sensor.exposure = -4;
+    const auto bright = [&](float& luma) {
+        luma = 118.0f * std::exp2(static_cast<float>(sensor.exposure + 4)); return true;
+    };
+    Check(TuneFaceExposure(118, knobs, bright, noCancel, cfg) == 1 && sensor.exposure == -5,
+          "in-band but slow 62.5ms exposure shortens to 31.25ms with margin");
+    Check(TuneFaceExposure(59, knobs, bright, noCancel, cfg) == 0,
+          "next authentication reuses short exposure without another search");
+    sensor.exposure = -3;
+    Check(TuneFaceExposure(80, knobs, bright, noCancel, cfg) == 0 && sensor.exposure == -3,
+          "insufficient light margin does not speculate with a darker exposure");
+    sensor.exposure = -5;
+    Check(TuneFaceExposure(118, knobs, bright, noCancel, cfg) == 0,
+          "already 30fps-compatible exposure avoids needless shorter probes");
+    sensor.exposure = -8;
+    sensor.gain = 63;
+    auto photon = [&](float& luma) {
+        luma = 30.0f * std::exp2(static_cast<float>(sensor.exposure + 8)); return true;
+    };
+    // Extend the mock range to test that a dark face does not jump -8 -> -4.
+    knobs.exposureRange = [](long& lo, long& hi, long& step) { lo=-10; hi=-1; step=1; return true; };
+    Check(TuneFaceExposure(30, knobs, photon, noCancel, cfg) == 1 && sensor.exposure == -7,
+          "gain exhaustion adds only the one exposure stop actually needed");
+    sensor.exposure = -5;
+    sensor.gain = 50;
+    bool manual = false;
+    int pins = 0;
+    knobs.exposureIsManual = [&](bool& out) { out=manual; return true; };
+    knobs.exposureSet = [&](long v) { sensor.exposure=v; manual=true; ++pins; return true; };
+    knobs.gainSet = [&](long v) { Check(manual, "gain must never race AE"); sensor.gain=v; return true; };
+    Check(TuneFaceExposure(27, knobs, gainOnly, noCancel, cfg) >= 2 && pins == 1 && sensor.exposure == -5,
+          "automatic exposure is pinned at its current short value before gain");
+    manual = false;
+    sensor.gain = 50;
+    knobs.exposureSet = [](long) { return false; };
+    Check(TuneFaceExposure(27, knobs, gainOnly, noCancel, cfg) == 0 && sensor.gain == 50,
+          "failed manual takeover cannot start gain tuning against AE");
+    knobs = sensor.Knobs();
+    sensor.exposure = -6;
+    sensor.gain = 0;
+    sensor.gainWrites.clear();
+    const auto deadGain = [&](float& luma) {
+        luma = 30.0f * std::exp2(static_cast<float>(sensor.exposure + 6)); return true;
+    };
+    Check(TuneFaceExposure(30, knobs, deadGain, noCancel, cfg) == 3 &&
+          sensor.gainWrites.size() == 2 && sensor.exposure == -5,
+          "dead gain gets no repeated second pass and exposure recovers in one stop");
+}
+
+void TestReplayRestoresManualModeAtSameValue() {
+    StateFile file;
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    bool manual = true;
+    int exposureWrites = 0;
+    auto knobs = sensor.Knobs();
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) {
+        sensor.exposure = value;
+        manual = true;
+        ++exposureWrites;
+        return true;
+    };
+    Check(SaveTuneKnobState(file.path, knobs), "save settled manual camera settings");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved), "reload settled camera settings");
+    // Driver reset observed on 10-12: exposure reads -5 again, but AE is on
+    // and gain has returned to zero. Restoring only gain leaves AE in control.
+    manual = false;
+    sensor.gain = 0;
+    Check(ApplyTuneKnobState(knobs, saved) && manual && sensor.gain == 22 &&
+              exposureWrites == 1,
+          "same exposure value still restores the saved manual mode");
+    Check(!ApplyTuneKnobState(knobs, saved) && exposureWrites == 1,
+          "intact mode and values do not incur another replay write");
+}
+
+void TestTakeoverStopsAfterLandingInBand() {
+    StateFile file;
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    bool manual = false;
+    int exposureWrites = 0;
+    auto knobs = sensor.Knobs();
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) {
+        sensor.exposure = value;
+        manual = true;
+        ++exposureWrites;
+        return true;
+    };
+    const auto measure = [&](float& luma) {
+        luma = manual ? (55.5f + (sensor.gain - 22) * 5.0f) *
+                           std::exp2(static_cast<float>(sensor.exposure + 5))
+                      : 26.0f;
+        return true;
+    };
+    const auto cfg = Config(file);
+    const int steps = TuneFaceExposure(26, knobs, measure, [] { return false; }, cfg);
+    Check(steps == 1 && exposureWrites == 1 && sensor.gainWrites.empty() &&
+              sensor.exposure == -5 && sensor.gain == 22,
+          "settled AE takeover in band avoids gain overshoot and corrective exposure writes");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && saved.exposure == -5 && saved.gain == 22,
+          "in-band takeover persists the settled controls without backtracking");
+}
+
+void TestReplayPreservesAutoMode() {
+    StateFile file;
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    bool manual = false;
+    int manualWrites = 0, autoWrites = 0;
+    auto knobs = sensor.Knobs();
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) {
+        sensor.exposure = value; manual = true; ++manualWrites; return true;
+    };
+    knobs.exposureSetAuto = [&](long value) {
+        sensor.exposure = value; manual = false; ++autoWrites; return true;
+    };
+    Check(SaveTuneKnobState(file.path, knobs), "save an automatic exposure observation");
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved), "reload automatic exposure observation");
+    sensor.exposure = -4;
+    Check(!ApplyTuneKnobState(knobs, saved) && !manual && manualWrites == 0 && autoWrites == 0,
+          "AE numeric changes are not mistaken for lost manual settings");
+    manual = true;
+    Check(ApplyTuneKnobState(knobs, saved) && !manual && autoWrites == 1 && manualWrites == 0,
+          "saved automatic mode is restored when another graph left manual mode");
+}
+
+void TestLegacyReplayAndFailedModeRestore() {
+    StateFile file;
+    {
+        std::ofstream output(file.path);
+        output << "exposure=-5\ngain=22\n";
+    }
+    Sensor sensor;
+    sensor.exposure = -5;
+    sensor.gain = 22;
+    auto knobs = sensor.Knobs();
+    bool manual = false;
+    knobs.exposureIsManual = [&](bool& value) { value = manual; return true; };
+    knobs.exposureSet = [&](long value) { sensor.exposure = value; manual = true; return true; };
+    TuneKnobState saved;
+    Check(LoadTuneKnobState(file.path, saved) && !saved.hasExposureMode,
+          "old two-line state has no claimed exposure mode");
+    Check(!ApplyTuneKnobState(knobs, saved) && !manual,
+          "legacy replay keeps its value-only behavior");
+    saved.hasExposureMode = true;
+    saved.exposureManual = true;
+    sensor.gain = 0;
+    knobs.exposureSet = [](long) { return false; };
+    Check(!ApplyTuneKnobState(knobs, saved) && sensor.gainWrites.empty() && !manual,
+          "failed manual restoration does not replay gain against AE");
+}
+
+// Optional replay of ExposureResponseProbe CSV through the actual gate.
+void ReplayResponseCsv(const char* path) {
+    std::ifstream input(path);
+    Check(input.good(), "open real-camera response trace");
+    std::string line, key;
+    std::vector<std::pair<long long,float>> samples;
+    float before = -1;
+    int direction = 0;
+    int groups = 0;
+    const auto flush = [&] {
+        if (samples.empty()) return;
+        ++groups;
+        std::vector<float> tail;
+        for (size_t i = samples.size() > 10 ? samples.size()-10 : 0; i < samples.size(); ++i)
+            tail.push_back(samples[i].second);
+        std::sort(tail.begin(), tail.end());
+        const float final = tail[tail.size()/2];
+        if (before >= 0) {
+            GainTuneConfig cfg;
+            detail::FaceSettleGate gate(cfg, before, direction);
+            bool accepted = false;
+            for (size_t i = 0; i < samples.size() && i < static_cast<size_t>(cfg.settleFrames); ++i) {
+              auto [ms,luma] = samples[i];
+              if (gate.Feed(luma,ms)) {
+                std::printf("TRACE %s gate=%lldms accepted=%.1f tail=%.1f drift=%.1f\n",
+                            key.c_str(),ms,luma,final,luma-final);
+                accepted = true;
+                break;
+              }
+            }
+            if (!accepted) std::printf("TRACE %s unconfirmed within sample budget\n", key.c_str());
+        }
+        before=final;
+        samples.clear();
+    };
+    std::getline(input,line);
+    while (std::getline(input,line)) {
+        std::stringstream row(line);
+        std::vector<std::string> cells;
+        std::string cell;
+        while(std::getline(row,cell,',')) cells.push_back(cell);
+        if(cells.size()!=8) continue;
+        const std::string next=cells[0]+"/"+cells[1];
+        if(next!=key) { flush(); key=next; direction=std::stoi(cells[7]); }
+        samples.push_back({static_cast<long long>(std::stod(cells[2])),std::stof(cells[5])});
+    }
+    flush();
+    Check(groups > 1, "response trace contains baseline and actuator measurements");
+}
+
+void TestFailedRoundProgressVerdict() {
+    const GainTuneConfig cfg;  // band 50–120, settleTol 6
+    TuneWriteTracker writes;
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 3.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "no knob write disables the rule");
+    writes.wrote = true;
+    Check(EvaluateFailedRoundTuneProgress(60.0f, 60.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "in-band start never persists on failure");
+    writes.lastSettledLuma = 12.0f;
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 3.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "settled move beyond settleTol saves");
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 12.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "saved verdict ignores loop face luma on dark start");
+    writes.lastSettledLuma = 8.0f;
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 8.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "improvement below settleTol is noise");
+    writes.lastSettledLuma = -1.0f;
+    Check(EvaluateFailedRoundTuneProgress(43.0f, 43.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "unconfirmed write carries no face-backed proof");
+    writes.lastSettledLuma = 84.0f;
+    Check(EvaluateFailedRoundTuneProgress(43.0f, 43.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "landing inside the band from dark saves");
+    writes.lastSettledLuma = 170.0f;
+    Check(EvaluateFailedRoundTuneProgress(230.0f, 230.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "over-bright side is symmetric");
+    writes.lastSettledLuma = -1.0f;
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, 12.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveFaceAppeared, "credible appearing face saves");
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, 3.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "noise-floor face is not credible progress");
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, -1.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "scene that stayed empty never persists");
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, 250.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "whiteout-level appearing face is excluded");
+    Check(EvaluateFailedRoundTuneProgress(230.0f, 230.0f, TuneWriteTracker{}, cfg) ==
+          TuneProgressVerdict::NotNeeded, "bright-side rule also requires a write");
+}
+
+void TestWriteTrackerFeedsFailedRoundRule() {
+    // Budget-limited dark round (settle confirmed, still out of band): the
+    // tracker must record the write target and the settled luma so a failed
+    // round can persist them; an unconfirmed round records the target but
+    // never earns a save.
+    {
+        StateFile file;
+        Sensor sensor;
+        const auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        cfg.maxSteps = 1;
+        TuneWriteTracker tracker;
+        cfg.writes = &tracker;
+        const auto measure = [&](float& luma) { luma = sensor.Luma(); return true; };
+        Check(TuneFaceExposure(sensor.Luma(), knobs, measure, noCancel, cfg) == 1,
+              "budget-limited dark round applies one gain step");
+        Check(sensor.gain == 55, "round ends at gain 55");
+        Check(tracker.wrote && tracker.lastWritten.hasGain && tracker.lastWritten.gain == 55,
+              "tracker records the write target");
+        Check(tracker.lastSettledLuma >= 39.0f && tracker.lastSettledLuma < 50.0f,
+              "tracker records the settled but out-of-band luma");
+        Check(EvaluateFailedRoundTuneProgress(27.0f, 39.5f, tracker, cfg) ==
+              TuneProgressVerdict::SaveSettledGain,
+              "budget-limited failed round earns a progress save");
+        Check(SaveTuneKnobState(file.path, tracker.lastWritten),
+              "tracker target is persistable");
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == 55,
+              "persisted failed-round progress replays the write target");
+    }
+    {
+        StateFile file;
+        Sensor sensor;
+        const auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        cfg.settleFrames = 4;
+        TuneWriteTracker tracker;
+        cfg.writes = &tracker;
+        Check(SaveTuneKnobState(file.path, knobs), "seed checkpoint before unconfirmed round");
+        TuneFaceExposure(27.0f, knobs, [](float&) { return false; }, noCancel, cfg);
+        Check(tracker.wrote && tracker.lastSettledLuma < 0.0f,
+              "unconfirmed round records its write target but no settled luma");
+        Check(EvaluateFailedRoundTuneProgress(27.0f, -1.0f, tracker, cfg) ==
+              TuneProgressVerdict::NotNeeded,
+              "unconfirmed write cannot earn a failed-round save");
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+              "checkpoint unchanged after unconfirmed failed round");
+    }
+}
+
+void TestBrightSceneEvidence() {
+    // Bright-side twin of the dark evidence: an over-exposed scene that
+    // never reaches the strict clip thresholds must still authorize the
+    // no-face recovery entry (2026-10-16 12:39: -4/gain63 in daylight,
+    // three empty-scene rounds with zero knob writes).
+    FrameImage frame(90, 90);
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(120, 120, 120);
+    Check(!IsSceneBright(frame) && !IsSceneBright(FrameImage{}),
+          "ordinary brightness and invalid frames cannot authorize bright recovery");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(220, 220, 220);
+    Check(IsSceneBright(frame),
+          "over-exposed but unclipped scene triggers bright recovery evidence");
+    for (long y = 30; y < 60; ++y)
+        for (long x = 30; x < 60; ++x) frame(y, x) = RgbPixel(60, 60, 60);
+    Check(!IsSceneBright(frame),
+          "bright background with a dark central subject keeps bright recovery off");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(179, 179, 179);
+    Check(!IsSceneBright(frame), "just under the bright floor is left alone");
+}
+
+int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--dark-frame") {
+        // Temporary RGB PPM exported from a user-supplied preview crop. Keep
+        // personal camera imagery outside committed regression fixtures.
+        std::ifstream input(argv[2], std::ios::binary);
+        std::string magic;
+        long width = 0, height = 0, maximum = 0;
+        input >> magic >> width >> height >> maximum;
+        if (!input || magic != "P6" || maximum != 255 ||
+            width < 3 || height < 3 || width > 4096 || height > 4096) return 2;
+        input.get();
+        FrameImage frame(height, width);
+        for (size_t i = 0; i < frame.size(); ++i) {
+            unsigned char pixel[3]{};
+            input.read(reinterpret_cast<char*>(pixel), 3);
+            frame[i] = RgbPixel(pixel[0], pixel[1], pixel[2]);
+        }
+        if (!input) return 2;
+        std::printf("Backlit preview: central luma=%.2f, dark trigger=%d\n",
+                    CentralSceneLuma(frame), IsSceneDark(frame));
+        Check(IsSceneDark(frame), "dark face against bright background must trigger recovery");
+        return failures ? 1 : 0;
+    }
+    TestResponseGate();
+    TestShortExposurePolicy();
+    if(argc==2) ReplayResponseCsv(argv[1]);
+    TestWhiteoutEvidence();
+    TestNoFaceRecovery();
+    TestDarkSceneEvidence();
+    TestBrightSceneEvidence();
+    TestNoFaceDarkRecovery();
+    TestConsecutiveDarkUnlocks();
+    TestMeasuredGainConvergesWithMargin();
+    TestUnconfirmedProgressIsNotSaved();
+    TestPendingTuneConfirmation();
+    TestDarkFallbackAndBrightRecovery();
+    TestUnavailableGainFallsBackToExposure();
+    TestGainlessCameraPrefersAutoExposure();
+    TestReplayRestoresManualModeAtSameValue();
+    TestTakeoverStopsAfterLandingInBand();
+    TestReplayPreservesAutoMode();
+    TestLegacyReplayAndFailedModeRestore();
+    TestFailedRoundProgressVerdict();
+    TestWriteTrackerFeedsFailedRoundRule();
+    std::printf("FaceGainTuneTest: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
+    return failures ? 1 : 0;
+}

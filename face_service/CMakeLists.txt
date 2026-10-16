@@ -2,33 +2,29 @@ add_executable(FaceLoginService
     main.cpp
     FaceService.cpp
     auth_pipeline.cpp
+    auth_frame_preparation.cpp
+    auth_frame_stream.cpp
+    authentication_residency.cpp
     auth_worker.cpp
     auth_worker_client.cpp
     auth_worker_protocol.cpp
-    onnx_models.cpp
     performance_affinity.cpp
-    webcam_capture_dshow.cpp
+    template_learner.cpp
     pipe_server.cpp
-    credential_store.cpp
 )
 
 facelogin_add_version_rc(FaceLoginService VFT_APP
     "FaceLogin authentication service" FaceLoginService.exe)
 
 target_link_libraries(FaceLoginService PRIVATE
-    facelogin_common
-
-    onnxruntime::onnxruntime
-    strmiids
+    facelogin_camera
+    facelogin_inference
+    facelogin_credential_store
     advapi32
     ole32
 )
 
 target_include_directories(FaceLoginService PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-set_target_properties(FaceLoginService PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
-)
 
 # No console window for service
 # set_target_properties(FaceLoginService PROPERTIES
