@@ -28,4 +28,4 @@ C++ 的生产 worker 和 `ModelIntegrityTest` 已共同使用 `common/model_hash
 
 ### C — 清理推理接口与离线标定的旧说明
 
-2026-10-14 共享代码迁移时发现：`vision/onnx_models.h` 的预处理注释仍写 640×640，实际 `onnx_models.cpp` 使用 512×512；`tools/threshold_calibration/calibrate.py` 仍描述历史 R50/512-D、0.80 阈值及 640×640 标定口径，不能当作当前 SFace 生产行为的说明。头文件注释已于 2026-10-15 修正（[`code-quality-todo.md`](code-quality-todo.md) #3）；剩余工作：明确离线脚本的历史用途。
+2026-10-14 共享代码迁移时发现：`vision/onnx_models.h` 的预处理注释仍写 640×640，实际 `onnx_models.cpp` 使用 512×512；`tools/threshold_calibration/calibrate.py` 仍描述历史 R50/512-D、0.80 阈值及 640×640 标定口径，不能当作当前 SFace 生产行为的说明。头文件注释已于 2026-10-15 修正（a6e58df）；剩余工作：明确离线脚本的历史用途。
