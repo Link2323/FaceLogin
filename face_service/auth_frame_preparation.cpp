@@ -282,7 +282,7 @@ bool AuthPipeline::PrepareFrames(PreparedAuthFrames& prepared,
         if (seed.valid && seed.det) triggerLuma = FaceBoxLuma(seed.frame, *seed.det);
         prepared.triggerFaceLuma = triggerLuma;
         FACELOGIN_INFO(L"Exposure tune trigger: %s, face luma %.0f — %s",
-                       seed.valid ? (seed.det ? L"face" : L"no fresh frame")
+                       seed.valid ? (seed.det ? L"face" : L"no face")
                                   : L"no fresh frame",
                        triggerLuma, diagnosticSnapshot.Text().c_str());
     }
@@ -300,7 +300,8 @@ bool AuthPipeline::PrepareFrames(PreparedAuthFrames& prepared,
             if (tuneSteps > 0) seed = AuthFrame{};
         }
     } else if (seed.valid &&
-               (IsSceneWhiteout(seed.frame) || IsSceneDark(seed.frame, tuneCfg))) {
+               (IsSceneWhiteout(seed.frame) || IsSceneBright(seed.frame) ||
+                IsSceneDark(seed.frame, tuneCfg))) {
         // Recovery precedes all PAD/identity frames. Never reuse a seed
         // after this path: controls or the camera stream may have moved.
         darkRecoveryAttempted = IsSceneDark(seed.frame, tuneCfg);

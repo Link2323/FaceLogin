@@ -98,7 +98,8 @@ void PreviewExposure::Observe(const FrameImage& frame,
     }
     if (!det) {
         m_pendingLuma = -1.0f;
-        if (!IsSceneWhiteout(frame) && !IsSceneDark(frame, cfg)) return;
+        if (!IsSceneWhiteout(frame) && !IsSceneBright(frame) &&
+            !IsSceneDark(frame, cfg)) return;
         m_lastTune = now;
         TuneFaceExposure(BuildSensorKnobs(),
                          [this](FrameImage& f, unsigned long long& s) {

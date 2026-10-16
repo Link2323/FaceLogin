@@ -965,6 +965,22 @@ inline bool IsSceneDark(const FrameImage& frame, const GainTuneConfig& cfg = {})
     return luma >= 0.0f && luma <= cfg.maxNoFaceLuma;
 }
 
+// Bright-side twin of IsSceneDark for the no-face recovery entry. The strict
+// clip-based whiteout evidence leaves a gap: an over-exposed scene whose
+// central tiles keep some sub-245 structure (hair, clothes, sensor noise
+// near saturation) never qualifies, so a persisted dark-room combo replayed
+// into daylight just fails empty-scene every round with zero knob writes
+// (2026-10-16 12:39: -4/gain63, three identical 2.5 s rounds, tune 0.07 ms).
+// CentralSceneLuma is the darkest-quarter mean of the central third — when
+// even that floor sits this high there is no dark subject left to protect,
+// unlike a backlit window around a dark face. Bounded evidence for recovery
+// only; identity and PAD decide as always.
+inline constexpr float kBrightSceneLuma = 180.0f;
+inline bool IsSceneBright(const FrameImage& frame) {
+    const float luma = CentralSceneLuma(frame);
+    return luma >= 0.0f && luma >= kBrightSceneLuma;
+}
+
 struct DarkSceneSample {
     float sceneLuma = -1.0f;
     float faceLuma = -1.0f;
@@ -1147,7 +1163,7 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
             RotateFrame(frame, cameraRotation);
             const auto det = detector.DetectLargestFace(frame);
             if (!det) {
-                const bool whiteout = IsSceneWhiteout(frame);
+                const bool whiteout = IsSceneWhiteout(frame) || IsSceneBright(frame);
                 if (!whiteout && !IsSceneDark(frame, cfg)) continue;
                 float recoveredLuma = -1.0f;
                 const auto measure = [&](float& faceLuma, float& sceneLuma, bool& clipped) {
@@ -1161,7 +1177,8 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
                             const auto face = detector.DetectLargestFace(fresh);
                             faceLuma = face ? FaceBoxLuma(fresh, *face) : -1.0f;
                             sceneLuma = CentralSceneLuma(fresh);
-                            clipped = !face && IsSceneWhiteout(fresh);
+                            clipped = !face &&
+                                (IsSceneWhiteout(fresh) || IsSceneBright(fresh));
                             return true;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));

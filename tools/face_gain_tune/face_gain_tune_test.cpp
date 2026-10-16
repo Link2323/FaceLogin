@@ -815,6 +815,26 @@ void TestWriteTrackerFeedsFailedRoundRule() {
     }
 }
 
+void TestBrightSceneEvidence() {
+    // Bright-side twin of the dark evidence: an over-exposed scene that
+    // never reaches the strict clip thresholds must still authorize the
+    // no-face recovery entry (2026-10-16 12:39: -4/gain63 in daylight,
+    // three empty-scene rounds with zero knob writes).
+    FrameImage frame(90, 90);
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(120, 120, 120);
+    Check(!IsSceneBright(frame) && !IsSceneBright(FrameImage{}),
+          "ordinary brightness and invalid frames cannot authorize bright recovery");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(220, 220, 220);
+    Check(IsSceneBright(frame),
+          "over-exposed but unclipped scene triggers bright recovery evidence");
+    for (long y = 30; y < 60; ++y)
+        for (long x = 30; x < 60; ++x) frame(y, x) = RgbPixel(60, 60, 60);
+    Check(!IsSceneBright(frame),
+          "bright background with a dark central subject keeps bright recovery off");
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = RgbPixel(179, 179, 179);
+    Check(!IsSceneBright(frame), "just under the bright floor is left alone");
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[1]) == "--dark-frame") {
         // Temporary RGB PPM exported from a user-supplied preview crop. Keep
@@ -844,6 +864,7 @@ int main(int argc, char** argv) {
     TestWhiteoutEvidence();
     TestNoFaceRecovery();
     TestDarkSceneEvidence();
+    TestBrightSceneEvidence();
     TestNoFaceDarkRecovery();
     TestConsecutiveDarkUnlocks();
     TestMeasuredGainConvergesWithMargin();
