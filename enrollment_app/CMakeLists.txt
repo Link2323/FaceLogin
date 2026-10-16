@@ -1,13 +1,31 @@
 # Assemble a single embedded page without runtime asset dependencies.
+# Concatenation order IS the script's dependency order (capture_flow.js first,
+# app_main.js last: top-level wiring references earlier files' functions);
+# tools/enrollment_ui/capture_flow_test.cjs mirrors this list.
+set(ENROLLMENT_JS_SOURCES
+    capture_flow.js
+    ui_common.js
+    preview.js
+    capture_ui.js
+    navigation.js
+    settings.js
+    faces.js
+    account_refresh.js
+    enroll_save.js
+    logs.js
+    app_main.js)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/styles.css"
-    "${CMAKE_CURRENT_SOURCE_DIR}/app.js"
-    "${CMAKE_CURRENT_SOURCE_DIR}/capture_flow.js"
-)
+    "${CMAKE_CURRENT_SOURCE_DIR}/styles.css")
+foreach(js IN LISTS ENROLLMENT_JS_SOURCES)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/${js}")
+endforeach()
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/styles.css" ENROLLMENT_CSS)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/app.js" ENROLLMENT_JS)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/capture_flow.js" ENROLLMENT_CAPTURE_JS)
-string(PREPEND ENROLLMENT_JS "${ENROLLMENT_CAPTURE_JS}\n")
+set(ENROLLMENT_JS "")
+foreach(js IN LISTS ENROLLMENT_JS_SOURCES)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${js}" ENROLLMENT_JS_CHUNK)
+    string(APPEND ENROLLMENT_JS "${ENROLLMENT_JS_CHUNK}\n")
+endforeach()
 configure_file(index.html.in ${CMAKE_CURRENT_BINARY_DIR}/index.html @ONLY)
 # RC inputs must change with the page even when MSBuild file tracking is disabled.
 file(SHA256 "${CMAKE_CURRENT_BINARY_DIR}/index.html" ENROLLMENT_PAGE_SHA256)

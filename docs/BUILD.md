@@ -89,7 +89,7 @@ SFace 自 2026-10-04 起使用清理 initializer graph inputs 的规范化 FP32 
 
 开发验证与打包分开：安装器 Go 代码变更后在 `installer/FaceLoginSetup/` 单独运行 `go test ./...`，C++ 测试按目标显式构建和运行。
 
-注册页面源文件为 `enrollment_app/index.html.in`、`styles.css`、`capture_flow.js` 和 `app.js`；CMake 合成为 `build/enrollment_app/index.html`，由生成的 `resource.rc` 嵌入 EXE，不增加运行期资源文件。修改任一源文件后须重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
+注册页面源文件为 `enrollment_app/index.html.in`、`styles.css` 和 `enrollment_app/CMakeLists.txt` 中 `ENROLLMENT_JS_SOURCES` 列出的 11 个 JS 模块（`capture_flow.js` 到 `app_main.js`，列表顺序即拼接与依赖顺序）；CMake 合成为 `build/enrollment_app/index.html`，由生成的 `resource.rc` 嵌入 EXE，不增加运行期资源文件。修改任一源文件后须重建 C++；改动安装器 Go、Vue 或载荷提取逻辑时须重建安装器。单独运行 Wails 不会检测 C++ 资源是否过期。
 
 ### 资源白名单
 

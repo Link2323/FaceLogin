@@ -101,7 +101,7 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 
 ### WebView2 边界
 
-- `index.html.in`、`styles.css`、`app.js` 在 CMake 配置时合成单个 `index.html`，编译进 `FaceLoginConsole.exe`；修改任一源文件后必须重建 C++ 目标。
+- `index.html.in`、`styles.css` 与 `enrollment_app/` 下的 JS 模块在 CMake 配置时按 `ENROLLMENT_JS_SOURCES` 列表顺序拼接为单个 `index.html`，编译进 `FaceLoginConsole.exe`；修改任一源文件后必须重建 C++ 目标。
 - JS 桥接的 dispId 清单以 `WebviewHost.cpp` 为准，不在文档复制。
 - 日志页四个日志来源直接读文件；"学习状态"视图是唯一走公共管道的查询（`LEARNING_STATUS`，响应为单条 JSON 内存快照，服务重启清零），客户端按 10s 节流——公共管道单实例，不得演变成高频轮询。
 - 禁用右键菜单和开发者工具。
@@ -144,4 +144,4 @@ Enrollment 改动：
 - 保存、热重载、删除/重命名人脸
 - 修改页面模板、样式或脚本后确认实际重建并嵌入新 UI
 
-采集页面由 `capture_flow.js` 管理整轮状态、轮询与角度间延迟。取消、失败和完成统一结束本轮，清理定时器并使旧回调失效；下一轮保留独立代次，避免快速重试时旧回调启动下一角度或覆盖提示。`app.js` 负责宿主调用和界面呈现。
+采集页面由 `capture_flow.js` 管理整轮状态、轮询与角度间延迟。取消、失败和完成统一结束本轮，清理定时器并使旧回调失效；下一轮保留独立代次，避免快速重试时旧回调启动下一角度或覆盖提示。页面其余逻辑按领域拆分为同目录 JS 模块（`ui_common`/`preview`/`capture_ui`/`navigation`/`settings`/`faces`/`account_refresh`/`enroll_save`/`logs`/`app_main`），宿主调用与呈现分散其中；跨模块共享状态收在所属模块闭包内（`previewCtl`、`captureCtl`、`navCtl` 等），HTML 内联 onclick 引用的处理器保持全局函数。
