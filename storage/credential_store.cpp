@@ -486,8 +486,11 @@ bool CredentialStore::DeleteFace(const std::wstring& sid, uint32_t faceId) {
         // Last face removed → drop the account entirely so the login tile
         // (which reads the record count) doesn't show a tile that can never
         // match. Re-enrollment goes through the first-time flow again.
+        // Copy the name before the erase invalidates rec (same pattern as
+        // DeleteUserBySid below).
+        std::wstring username = rec.username;
         m_users.erase(m_users.begin() + static_cast<ptrdiff_t>(idx));
-        FACELOGIN_INFO(L"Removed account %s (no faces remain)", rec.username.c_str());
+        FACELOGIN_INFO(L"Removed account %s (no faces remain)", username.c_str());
     }
     return true;
 }

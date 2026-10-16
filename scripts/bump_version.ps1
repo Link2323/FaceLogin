@@ -1,14 +1,15 @@
-﻿# Sync the version string across ALL 6 locations (docs/BUILD.md "版本号与版本资源"):
+﻿# Sync the version string across ALL 5 locations (docs/BUILD.md "版本号与版本资源"):
 #   in git    : CMakeLists.txt project(VERSION), wails.json Info, main.go appVersion, README badge
-#   disk-only : AGENTS.md overview, installer/FaceLoginSetup/build/windows/info.json (gitignored)
+#   disk-only : installer/FaceLoginSetup/build/windows/info.json (gitignored)
 #
 #   powershell -ExecutionPolicy Bypass -File scripts/bump_version.ps1 1.8.1-multi-angle
 #   add -Dry to preview every replacement without writing.
 #
 # Numeric part (x.y.z) goes into exe/registry version resources; the -suffix
-# only shows up in the README badge, AGENTS.md and the release tag. Every
-# pattern is count-validated: a missed location fails loudly instead of
-# silently drifting.
+# only shows up in the README badge and the release tag. Every pattern is
+# count-validated: a missed location fails loudly instead of silently drifting.
+# (AGENTS.md carried a version tag once, but its 2026-10 rewrite dropped the
+# marker text entirely — it is no longer a sync target.)
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [switch]$Dry
@@ -69,10 +70,6 @@ Update-File "README.md" @(
     @{ Pattern = 'version-[^" ]*?-green'; Replacement = "version-$badge-green"; Expect = 1 }
 )
 
-Update-File "AGENTS.md" @(
-    @{ Pattern = '\*\*Windows 专属桌面应用\*\*\([0-9][^)]*\)'; Replacement = "**Windows 专属桌面应用**($display)"; Expect = 1 }
-)
-
 Update-File "installer/FaceLoginSetup/build/windows/info.json" @(
     @{ Pattern = '"file_version":\s*"[\d.]+"'; Replacement = "`"file_version`": `"$num`""; Expect = 1 },
     @{ Pattern = '"ProductVersion":\s*"[\d.]+"'; Replacement = "`"ProductVersion`": `"$num`""; Expect = 1 },
@@ -81,6 +78,6 @@ Update-File "installer/FaceLoginSetup/build/windows/info.json" @(
 
 Write-Host ""
 Write-Host "notes:"
-Write-Host "  - AGENTS.md and info.json are gitignored (disk-only); the other 4 changes are committable."
+Write-Host "  - info.json is gitignored (disk-only); the other 4 changes are committable."
 Write-Host "  - run scripts/build_installer.ps1 to bake the new version into the binaries/installer."
 Write-Host "  - release tag: v$display"

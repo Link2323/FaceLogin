@@ -213,6 +213,34 @@ void TestPasswordBlobValidation() {
           "single-byte legacy sentinel is rejected");
 }
 
+void TestDeleteFace() {
+    facelogin::CredentialStore store;
+    const auto password = facelogin::DpapiUtil::Protect(L"test-password");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", password,
+                        Basis(0)), "first Alice face is added");
+    Check(store.AddFace(L"alice", L"alice@example.test", L"SID-A", password,
+                        Basis(1)), "second Alice face is added");
+    // Zoe is deliberately the LAST record: deleting her only face used to
+    // log rec.username after the vector erase — UB exactly in this position.
+    Check(store.AddFace(L"zoe", L"zoe@example.test", L"SID-Z", password,
+                        Basis(2)), "Zoe face is added as the last account");
+
+    Check(store.DeleteFace(L"SID-A", 1), "one of several faces is deleted");
+    Check(store.GetFaceCount(L"SID-A") == 1,
+          "account survives while at least one face remains");
+    Check(!store.DeleteFace(L"SID-A", 9), "unknown face id is rejected");
+    Check(!store.DeleteFace(L"SID-MISSING", 1), "unknown account is rejected");
+
+    Check(store.DeleteFace(L"SID-Z", 1), "last account's only face is deleted");
+    Check(store.GetFaceCount(L"SID-Z") == 0,
+          "account is dropped together with its last face");
+    Check(!store.LoadCredentialForSid(L"SID-Z"), "dropped account fails closed");
+
+    Check(store.DeleteFace(L"SID-A", 2), "remaining Alice face is deleted");
+    Check(store.GetUserCount() == 0,
+          "database empties after the last account loses its last face");
+}
+
 // Unit vector tilted `perturb` away from a basis axis (still ~orthogonal to
 // every other axis — distance to Basis(index) ≈ atan(perturb)).
 std::vector<float> NearBasis(size_t index, float perturb) {
@@ -477,6 +505,7 @@ int wmain() {
     TestIdentityMatching();
     TestThresholds();
     TestPasswordBlobValidation();
+    TestDeleteFace();
     TestV6RoundTripAndReload();
     TestUpdateTemplateFace();
     TestV6NominalAnglesAndLegacyRead();

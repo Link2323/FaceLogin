@@ -395,14 +395,26 @@ function onSaveSettings() {
     fast_unlock: document.getElementById('cfg-fastunlock').checked,
     learning_distance_gate: parseFloat(document.getElementById('cfg-learn-gate').value)
   });
-  try {
-    var ok = H.SetConfig(JSON.stringify(cfg));
-    if (ok) {
-      showBanner('settings', '设置已保存并通知后台服务。', 'ok');
-    } else {
-      showBanner('settings', '设置已写入，但后台服务未确认安全重载；人脸认证将保持关闭，请检查服务和模型文件。', 'error', 10000);
-    }
-  } catch(e) { showBanner('settings', '保存设置失败: ' + e.message, 'error'); }
+  var btn = document.getElementById('btn-save-settings');
+  var spinner = document.getElementById('settings-spinner');
+  btn.disabled = true;
+  spinner.style.display = 'inline-block';
+  // Defer the synchronous COM call so the locked button and spinner paint
+  // first: SetConfig replaces the auth worker and waits out its handshake
+  // (up to ~25s), during which the UI thread is blocked (same pattern as
+  // onSave — repeated clicks can no longer stack SetConfig round trips).
+  setTimeout(function() {
+    try {
+      var ok = H.SetConfig(JSON.stringify(cfg));
+      if (ok) {
+        showBanner('settings', '设置已保存并通知后台服务。', 'ok');
+      } else {
+        showBanner('settings', '设置已写入，但后台服务未确认安全重载；人脸认证将保持关闭，请检查服务和模型文件。', 'error', 10000);
+      }
+    } catch(e) { showBanner('settings', '保存设置失败: ' + e.message, 'error'); }
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  }, 50);
 }
 
 // Fill the form with display-side defaults (mirrors the backend's
@@ -1023,10 +1035,7 @@ function onAppendConfirm() {
       var hint = enrollmentHint();
       if (hint) okMsg += ' ' + hint;
       showBanner('cam', okMsg, 'ok', hint ? 12000 : undefined);
-      try {
-        if (H.StartPreview()) { viewing = true; renderFrame(); }
-        else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
-      } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
+      restartPreview();
     } else {
       showBanner('append', '追加失败（已达人脸上限或身份校验失败）。', 'error');
     }
@@ -1040,10 +1049,7 @@ function onAppendCancel() {
   // The captured samples were discarded by this cancel — never show the old
   //「已采 N 帧」total again.
   setCaption('已采 0 帧');
-  try {
-    if (H.StartPreview()) { viewing = true; renderFrame(); }
-    else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
-  } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
+  restartPreview();
 }
 
 // Per-screen hide timers: re-showing a banner on the SAME screen must clear
@@ -1065,6 +1071,19 @@ function showBanner(screen, text, type, durationMs) {
   }, ms);
 }
 
+// Start the cam-screen live preview and kick the frame loop. Every restart
+// site (tab return, save/append/cancel flows, camera switch, boot) shares
+// this and the same banner wording for the failure shapes. viewing is set
+// on success — all callers run while the cam screen is active, which is
+// exactly when the 33ms loop should run.
+function restartPreview() {
+  try {
+    if (H.StartPreview()) { viewing = true; renderFrame(); return true; }
+    showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
+  } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
+  return false;
+}
+
 // Cancel from the password screen: discard the just-captured samples and
 // return to the camera screen, restarting the live preview. Mirrors the
 // cleanup done in onSave's success path.
@@ -1074,10 +1093,7 @@ function onPwdCancel() {
   currentTab = 'cam';
   document.getElementById('fld-pass').value = '';
   setCaption('已采 0 帧');
-  try {
-    if (H.StartPreview()) { viewing = true; renderFrame(); }
-    else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
-  } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
+  restartPreview();
 }
 
 // Soft enrollment-quality hint from the backend (empty when nothing to say).
@@ -1120,10 +1136,7 @@ function onSave() {
       var hint = enrollmentHint();
       if (hint) okMsg += ' ' + hint;
       showBanner('cam', okMsg, 'ok', hint ? 12000 : undefined);
-      try {
-        if (H.StartPreview()) { viewing = true; renderFrame(); }
-        else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
-      } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
+      restartPreview();
     } else {
       // MSA password validation only checks the locally cached credential.
       // If the user changed their Microsoft password elsewhere, the cache is
@@ -1355,26 +1368,31 @@ function onCamPickerConfirm() {
   var sel = document.getElementById('cam-picker-select');
   var path = sel.value;
   if (!path) return;
-  try {
-    var cfg = JSON.parse(H.GetConfig());
-    cfg.camera_device = path;
-    if (H.SetConfig(JSON.stringify(cfg))) {
-      document.getElementById('cam-picker-overlay').classList.remove('active');
-      showBanner('cam', '已选择摄像头，正在启动预览...', 'ok');
-      // Restart preview with the newly chosen camera.
-      try { H.StopPreview(); } catch(e) {}
-      setTimeout(function() {
-        try {
-          if (H.StartPreview()) renderFrame();
-          else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
-        } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
-      }, 100);
-    } else {
-      showBanner('cam', '保存摄像头设置失败，请重试。', 'error');
+  var btn = document.getElementById('cam-picker-confirm');
+  btn.disabled = true;
+  // Defer the synchronous COM call: SetConfig replaces the auth worker and
+  // waits out its handshake (up to ~25s) — lock the button first so the
+  // click visibly registers before the UI thread blocks (same pattern as
+  // onSaveSettings/onSave).
+  setTimeout(function() {
+    try {
+      var cfg = JSON.parse(H.GetConfig());
+      cfg.camera_device = path;
+      if (H.SetConfig(JSON.stringify(cfg))) {
+        document.getElementById('cam-picker-overlay').classList.remove('active');
+        showBanner('cam', '已选择摄像头，正在启动预览...', 'ok');
+        // Restart preview with the newly chosen camera.
+        try { H.StopPreview(); } catch(e) {}
+        setTimeout(restartPreview, 100);
+      } else {
+        showBanner('cam', '保存摄像头设置失败，请重试。', 'error');
+        btn.disabled = false;
+      }
+    } catch(e) {
+      showBanner('cam', '选择摄像头失败: ' + e.message, 'error');
+      btn.disabled = false;
     }
-  } catch(e) {
-    showBanner('cam', '选择摄像头失败: ' + e.message, 'error');
-  }
+  }, 50);
 }
 
 function onCamPickerSkip() {
@@ -1384,12 +1402,7 @@ function onCamPickerSkip() {
 
 (function init() {
   try { document.getElementById('fld-user').value = H.GetUsername(); } catch(e) {}
-  setTimeout(function() {
-    try {
-      if (H.StartPreview()) renderFrame();
-      else showBanner('cam', '预览启动失败：请检查摄像头占用、权限、驱动和模型文件。', 'error', 10000);
-    } catch(e) { showBanner('cam', '预览启动失败: ' + e.message, 'error', 10000); }
-  }, 100);
+  setTimeout(restartPreview, 100);
 
   // If the account was converted from MSA→local with a stale record, surface
   // the refresh prompt at startup (before the camera preview takes over).

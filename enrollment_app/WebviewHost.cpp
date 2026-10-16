@@ -1,6 +1,7 @@
 #include "WebviewHost.h"
 #include "EnrollmentWizard.h"
 #include "../common/logger.h"
+#include "../common/secure_clear.h"
 #include "resource.h"
 #include "version.h"
 #include <wtsapi32.h>
@@ -515,6 +516,10 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 6: {
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
+            // The COM entry point owns the only plaintext password buffer on
+            // this path (everything downstream takes it by const&) — the
+            // guard zeroes it on every exit, including the DISP_E returns.
+            facelogin::SecureWStringGuard passGuard(pass);
             if (res) *res = MakeBool(m_wizard->ValidatePassword(pass));
             break;
         }
@@ -527,6 +532,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring label = OptionalArg(p, 0);
             std::wstring pass;
+            facelogin::SecureWStringGuard passGuard(pass);
             if (p->cArgs >= 2) {
                 pass = (p->rgvarg[1].vt == VT_BSTR) ? std::wstring(p->rgvarg[1].bstrVal) : L"";
             } else {
@@ -598,6 +604,7 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             // ambiguity. Same access pattern as case 6.
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
+            facelogin::SecureWStringGuard passGuard(pass);
             if (res) *res = MakeBool(m_wizard->RefreshAccountIdentity(pass));
             break;
         }

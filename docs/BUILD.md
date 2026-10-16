@@ -131,7 +131,7 @@ npm run build
 
 ## 版本号与版本资源
 
-用 `scripts/bump_version.ps1 <x.y.z[-suffix]>` 更新版本号；加 `-Dry` 可预览。脚本同步 CMake、Wails、README 和构建资源所需版本位置，并校验替换数量。
+用 `scripts/bump_version.ps1 <x.y.z[-suffix]>` 更新版本号；加 `-Dry` 可预览。脚本同步 CMake、`main.go`、README、`wails.json` 和 `info.json` 五处版本位置（`info.json` 仅存在于磁盘），并校验替换数量。
 
 CMake 产物从根 `project()` 版本生成 VERSIONINFO。Wails 的 `build/windows/info.json` 中语言 ID 应为 `0409`。可用以下命令核对四个 EXE/DLL 的版本资源：
 

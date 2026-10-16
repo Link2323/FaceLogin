@@ -46,10 +46,10 @@
 | 10 | A | 相机后端接口化（仅在确需 Media Foundation 或多相机差异时实施） | `vision/`、`face_service/auth_worker.cpp:336-355` | 未开始 |
 | 11 | C | app.js 模块化（优先级最低） | `enrollment_app/app.js` | 未开始 |
 | 12 | C | 同步原语不一致：收敛或在文档豁免 | `face_service/authentication_residency.cpp` | 未开始 |
-| 13 | C | 修复 bump_version.ps1 断链（AGENTS.md 规则失配 + 尾注过时） | `scripts/bump_version.ps1:72-84` | 未开始 |
-| 14 | C | DeleteFace use-after-erase 修复并补测试 | `storage/credential_store.cpp:489-490` | 未开始 |
-| 15 | C | enrollment_app 密码局部变量清零（SecureWStringGuard） | `enrollment_app/` 3 个文件 | 未开始 |
-| 16 | C | app.js 长超时 COM 调用防冻结（套用既有禁用按钮模式） | `enrollment_app/app.js:382-406、1354-1378` | 未开始 |
+| 13 | C | 修复 bump_version.ps1 断链（AGENTS.md 规则失配 + 尾注过时） | `scripts/bump_version.ps1:72-84` | 已完成（2026-10-16） |
+| 14 | C | DeleteFace use-after-erase 修复并补测试 | `storage/credential_store.cpp:489-490` | 已完成（2026-10-16） |
+| 15 | C | enrollment_app 密码局部变量清零（SecureWStringGuard） | `enrollment_app/` 3 个文件 | 已完成（2026-10-16） |
+| 16 | C | app.js 长超时 COM 调用防冻结（套用既有禁用按钮模式） | `enrollment_app/app.js:382-406、1354-1378` | 已完成（2026-10-16） |
 | 17 | C | CP 引用计数接入 g_cRefCount（DllCanUnloadNow 契约） | `credential_provider/dllmain.cpp:18、143` | 未开始 |
 | 18 | B | 拆分 PrepareFrames（#5 延伸，全库现存最长 252 行） | `face_service/auth_frame_preparation.cpp:63` | 未开始 |
 | 19 | C | 复评低优先级杂项 | 见下文 | 未开始 |
@@ -153,6 +153,18 @@ AGENTS.md 在 865255f 重写后不再含 `**Windows 专属桌面应用**` 字样
 ## 完成记录
 
 完成后在此按日期登记（日期、条目号、改动摘要、验证方式与结果），并同步更新上表状态。
+
+### 2026-10-16 — #13、#14、#15、#16（第二梯队）
+
+**#14 DeleteFace use-after-erase**：`credential_store.cpp` 在 `m_users.erase` 之前先拷贝 `username`（照 `DeleteUserBySid` 同款写法），erase 后的 `FACELOGIN_INFO` 改用拷贝——原代码在删除 vector 末位账户时读取已释放内存（UB），非末位时则把下一账户的用户名记进「Removed account」日志。新增 `TestDeleteFace`（此前 8 个测试无一覆盖 DeleteFace）：多脸删一保留账户、末位账户唯一脸删除（原 UB 场景）、数据库清空、未知 faceId/账户拒绝，共 9 项断言。
+
+**#13 bump_version.ps1 断链**：AGENTS.md 的 Update-File 规则（匹配 `**Windows 专属桌面应用**` 版本标记）在 865255f 重写后失配——`-Dry` 必 throw、非 dry 模式留下半同步状态。AGENTS.md 重写后已不含版本标记，按现状删除该规则，同步目标 6→5 处；尾注「AGENTS.md and info.json are gitignored」改为仅 info.json（AGENTS.md 已入库）；`docs/BUILD.md` 版本节同步为「CMake、`main.go`、README、`wails.json` 和 `info.json` 五处」；脚本头注释记录 AGENTS.md 退出的原因。
+
+**#15 enrollment_app 密码清零**：核实全链路后确认唯一持有明文缓冲的局部变量在 `WebviewHost.cpp` COM 入口三处（case 6 ValidatePassword、case 7 SaveEnrollment、case 29 RefreshAccountIdentity）——下游 `EnrollmentWizard`/`EnrollmentAccounts`/`session_identity` 全部按 `const std::wstring&` 传递（引用同一缓冲），`DpapiUtil::Protect` 直接读 caller 缓冲无内部驻留。三处局部 `pass` 均挂 `facelogin::SecureWStringGuard`，覆盖含 DISP_E 提前返回在内的全部退出路径，与 face_service/credential_provider 既有做法对齐。
+
+**#16 app.js SetConfig 防冻结 + restartPreview 收拢**：`onSaveSettings` 与 `onCamPickerConfirm` 套用 `onSave`/`onAppendConfirm` 既有「setTimeout(50) 延迟 + 禁用按钮 + spinner」模式——保存期间按钮锁定、spinner 先绘制、连点不再叠出多轮 SetConfig 往返（`service_client.cpp` 该调用最长 25s）；摄像头选择失败路径解锁按钮允许重试，成功路径沿 overlay 关闭不恢复。`index.html.in` 保存按钮补 `id="btn-save-settings"` 与 `settings-spinner`（未触碰其他用户手工改动）。顺带将 6 份「StartPreview + 三分支错误横幅」复制收拢为 `restartPreview()`（onAppendConfirm/onAppendCancel/onPwdCancel/onSave/onCamPickerConfirm/init）；`:307` 切 tab 的幂等静默调用有意不弹横幅，保持独立。两处不设 `viewing` 的调用点（init、摄像头切换）经核实均在 cam 屏活跃期（viewing 恒为 true），统一由 restartPreview 设 true 语义等价。
+
+- 验证：Release 全目标构建零警告；CTest `check` 11/11 通过（CredentialStoreTest 含新 TestDeleteFace 用例全绿）；`go test -count=1 ./...` 通过；`bump_version.ps1 1.8.0-multi-angle -Dry` 8 条规则全部匹配无 throw；app.js `node --check` 通过；另以 node vm + mock H/假 DOM 的临时冒烟验证防冻结语义（SetConfig 不再同步调用、按钮即时锁定、双击仅一次往返、失败解锁、restartPreview 六路收拢行为），跑完即删未入库。未做 GUI/锁屏实测，理由：#13/#15 为工具脚本与内存清零（无可见行为），#14 纯缺陷修复且测试覆盖全部分支，#16 行为语义已由冒烟覆盖、COM 协议未变；下次装机可顺带观察设置保存的按钮锁定表现。
 
 ### 2026-10-15 — #5（拆分 AuthPipeline::Run）
 

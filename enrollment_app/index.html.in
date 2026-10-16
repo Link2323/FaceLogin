@@ -249,7 +249,8 @@
 
     <div class="set-actions">
       <button class="btn btn-secondary" onclick="onResetDefaults()">恢复默认</button>
-      <button class="btn btn-primary" onclick="onSaveSettings()">
+      <button class="btn btn-primary" id="btn-save-settings" onclick="onSaveSettings()">
+        <span class="spinner" id="settings-spinner"></span>
         保存设置
       </button>
     </div>
