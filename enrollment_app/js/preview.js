@@ -1,7 +1,10 @@
 // Cam-screen live preview: frame polling, canvas painting and the preview
-// lifecycle. All state is private to this module — other files drive it
-// through previewCtl only.
-var previewCtl = (function() {
+// lifecycle. All state is private to this module — other modules drive it
+// through the returned controller only. deps: {host, showBanner}.
+function createPreview(deps) {
+  var H = deps.host;
+  var showBanner = deps.showBanner;
+
   var viewing = true, lastB64 = '', lastFacesJson = '', timer = 0, faceImg = new Image();
   var camReady = false;
 
@@ -234,4 +237,4 @@ var previewCtl = (function() {
     stopLoop: stopLoop,
     startLoop: startLoop
   };
-})();
+}
