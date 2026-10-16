@@ -28,6 +28,10 @@ python tools/threshold_calibration/download_dataset.py
 python tools/threshold_calibration/quantize_scrfd.py --help
 ```
 
-正式准备流程由 `scripts/download_models.ps1` 校验上游、规范化检测器、调用量化并核验最终文件大小和 SHA-256。量化脚本从 `calibrate.py` 复用检测、图像读取和预处理实现；`calibrate.py` 的 R50 识别标定命令不适用于当前 SFace 阈值。
+正式准备流程由 `scripts/download_models.ps1` 校验上游、规范化检测器、调用量化并核验最终文件大小和 SHA-256。
 
 PAD 实测使用 `tools/pad_calibration/` 和 `scripts/analyze_pad_calibration.py`。当前 SFace 试用范围与验收见 [试用记录](../../docs/work/in-progress/sface-trial.md)。
+
+## 历史工具说明
+
+`calibrate.py`（已删除）曾为已退役的 512-D 识别管线做阈值标定，其 `--report` 输出保留在 [docs/work/completed/threshold-calibration.md](../../docs/work/completed/threshold-calibration.md)（其中 PAD 历史标定仍供当前实现参考）。`quantize_scrfd.py` 所需的 SCRFD 解码端口已内联到该脚本。
