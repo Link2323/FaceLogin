@@ -213,6 +213,11 @@ private:
                                               const FaceRect& faceRect,
                                               const std::function<bool()>& interrupted);
     AuthPipelineResult ResolveOutcome(AuthLoopStop stop, const AuthLoopState& state) const;
+    // Persists the round's knob-write progress when a FAILED round carries
+    // face-backed evidence that it moved capture toward the band (see
+    // EvaluateFailedRoundTuneProgress, face_gain_tune.h). Called at every
+    // non-success terminal, including cancellation and preparation aborts.
+    void PersistFailedRoundTuneProgress(const PreparedAuthFrames& prepared) const;
 
     OnnxDetector& m_detector;
     OnnxRecognizer& m_recognizer;

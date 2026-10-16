@@ -206,6 +206,7 @@ bool AuthPipeline::PrepareFrames(PreparedAuthFrames& prepared,
     auto& tuneCfg = prepared.tuneConfig;
     tuneCfg.persistPath = m_config.tuneStatePath;
     if (!tuneCfg.persistPath.empty()) tuneCfg.recovery = &prepared.tuneRecovery;
+    tuneCfg.writes = &prepared.tuneWrites;
     const auto seedRefreshAt = std::chrono::steady_clock::now();
     if (!seed.valid && !interrupted()) {
         FrameImage fresh;
@@ -279,8 +280,9 @@ bool AuthPipeline::PrepareFrames(PreparedAuthFrames& prepared,
         readDiagnosticKnobs();
         float triggerLuma = -1.0f;
         if (seed.valid && seed.det) triggerLuma = FaceBoxLuma(seed.frame, *seed.det);
+        prepared.triggerFaceLuma = triggerLuma;
         FACELOGIN_INFO(L"Exposure tune trigger: %s, face luma %.0f — %s",
-                       seed.valid ? (seed.det ? L"face" : L"no face")
+                       seed.valid ? (seed.det ? L"face" : L"no fresh frame")
                                   : L"no fresh frame",
                        triggerLuma, diagnosticSnapshot.Text().c_str());
     }

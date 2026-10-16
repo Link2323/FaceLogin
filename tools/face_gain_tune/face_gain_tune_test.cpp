@@ -726,6 +726,95 @@ void ReplayResponseCsv(const char* path) {
     Check(groups > 1, "response trace contains baseline and actuator measurements");
 }
 
+void TestFailedRoundProgressVerdict() {
+    const GainTuneConfig cfg;  // band 50–120, settleTol 6
+    TuneWriteTracker writes;
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 3.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "no knob write disables the rule");
+    writes.wrote = true;
+    Check(EvaluateFailedRoundTuneProgress(60.0f, 60.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "in-band start never persists on failure");
+    writes.lastSettledLuma = 12.0f;
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 3.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "settled move beyond settleTol saves");
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 12.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "saved verdict ignores loop face luma on dark start");
+    writes.lastSettledLuma = 8.0f;
+    Check(EvaluateFailedRoundTuneProgress(3.0f, 8.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "improvement below settleTol is noise");
+    writes.lastSettledLuma = -1.0f;
+    Check(EvaluateFailedRoundTuneProgress(43.0f, 43.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "unconfirmed write carries no face-backed proof");
+    writes.lastSettledLuma = 84.0f;
+    Check(EvaluateFailedRoundTuneProgress(43.0f, 43.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "landing inside the band from dark saves");
+    writes.lastSettledLuma = 170.0f;
+    Check(EvaluateFailedRoundTuneProgress(230.0f, 230.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveSettledGain, "over-bright side is symmetric");
+    writes.lastSettledLuma = -1.0f;
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, 12.0f, writes, cfg) ==
+          TuneProgressVerdict::SaveFaceAppeared, "credible appearing face saves");
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, 3.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "noise-floor face is not credible progress");
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, -1.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "scene that stayed empty never persists");
+    Check(EvaluateFailedRoundTuneProgress(-1.0f, 250.0f, writes, cfg) ==
+          TuneProgressVerdict::NotNeeded, "whiteout-level appearing face is excluded");
+    Check(EvaluateFailedRoundTuneProgress(230.0f, 230.0f, TuneWriteTracker{}, cfg) ==
+          TuneProgressVerdict::NotNeeded, "bright-side rule also requires a write");
+}
+
+void TestWriteTrackerFeedsFailedRoundRule() {
+    // Budget-limited dark round (settle confirmed, still out of band): the
+    // tracker must record the write target and the settled luma so a failed
+    // round can persist them; an unconfirmed round records the target but
+    // never earns a save.
+    {
+        StateFile file;
+        Sensor sensor;
+        const auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        cfg.maxSteps = 1;
+        TuneWriteTracker tracker;
+        cfg.writes = &tracker;
+        const auto measure = [&](float& luma) { luma = sensor.Luma(); return true; };
+        Check(TuneFaceExposure(sensor.Luma(), knobs, measure, noCancel, cfg) == 1,
+              "budget-limited dark round applies one gain step");
+        Check(sensor.gain == 55, "round ends at gain 55");
+        Check(tracker.wrote && tracker.lastWritten.hasGain && tracker.lastWritten.gain == 55,
+              "tracker records the write target");
+        Check(tracker.lastSettledLuma >= 39.0f && tracker.lastSettledLuma < 50.0f,
+              "tracker records the settled but out-of-band luma");
+        Check(EvaluateFailedRoundTuneProgress(27.0f, 39.5f, tracker, cfg) ==
+              TuneProgressVerdict::SaveSettledGain,
+              "budget-limited failed round earns a progress save");
+        Check(SaveTuneKnobState(file.path, tracker.lastWritten),
+              "tracker target is persistable");
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == 55,
+              "persisted failed-round progress replays the write target");
+    }
+    {
+        StateFile file;
+        Sensor sensor;
+        const auto knobs = sensor.Knobs();
+        auto cfg = Config(file);
+        cfg.settleFrames = 4;
+        TuneWriteTracker tracker;
+        cfg.writes = &tracker;
+        Check(SaveTuneKnobState(file.path, knobs), "seed checkpoint before unconfirmed round");
+        TuneFaceExposure(27.0f, knobs, [](float&) { return false; }, noCancel, cfg);
+        Check(tracker.wrote && tracker.lastSettledLuma < 0.0f,
+              "unconfirmed round records its write target but no settled luma");
+        Check(EvaluateFailedRoundTuneProgress(27.0f, -1.0f, tracker, cfg) ==
+              TuneProgressVerdict::NotNeeded,
+              "unconfirmed write cannot earn a failed-round save");
+        TuneKnobState saved;
+        Check(LoadTuneKnobState(file.path, saved) && saved.gain == 50,
+              "checkpoint unchanged after unconfirmed failed round");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[1]) == "--dark-frame") {
         // Temporary RGB PPM exported from a user-supplied preview crop. Keep
@@ -767,6 +856,8 @@ int main(int argc, char** argv) {
     TestTakeoverStopsAfterLandingInBand();
     TestReplayPreservesAutoMode();
     TestLegacyReplayAndFailedModeRestore();
+    TestFailedRoundProgressVerdict();
+    TestWriteTrackerFeedsFailedRoundRule();
     std::printf("FaceGainTuneTest: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

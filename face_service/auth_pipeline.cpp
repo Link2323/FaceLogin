@@ -114,8 +114,10 @@ AuthPipelineResult AuthPipeline::Run() {
         };
 
         PreparedAuthFrames prepared;
-        if (!PrepareFrames(prepared, exposureTiming, sensorKnobs, interrupted, grabFrame))
+        if (!PrepareFrames(prepared, exposureTiming, sensorKnobs, interrupted, grabFrame)) {
+            PersistFailedRoundTuneProgress(prepared);
             return result;
+        }
 
         const auto statusAt = std::chrono::steady_clock::now();
         m_callbacks.reportStatus(L"正在识别...");
@@ -138,14 +140,18 @@ AuthPipelineResult AuthPipeline::Run() {
         const AuthLoopStop stop = RunLivenessLoop(state, frames, prepared, sensorKnobs,
                                                   interrupted, normLog);
         if (stop == AuthLoopStop::ClientDisconnected) result.outcome = AuthOutcome::Cancelled;
-        if (stop == AuthLoopStop::Interrupted || stop == AuthLoopStop::ClientDisconnected)
+        if (stop == AuthLoopStop::Interrupted || stop == AuthLoopStop::ClientDisconnected) {
+            PersistFailedRoundTuneProgress(prepared);
             return result;
+        }
 
         if (const auto minInterval = frames.MinimumIntervalMs()) {
             FACELOGIN_INFO(L"Anti-spoof frame pacing: min grab interval %.1f ms over %d counted frames (guard 60 ms)",
                            *minInterval, state.totalChecked);
         }
-        return ResolveOutcome(stop, state);
+        AuthPipelineResult final = ResolveOutcome(stop, state);
+        if (final.outcome != AuthOutcome::Succeeded) PersistFailedRoundTuneProgress(prepared);
+        return final;
     } catch (const std::exception& e) {
         FACELOGIN_ERROR(L"AuthPipeline threw: %hs", e.what());
         result.errorMessage = L"认证过程异常，请使用密码登录";
@@ -211,6 +217,10 @@ AuthLoopStop AuthPipeline::RunLivenessLoop(AuthLoopState& state,
                                 static_cast<long>(cur.det->y1),
                                 static_cast<long>(cur.det->x2),
                                 static_cast<long>(cur.det->y2));
+        // Latest observed face luma feeds the failed-round progress rule: a
+        // face that appears after a no-face recovery is the only proof the
+        // climb reached anything photographable.
+        prepared.lastFaceLuma = FaceRegionLuma(cur.frame, faceRect);
 
         const auto faceNow = std::chrono::steady_clock::now();
         state.timing.OnFaceDetected(faceNow);
@@ -496,6 +506,44 @@ AuthPipelineResult AuthPipeline::ResolveOutcome(AuthLoopStop stop,
         result.errorMessage = L"未通过活体检测，请使用真实人脸";
     }
     return result;
+}
+
+// Failed-round progress rule (2026-10-16 09:24–09:25 post-mortem): a round
+// whose knob writes moved a no-face or out-of-band scene toward the band
+// lost that progress at the per-round process boundary — the next worker
+// replayed the previous combo and repeated the same climb, oscillating
+// forever in a genuinely dark room. When the round carries face-backed
+// evidence of progress, persist the recorded write target so the next round
+// resumes instead of restarting. Success rounds never enter: their ordinary
+// in-band saves stay the only writers.
+void AuthPipeline::PersistFailedRoundTuneProgress(const PreparedAuthFrames& prepared) const {
+    const auto& cfg = prepared.tuneConfig;
+    if (cfg.persistPath.empty()) return;
+    const auto verdict = EvaluateFailedRoundTuneProgress(
+        prepared.triggerFaceLuma, prepared.lastFaceLuma, prepared.tuneWrites, cfg);
+    if (verdict == TuneProgressVerdict::NotNeeded) {
+        if (prepared.tuneWrites.wrote) {
+            FACELOGIN_INFO(L"Failed-round tune progress not saved: trigger luma %.0f, "
+                           L"settled %.0f, last face %.0f — no face-backed gain",
+                           prepared.triggerFaceLuma, prepared.tuneWrites.lastSettledLuma,
+                           prepared.lastFaceLuma);
+        }
+        return;
+    }
+    if (SaveTuneKnobState(cfg.persistPath, prepared.tuneWrites.lastWritten)) {
+        FACELOGIN_INFO(L"Failed-round tune progress saved (%s): trigger luma %.0f, "
+                       L"settled %.0f, last face %.0f — exposure %ld (manual), gain %ld",
+                       verdict == TuneProgressVerdict::SaveFaceAppeared
+                           ? L"face appeared" : L"settled toward band",
+                       prepared.triggerFaceLuma, prepared.tuneWrites.lastSettledLuma,
+                       prepared.lastFaceLuma,
+                       prepared.tuneWrites.lastWritten.hasExposure
+                           ? prepared.tuneWrites.lastWritten.exposure : 0,
+                       prepared.tuneWrites.lastWritten.hasGain
+                           ? prepared.tuneWrites.lastWritten.gain : 0);
+    } else {
+        FACELOGIN_WARN(L"Failed to save failed-round tune progress");
+    }
 }
 
 } // namespace facelogin

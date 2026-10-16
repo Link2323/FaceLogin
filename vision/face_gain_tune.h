@@ -47,6 +47,7 @@ namespace facelogin {
 // produced, so in-band scenes — the common case — pay one bbox luma pass and
 // zero extra inference.
 struct FaceTuneRecovery;
+struct TuneWriteTracker;
 
 struct GainTuneConfig {
     float minFaceLuma = 50.0f;    // below: dark — tune up. Equal to targetLumaLow
@@ -120,6 +121,12 @@ struct GainTuneConfig {
     // Per-camera-session state, owned by the host. Never persisted until
     // fresh face measurements independently confirm an interrupted write.
     FaceTuneRecovery* recovery = nullptr;
+    // Per-round write record, owned by the host. Feeds the failed-round
+    // progress rule (EvaluateFailedRoundTuneProgress): a round that moved a
+    // no-face or out-of-band scene toward the band must be able to hand its
+    // knob target to the next process, or the replay re-writes the old combo
+    // and the same climb repeats every round (2026-10-16 09:24–09:25).
+    TuneWriteTracker* writes = nullptr;
 };
 
 // Driver-facing exposure/gain controls, injected by each host (auth worker /
@@ -181,6 +188,19 @@ struct FaceTuneRecovery {
     }
 };
 
+// Last knob write of the round plus the latest measurement that passed the
+// settle gate. The write target is read back right after a successful write:
+// the register already holds it while the sensor is still applying it, so it
+// stays trustworthy at a failed round's terminal point, where live driver
+// reads race graph teardown. lastSettledLuma is the face-backed proof that
+// the write helped; an unconfirmed write records its target but never its
+// effect.
+struct TuneWriteTracker {
+    bool wrote = false;
+    TuneKnobState lastWritten;
+    float lastSettledLuma = -1.0f;
+};
+
 inline TuneKnobState ReadTuneKnobState(const SensorKnobs& knobs) {
     TuneKnobState state;
     state.hasExposure = knobs.exposureGet && knobs.exposureGet(state.exposure);
@@ -188,6 +208,12 @@ inline TuneKnobState ReadTuneKnobState(const SensorKnobs& knobs) {
     state.hasExposureMode = state.hasExposure && knobs.exposureIsManual &&
         knobs.exposureIsManual(state.exposureManual);
     return state;
+}
+
+inline void RecordTuneWrite(const SensorKnobs& knobs, const GainTuneConfig& cfg) {
+    if (!cfg.writes) return;
+    cfg.writes->wrote = true;
+    cfg.writes->lastWritten = ReadTuneKnobState(knobs);
 }
 
 inline bool SameTuneKnobState(const TuneKnobState& a, const TuneKnobState& b) {
@@ -442,6 +468,7 @@ inline bool SettleFace(const std::function<bool(float&)>& measure,
         if (gate.Feed(sample, std::chrono::duration_cast<std::chrono::milliseconds>(
                                   std::chrono::steady_clock::now() - start).count())) {
             luma = sample;
+            if (cfg.writes) cfg.writes->lastSettledLuma = sample;
             FACELOGIN_INFO(L"Sensor settle: face luma %.0f after %lld ms (%s)",
                            sample,
                            std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -836,6 +863,7 @@ inline int TuneFaceExposure(float firstLuma,
             *cfg.recovery = {};
         }
     }
+    if (steps > 0) RecordTuneWrite(knobs, cfg);
     if (steps > 0 && cfg.recovery && cfg.recovery->pending)
         cfg.recovery->expected = ReadTuneKnobState(knobs);
     return steps;
@@ -1157,6 +1185,12 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
                 } else if (steps > 0 && cfg.recovery) {
                     *cfg.recovery = {}; // the recovery already confirmed a stable face
                 }
+                // A no-face recovery that never hands off to the core tune
+                // (face stayed absent, budget exhausted mid-climb) still made
+                // real writes — record them for the failed-round progress
+                // rule. A handoff below re-records with the core tune's
+                // newer target.
+                if (steps > 0) RecordTuneWrite(knobs, cfg);
                 if (recoveredLuma >= 0.0f && !isCancelled()) {
                     return steps + TuneFaceExposure(recoveredLuma, knobs, grab, detector,
                                                     isCancelled, cameraRotation, cfg);
@@ -1180,6 +1214,68 @@ inline int TuneFaceExposure(const SensorKnobs& knobs,
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Failed-round progress persistence
+// ---------------------------------------------------------------------------
+
+// Credible-face window for the no-face→face rule. Below the floor a
+// detection on an almost-black chip is mostly sensor noise (2026-10-16
+// 09:25: face luma 3 was a real detection but pure noise floor; 12 was
+// already a usable one); above the ceiling the "face" appeared inside a
+// white-out. Outside this window a failed round persists nothing — the
+// detection still authenticates normally, the window only gates what a
+// failed round may hand to the next one.
+inline constexpr float kProgressFaceLumaFloor = 10.0f;
+inline constexpr float kProgressFaceLumaCeiling = 230.0f;
+
+enum class TuneProgressVerdict {
+    NotNeeded,       // nothing face-backed to hand to the next round
+    SaveSettledGain, // an out-of-band start measurably moved toward the band
+    SaveFaceAppeared // a credible face became detectable from a no-face start
+};
+
+// Distance from the landing band, 0 inside. Shared by both directions so the
+// rule is symmetric between dark and over-bright scenes.
+inline float BandDistance(float luma, const GainTuneConfig& cfg) {
+    if (luma < 0.0f) return 0.0f;
+    if (luma < cfg.minFaceLuma) return cfg.minFaceLuma - luma;
+    if (luma > cfg.maxFaceLuma) return luma - cfg.maxFaceLuma;
+    return 0.0f;
+}
+
+// May a FAILED round persist its knob progress? Requires a knob write AND
+// face-backed evidence that it helped: a settled measurement moved toward
+// the band by more than the settle tolerance (beyond measurement noise), or
+// a credible face appeared from a no-face start. In-band starts never
+// persist on failure — their problem was pose or distance, not capture, and
+// the certified on-disk combo must not be replaced by an edge value. What
+// gets persisted is the recorded write target (the register value, valid
+// even while the sensor was still applying it); the next round replays it
+// and its trigger re-measures, so a wrong guess self-corrects within one
+// round — there is no ratchet, because the ordinary in-band and over-bright
+// saves keep working on success rounds.
+inline TuneProgressVerdict EvaluateFailedRoundTuneProgress(
+    float triggerFaceLuma, float lastFaceLuma,
+    const TuneWriteTracker& writes, const GainTuneConfig& cfg) {
+    if (!writes.wrote) return TuneProgressVerdict::NotNeeded;
+    if (triggerFaceLuma < 0.0f) {
+        // No face at the trigger: the writes came from a scene (dark or
+        // white-out) recovery, so a later credible face is the only proof
+        // the climb reached anything photographable.
+        return (lastFaceLuma >= kProgressFaceLumaFloor &&
+                lastFaceLuma <= kProgressFaceLumaCeiling)
+                   ? TuneProgressVerdict::SaveFaceAppeared
+                   : TuneProgressVerdict::NotNeeded;
+    }
+    if (triggerFaceLuma >= cfg.minFaceLuma && triggerFaceLuma <= cfg.maxFaceLuma)
+        return TuneProgressVerdict::NotNeeded;
+    if (writes.lastSettledLuma >= 0.0f &&
+        BandDistance(triggerFaceLuma, cfg) - BandDistance(writes.lastSettledLuma, cfg)
+            >= cfg.settleTol)
+        return TuneProgressVerdict::SaveSettledGain;
+    return TuneProgressVerdict::NotNeeded;
 }
 
 } // namespace facelogin

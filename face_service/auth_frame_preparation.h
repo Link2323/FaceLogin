@@ -15,6 +15,13 @@ struct PreparedAuthFrames {
     AuthFrame seed;
     FaceTuneRecovery tuneRecovery;
     GainTuneConfig tuneConfig;
+    // Failed-round progress inputs (EvaluateFailedRoundTuneProgress): the
+    // write record the tune/recovery paths fill in, the trigger-time face
+    // luma (-1: no face / no fresh frame) and the latest face luma the auth
+    // loop observed.
+    TuneWriteTracker tuneWrites;
+    float triggerFaceLuma = -1.0f;
+    float lastFaceLuma = -1.0f;
     bool usingAutoExposure = false;
     bool darkRecoveryAttempted = false;
     std::chrono::steady_clock::time_point gateAt{};
