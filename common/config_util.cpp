@@ -235,7 +235,7 @@ AppConfig LoadConfig(const std::wstring& dataDir) {
 
     std::ifstream file(path);
     if (!file.is_open()) {
-        FACELOGIN_INFO(L"No config.json found, using defaults + registry");
+        FACELOGIN_INFO(L"No config.json found, using defaults");
         AppConfig cfg = DefaultConfig();
         // The old R50 registry threshold is not applicable to SFace.
         return cfg;

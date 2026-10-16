@@ -25,8 +25,6 @@ func NewApp() *App {
 // startup is called when the app starts. The context is saved so we can call runtime methods.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	// Set up the embedded FS reference for extraction
-	internal.EmbeddedFS = resources
 }
 
 // GetMode tells the frontend where to land: "uninstall" opens on the

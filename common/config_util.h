@@ -47,7 +47,8 @@ struct AppConfig {
     // 2026-09-03 revision rejected the pooled enrollment p25 (20.9) as a
     // hard floor — it would cut roughly half of a dark-scene user's genuine
     // frames (YY-LAPTOP probe p50 20.57). Per-user enrollment p5 is the
-    // target (V5); until then the pooled probe p5 ≈ 19.1 is the fallback.
+    // target (pending progressive-learning stage V5); until then the pooled
+    // probe p5 ≈ 19.1 is the fallback.
     // Clamped to [15.0, 25.0]. Recalibrate when the recognizer model changes.
     float          learning_norm_floor    = 19.1f;
     // Minimum wall-clock spacing between accepted updates. Clamped [10, 3600].

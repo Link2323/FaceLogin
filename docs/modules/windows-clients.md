@@ -42,8 +42,9 @@ CLSID：`{B8F4C7A1-3D5E-4F2B-A9C6-1D8E7F3A5B2C}`。
 - `credential_provider/dllmain.cpp`
 - `credential_provider/FaceLoginProvider.cpp`
 - `installer/FaceLoginSetup/internal/com.go`
+- `scripts/unregister_dev.bat`（开发环境卸载脚本）
 
-修改必须四处同步。DLL 使用静态 CRT `/MT`，不依赖安装包的五个 ONNX Runtime DLL。
+修改必须全部同步（前四处由安装器的 `internal/cross_language_consistency_test.go` 校验）。DLL 使用静态 CRT `/MT`，不依赖安装包的五个 ONNX Runtime DLL。
 
 ## 注册控制台
 

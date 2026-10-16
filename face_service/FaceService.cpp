@@ -20,8 +20,6 @@
 
 namespace facelogin {
 
-FaceService* FaceService::s_pInstance = nullptr;
-
 static constexpr wchar_t SERVICE_NAME[] = L"FaceLoginService";
 
 // UTF-8 → wide string, for passing config.camera_device to the camera backends.
@@ -75,17 +73,12 @@ static void SecureClearMatchPassword(std::optional<CredentialStore::MatchResult>
     }
 }
 
-FaceService::FaceService() {
-    s_pInstance = this;
-}
-
 FaceService::~FaceService() {
     m_residency.Stop();
     // Learner first: its Stop() flushes pending template updates through the
     // hooks, which take m_storeLock — both must still be alive here.
     if (m_learner) m_learner->Stop();
     if (m_storeLockReady) DeleteCriticalSection(&m_storeLock);
-    s_pInstance = nullptr;
 }
 
 void WINAPI FaceService::ServiceMain(DWORD argc, LPWSTR* argv) {
@@ -195,8 +188,9 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
 }
 
 // Progressive-learning instrumentation: static norm of every stored template
-// at load/reload, plus the slot's nominal pose (V5; legacy records carry the
-// invalid sentinel = "no cone"). Enrollment averages 5 unit-length samples
+// at load/reload, plus the slot's nominal pose (a format-V5 field; records
+// without a pose target carry the invalid sentinel = "no cone"). Enrollment
+// averages 5 unit-length samples
 // without renormalizing, so the stored norm (<1) tracks how spread the
 // enrollment frames were; changes over time reveal template drift. The
 // nominal angle tells the field logs whether the pose-cone gate is armed for
@@ -368,8 +362,9 @@ bool FaceService::Initialize() {
     Logger::Instance().SetLogFile(logPath);
     Logger::Instance().SetMinLevel(LogLevel::Info);
 
-    // Load configuration from config.json (falls back to registry). Must happen
-    // before camera init — the configured camera_device is used below.
+    // Load configuration from config.json (defaults when the file is absent).
+    // Must happen before camera init — the configured camera_device is used
+    // below.
     m_config = LoadConfig(m_dataDir);
     m_matchThreshold = m_config.match_threshold;
     m_antiSpoofThreshold = m_config.anti_spoof_threshold;

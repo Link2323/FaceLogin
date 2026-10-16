@@ -63,12 +63,12 @@ inline constexpr size_t kMaxFacesPerUser = 3;
 // IsValidNominalAngle in face_align.h (physical angle domain).
 inline constexpr float kNominalAngleInvalid = 1000.0f;
 
-// One enrolled face for a user account (V5). Each face carries a per-account
+// One enrolled face for a user account. Each face carries a per-account
 // id and a user-given label (defaults to L"脸N" where N = id). New ids reuse
 // the smallest free slot (deleting #2 then re-adding gives #2 again), keeping
 // the user-visible list compact.
 //
-// nominalYaw/nominalPitch (V5): the enrollment POSE TARGET of this slot
+// nominalYaw/nominalPitch: the enrollment POSE TARGET of this slot
 // (kAngleTargets: 正面 0/0, 左转 +30/0, 右转 -30/0), not a measured average —
 // a fixed target keeps the ±25° learning cones of the three slots disjoint
 // even when the user under-turned (docs/work/in-progress/progressive-learning-v2.md §3).
@@ -87,7 +87,7 @@ struct UserRecord {
     std::wstring upn;      // UserPrincipalName (e.g. "john@outlook.com")
     std::wstring sid;      // Security Identifier (e.g. "S-1-5-21-...")
     std::vector<uint8_t> encryptedPassword;  // DPAPI encrypted
-    std::vector<FaceRecord> faces;           // one or more enrolled faces (V4)
+    std::vector<FaceRecord> faces;           // one or more enrolled faces
 };
 
 class CredentialStore {
@@ -123,7 +123,7 @@ public:
     //     encryptedPassword is ignored in this case.
     // Rejects (returns false) when the account already holds
     // kMaxFacesPerUser faces.
-    // nominalYaw/nominalPitch (V5): the slot's pose target for the learning
+    // nominalYaw/nominalPitch: the slot's pose target for the learning
     // cone gate; defaults to kNominalAngleInvalid (legacy/no-angle callers).
     // Call SaveDatabase() to persist.
     bool AddFace(const std::wstring& username,
@@ -219,15 +219,15 @@ public:
         std::wstring sid;
         float        distance = 0.0f;
         // Which stored face produced the winning distance. The learner's
-        // legacy V4 path EMA-updates this face; the V5 pose path re-targets
-        // by nominal yaw (see GetAccountFaceDistances).
+        // legacy no-angle path EMA-updates this face; the pose-selected path
+        // re-targets by nominal yaw (see GetAccountFaceDistances).
         uint32_t     faceId = 0;
         std::wstring faceLabel;   // display label, logging only
         // Distance of the WINNING account's second-nearest comparable face.
-        // Legacy V4 learning path only (faces without nominal angles, where
-        // the update target is still the distance-nearest face): an
+        // Legacy no-angle learning path only (faces without nominal angles,
+        // where the update target is still the distance-nearest face): an
         // equidistant frame cannot say which slot it belongs to, so it must
-        // not update either. The V5 pose-selected path does not use this —
+        // not update either. The pose-selected path does not use this —
         // slot ownership is decided by nominal yaw, not embedding distance.
         // Negative = the account has only one comparable face (gate passes
         // trivially).
@@ -253,9 +253,10 @@ public:
                                                    float threshold = 0.30f,
                                                    float* outBestDistance = nullptr);
 
-    // One face of an account as seen by a probe: its id/label/V5 nominal pose
+    // One face of an account as seen by a probe: its id/label/nominal pose
     // angles plus the probe's Euclidean distance to that face's embedding.
-    // nominalYaw/Pitch carry kNominalAngleInvalid for V4-era faces.
+    // nominalYaw/Pitch carry kNominalAngleInvalid for faces without a
+    // stored angle.
     struct AccountFaceDistance {
         uint32_t    faceId = 0;
         std::wstring label;

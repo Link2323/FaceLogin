@@ -39,7 +39,6 @@ public:
 
     bool StartPreview();
     void StopPreview();
-    int  GetSampleCount() const { return m_capture.SampleCount(); }
     std::string GetUsername() const;
     std::string GetUserSid() const;
     std::string GetAccountType() const { return m_identity.accountType; }
@@ -58,8 +57,6 @@ public:
     //  "yaw":12.3,"total":8,"livenessChecking":false,"livenessPassed":true,
     //  "cancelled":false,"done":false}
     std::string GetCaptureStatus();
-    bool IsLivenessPassed() const { return m_capture.LivenessPassed(); }
-    bool IsLivenessChecking() const { return m_capture.LivenessChecking(); }
     bool ValidatePassword(const std::wstring& password);
     // Soft quality hint from the LAST save (UTF-8; empty = no hint). Set when
     // the saved angle templates sit closer than the measured cross-angle
@@ -93,19 +90,18 @@ public:
     // account type:
     //   MSA→local:  record UPN still an MSA email, password is the old MSA one.
     //   local→MSA:  record UPN empty (local-era), password is the old local one.
-    // Returns 0 = normal / nothing to refresh,
-    //         1 = stale MSA→local record detected,
-    //         2 = stale local→MSA record detected (current session is an MSA
-    //             but the record UPN is empty or differs from the current email).
-    int GetAccountTypeChanged();
-    // JSON wrapper for JS: {"state":0} | {"state":1,"faces":N} |
-    // {"state":2,"faces":N,"upn":"user@mail.com"}.
+    // JSON for JS: {"state":0} | {"state":1,"faces":N} |
+    // {"state":2,"faces":N,"upn":"user@mail.com"}, where state 0 = normal /
+    // nothing to refresh, 1 = stale MSA→local record detected, 2 = stale
+    // local→MSA record detected (current session is an MSA but the record
+    // UPN is empty or differs from the current email).
     std::string CheckAccountTypeChanged();
     // Validate the CURRENT password, then rewrite the stale record IN PLACE
     // (preserving all faces): state 1 clears the old MSA UPN (local account),
     // state 2 writes the current MSA email; both refresh username/SID and
-    // re-encrypt the password via DPAPI. Refuses (returns false) unless
-    // GetAccountTypeChanged()!=0 and the password validates.
+    // re-encrypt the password via DPAPI. Refuses (returns false) unless a
+    // stale record was detected (CheckAccountTypeChanged state != 0) and the
+    // password validates.
     bool RefreshAccountIdentity(const std::wstring& password);
 
     // Light-weight dismiss path for the stale-account prompt. State 1 only:
@@ -129,7 +125,7 @@ public:
     // Without this, accounts enrolled while GetUserNameExW returned 1332
     // (no UPN) carry an empty UPN forever: the lock-screen credential then
     // packs with domain\username instead of routing through CloudAP, and
-    // GetAccountTypeChanged keeps flagging a phantom local→MSA conversion.
+    // the account-type check keeps flagging a phantom local→MSA conversion.
     // Returns true iff a record was actually modified.
     bool AutoRepairEmptyUpnOnStartup();
 
@@ -154,10 +150,9 @@ public:
     void ClearLog();
     bool ClearFileLog(const std::wstring& source);
 
-    // Per-frame data for JS canvas rendering (pull model — JS calls these from rAF)
-    std::string GetLatestFrameBase64(); // JPEG base64, ~200KB
-    std::string GetLatestFacesJson();   // [{x,y,w,h,landmarks:[{x,y},...]},...]
-    // Atomically returns "<frame base64>\x1E<faces json>" from the SAME frame.
+    // Per-frame data for JS canvas rendering (pull model — JS polls this
+    // from rAF). Atomically returns "<frame base64>\x1E<faces json>" from
+    // the SAME frame.
     std::string GetLatestFrameAndFaces();
 
     bool IsPreviewRunning() const { return m_previewRunning; }
@@ -177,8 +172,12 @@ private:
     std::unique_ptr<OnnxAntiSpoof>  m_antiSpoof;
     std::unique_ptr<EnrollmentAccounts> m_accounts;
 
-    // Configuration
+    // Configuration. m_configMutex serializes the frame thread's per-frame
+    // snapshot against SetConfig's whole-struct replacement on the UI thread
+    // (rotation applies live; only a camera change restarts the preview).
+    // The UI thread is the sole writer, so its own reads need no lock.
     AppConfig m_config;
+    std::mutex m_configMutex;
     float m_antiSpoofThreshold = 0.281f;
 
     // Frame-grab thread (runs off UI thread — GrabFrame + JPEG encode + detection)

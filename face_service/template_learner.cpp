@@ -139,18 +139,18 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
     const LearningConfig cfg = Config();
 
     // Update-target selection (2026-09-05 revision): pose owns the slot,
-    // distance owns the gate. Among the account's V5 faces the update targets
-    // the one whose nominal yaw is nearest the probe's. The distance-nearest
-    // face (sample.faceId) can be a DIFFERENT slot when enrolled slots
-    // overlap (pair spacing < 0.68): EMA-ing a turned probe into the frontal
-    // slot converges the slots (coverage shrink), while a probe cone-rejected
-    // against the matched slot may have been perfectly valid for its own pose
-    // slot. Selection effectively moves the pose boundary from the matched
-    // slot's ±25° cone to the midpoints between nominal angles (±15° for the
-    // 0/±30 slots). Authentication itself stays pure distance matching —
-    // only the learning target is pose-selected. Faces without nominal
-    // angles (V4-era, or an invalid probe pose estimate) keep the
-    // distance-nearest target plus the landing-clarity gate below.
+    // distance owns the gate. Among the account's faces with nominal angles
+    // the update targets the one whose nominal yaw is nearest the probe's.
+    // The distance-nearest face (sample.faceId) can be a DIFFERENT slot when
+    // enrolled slots overlap (pair spacing < 0.68): EMA-ing a turned probe
+    // into the frontal slot converges the slots (coverage shrink), while a
+    // probe cone-rejected against the matched slot may have been perfectly
+    // valid for its own pose slot. Selection effectively moves the pose
+    // boundary from the matched slot's ±25° cone to the midpoints between
+    // nominal angles (±15° for the 0/±30 slots). Authentication itself stays
+    // pure distance matching — only the learning target is pose-selected.
+    // Faces without nominal angles (or an invalid probe pose estimate) keep
+    // the distance-nearest target plus the landing-clarity gate below.
     LearningSample eff = sample;
     bool poseSelected = false;
     if (IsValidNominalAngle(sample.probeYawDeg) &&
@@ -159,7 +159,7 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         for (const auto& f : sample.accountFaces) {
             if (!IsValidNominalAngle(f.nominalYaw) ||
                 !IsValidNominalAngle(f.nominalPitch)) {
-                continue;  // V4-era face: no pose slot to select
+                continue;  // no-angle face: no pose slot to select
             }
             if (!byYaw) { byYaw = &f; continue; }
             const float dNew = std::fabs(sample.probeYawDeg - f.nominalYaw);
@@ -302,7 +302,7 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         RecordEvent(eff, gate, false, L"distance", 0.0f);
         return;
     }
-    // Landing clarity — LEGACY V4 PATH ONLY (2026-09-05 revision): without
+    // Landing clarity — LEGACY NO-ANGLE PATH ONLY (2026-09-05 revision): without
     // nominal angles the target is still the distance-nearest face, and a
     // frame nearly equidistant to two of the account's slots does not say
     // WHICH slot it belongs to — updating either risks cross-angle
@@ -316,11 +316,11 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         RecordEvent(eff, gate, false, L"clarity", 0.0f);
         return;
     }
-    // Pose cone (2026-09-04 final form): a V5 template only learns from
-    // probes inside |probe − nominal| < cone on BOTH axes. On the pose path
-    // this is near-tautological by construction but still rejects probes
-    // beyond 25° of EVERY nominal (e.g. |yaw| > 55° against 0/±30 slots).
-    // Legacy V4 templates (invalid nominal) have no cone information and
+    // Pose cone (2026-09-04 final form): a template with nominal angles only
+    // learns from probes inside |probe − nominal| < cone on BOTH axes. On the
+    // pose path this is near-tautological by construction but still rejects
+    // probes beyond 25° of EVERY nominal (e.g. |yaw| > 55° against 0/±30
+    // slots). Templates without nominal angles have no cone information and
     // pass — their protection is the distance gate + clarity gate + PAD;
     // intra-account convergence is fail-safe (coverage shrinks, docs red
     // line 3).

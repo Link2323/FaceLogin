@@ -204,8 +204,8 @@ inline float EstimatePitchDeg(const float kps[10]) {
 
 // A stored/derived pose angle is usable only when finite and inside the
 // physical ±90° range. Anything else (notably credential_store's
-// kNominalAngleInvalid sentinel carried by V4-era records) means "no pose
-// information" — consumers treat that as pass, never as 0°.
+// kNominalAngleInvalid sentinel carried by records without a stored pose)
+// means "no pose information" — consumers treat that as pass, never as 0°.
 inline bool IsValidNominalAngle(float v) {
     return std::isfinite(v) && std::fabs(v) <= 90.0f;
 }

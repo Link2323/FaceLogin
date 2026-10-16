@@ -50,7 +50,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 - 服务 worker 使用 MTA；Credential Provider 和 WebView2 注册界面使用 Apartment 线程。DirectShow 必须复用当前线程已初始化的 COM 公寓；只有在同一线程初始化 COM 的代码才能调用 `CoUninitialize`。
 - 公共管道、worker 管道和 `users.dat` 格式以 `docs/contracts/` 中的契约文档为准。不要在本文件复制字段表或字节布局。
 - `users.dat` 当前格式和模型标识见 [`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)。格式、识别模型或模型标识变更可能影响现有录入，实施前先核对契约和迁移行为；多角度记录分别保存，不跨角度平均嵌入。
-- Credential Provider CLSID 同时出现在 `credential_provider/resource.h`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp` 和 `installer/FaceLoginSetup/internal/com.go`；改动时四处同步。
+- Credential Provider CLSID 同时出现在 `credential_provider/resource.h`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp`、`installer/FaceLoginSetup/internal/com.go` 和 `scripts/unregister_dev.bat`；前四处由安装器的跨语言一致性测试钉住，改动时全部同步。
 
 ## 编码与安全约束
 

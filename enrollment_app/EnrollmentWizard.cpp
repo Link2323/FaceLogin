@@ -149,6 +149,17 @@ bool EnrollmentWizard::StartPreview() {
     m_frameThread = std::thread([this]() {
         int reinitAttempts = 0;
         while (m_frameRunning) {
+            // Config snapshot: SetConfig replaces m_config on the UI thread
+            // while this loop runs (rotation applies live; only a camera
+            // change restarts the preview), so copy the two fields the loop
+            // reads under the config lock once per iteration.
+            std::string cameraDevice;
+            int cameraRotation = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_configMutex);
+                cameraDevice = m_config.camera_device;
+                cameraRotation = m_config.camera_rotation;
+            }
             FrameImage frame;
             unsigned long long frameSequence = 0;
             if (!m_webcam->GrabFrame(frame, &frameSequence)) {
@@ -164,7 +175,7 @@ bool EnrollmentWizard::StartPreview() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     if (!m_frameRunning) break;
                     if (m_webcam->Initialize(1280, 720,
-                                             Utf8ToWstr(m_config.camera_device))) {
+                                             Utf8ToWstr(cameraDevice))) {
                         FACELOGIN_INFO(L"Preview camera re-initialized (%d/3)",
                                        reinitAttempts);
                         m_previewExposure->CameraReopened();
@@ -179,7 +190,7 @@ bool EnrollmentWizard::StartPreview() {
             }
             reinitAttempts = 0;
 
-            RotateFrame(frame, m_config.camera_rotation);
+            RotateFrame(frame, cameraRotation);
 
             std::string b64;
             m_frameEncoder->Encode(frame, b64);
@@ -188,7 +199,7 @@ bool EnrollmentWizard::StartPreview() {
             if (m_onnxDetector) {
                 auto det = m_onnxDetector->DetectLargestFace(frame);
                 m_previewExposure->Observe(frame, det ? &*det : nullptr, frameSequence,
-                    *m_onnxDetector, m_config.camera_rotation,
+                    *m_onnxDetector, cameraRotation,
                     [this] { return !m_frameRunning || m_capture.IsRunning(); });
                 if (det) {
                     std::vector<facelogin::FaceWithKps> faces;
@@ -237,18 +248,8 @@ void EnrollmentWizard::StopPreview() {
 }
 
 // ============================================================================
-// Per-frame Processing (called from timer callback)
+// Per-frame Processing (polled by JS)
 // ============================================================================
-
-std::string EnrollmentWizard::GetLatestFrameBase64() {
-    std::lock_guard<std::mutex> lock(m_frameCacheMutex);
-    return m_latestFrameB64;
-}
-
-std::string EnrollmentWizard::GetLatestFacesJson() {
-    std::lock_guard<std::mutex> lock(m_frameCacheMutex);
-    return m_latestFacesJson;
-}
 
 // Atomically return BOTH the current frame (JPEG base64) and its face overlay
 // JSON. The frame thread updates them together under the same lock, so reading
@@ -391,7 +392,6 @@ bool EnrollmentWizard::ClearAllFaces() { return m_accounts->ClearAllFaces(); }
 bool EnrollmentWizard::RenameFace(int faceId, const std::wstring& label) {
     return m_accounts->RenameFace(faceId, label);
 }
-int EnrollmentWizard::GetAccountTypeChanged() { return m_accounts->GetAccountTypeChanged(); }
 std::string EnrollmentWizard::CheckAccountTypeChanged() { return m_accounts->CheckAccountTypeChanged(); }
 bool EnrollmentWizard::RefreshAccountIdentity(const std::wstring& password) {
     return m_accounts->RefreshAccountIdentity(password);
@@ -454,7 +454,10 @@ bool EnrollmentWizard::SetConfig(const std::string& json) {
         FACELOGIN_ERROR(L"Failed to save config.json");
         return false;
     }
-    m_config = newConfig;
+    {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        m_config = newConfig;
+    }
     m_antiSpoofThreshold = newConfig.anti_spoof_threshold;
 
     // Notify the service and require an explicit acknowledgement. Saving a

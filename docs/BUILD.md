@@ -24,7 +24,7 @@ cmake -B build -S . -G 'Visual Studio 18 2026' -DCMAKE_TOOLCHAIN_FILE='C:/vcpkg/
 cmake --build build --config Release --parallel
 ```
 
-按本机 Visual Studio 版本选择 generator。默认构建生成 Service、Credential Provider 和 Console；`tools/` 下诊断程序与测试目标需通过 `--target <target>` 显式构建。Console、正式模型和 Console 内许可查看器所需文件会直接复制到安装器资源目录。
+默认构建生成 Service、Credential Provider 和 Console；`tools/` 下诊断程序与测试目标需通过 `--target <target>` 显式构建。Console、正式模型和 Console 内许可查看器所需文件会直接复制到安装器资源目录。
 
 主要输出：
 

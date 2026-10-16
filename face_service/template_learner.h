@@ -41,10 +41,11 @@ struct LearningSample {
     float faceMargin = 1e9f;
     // Every comparable face of the authenticated account as seen by this
     // frame (id/label/nominal pose/distance), computed by the pipe thread
-    // under the store lock. Drives the update-target selection: the V5
-    // update goes to the slot whose nominal yaw is nearest the probe, which
-    // with overlapping enrolled slots can differ from the distance-nearest
-    // face (faceId above). Empty/invalid-nominal entries → legacy V4 path.
+    // under the store lock. Drives the update-target selection: the
+    // pose-selected update goes to the slot whose nominal yaw is nearest the
+    // probe, which with overlapping enrolled slots can differ from the
+    // distance-nearest face (faceId above). Empty/invalid-nominal entries →
+    // legacy no-angle path.
     std::vector<CredentialStore::AccountFaceDistance> accountFaces;
 };
 
@@ -55,13 +56,14 @@ struct LearningConfig {
     float normFloor = 19.1f;        // [15.0, 25.0]
     int minIntervalSec = 60;        // [10, 3600]
     // Pose cone half-width: |probe − nominal| must stay below this on BOTH
-    // axes for a V5 template (legacy V4 templates without a nominal angle
-    // pass — no cone information, protected by distance+clarity instead).
+    // axes for a template with nominal angles (templates without a nominal
+    // angle pass — no cone information, protected by distance+clarity
+    // instead).
     float coneHalfAngleDeg = 25.0f;
-    // Landing-clarity threshold (LEGACY V4 PATH ONLY): with no nominal
+    // Landing-clarity threshold (LEGACY NO-ANGLE PATH ONLY): with no nominal
     // angles the update target is still the distance-nearest face, and the
     // hit template must beat the account's second-nearest face by at least
-    // this much. The V5 pose-selected path does not apply it — yaw owns slot
+    // this much. The pose-selected path does not apply it — yaw owns slot
     // ownership and the distance gate is re-evaluated against the target.
     float clarityMargin = 0.10f;
 };
@@ -121,7 +123,7 @@ struct LearningFaceStatus {
 // a template — and the gate is evaluated against the pose-selected TARGET
 // slot's distance, never the (smaller) matched-slot distance; liveness-failed
 // rounds never reach Enqueue at all; the pose cone re-checks the target after
-// selection; legacy V4 slots (no nominal angles) keep the distance-nearest
+// selection; slots without nominal angles keep the distance-nearest
 // target plus the landing-clarity gate; the store records (observation-only)
 // the account's minimum template-pair distance on every commit; every
 // accepted update keeps the previous embedding in a 3-generation ring and the
@@ -138,7 +140,7 @@ struct LearningFaceStatus {
 class TemplateLearner {
 public:
     // What fetchTemplate returns for the target slot: the current embedding
-    // plus its V5 nominal pose angles (invalid sentinel = legacy V4 record).
+    // plus its nominal pose angles (invalid sentinel = no-angle record).
     struct TemplateSnapshot {
         std::vector<float> embedding;
         float nominalYaw = 1000.0f;

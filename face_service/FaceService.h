@@ -30,7 +30,6 @@ namespace facelogin {
 
 class FaceService {
 public:
-    FaceService();
     ~FaceService();
 
     // Service entry points
@@ -99,7 +98,6 @@ private:
     SERVICE_STATUS_HANDLE m_hStatus = nullptr;
     SERVICE_STATUS m_status = {};
     std::atomic<bool> m_running{false};
-    static FaceService* s_pInstance;
 
     // Components
     std::unique_ptr<PipeServer> m_pipeServer;

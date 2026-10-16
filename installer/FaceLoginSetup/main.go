@@ -20,10 +20,8 @@ var assets embed.FS
 // README badge.
 const appVersion = "1.8.0"
 
-const SERVICE_NAME = "FaceLoginService"
-
-// Registry paths
-const REG_KEY = `SOFTWARE\FaceLogin`
+// Registry value names under the FaceLogin key (the key path itself lives in
+// internal/util.go).
 const REGVAL_DATA_PATH = "DataPath"
 const REGVAL_INSTALL_PATH = "InstallPath"
 

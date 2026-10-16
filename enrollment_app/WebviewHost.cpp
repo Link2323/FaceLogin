@@ -376,6 +376,10 @@ void WebviewHost::ResizeWebView(HWND hWnd) {
 // HostObject
 // ==========================================================================
 
+// GetIDsOfNames resolves names at runtime (WebView2 host objects have no
+// static type library), so DISPID values are internal only and gaps left by
+// removed methods are fine.
+
 STDMETHODIMP HostObject::QueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
     if (riid == IID_IUnknown || riid == IID_IDispatch) { *ppv = (IDispatch*)this; AddRef(); return S_OK; }
@@ -394,16 +398,10 @@ STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCI
     std::wstring n(names[0]);
     if (n == L"StartPreview")           *ids = 1;
     else if (n == L"StopPreview")       *ids = 2;
-    else if (n == L"GetSampleCount")    *ids = 3;
     else if (n == L"GetUsername")       *ids = 4;
     else if (n == L"CaptureFaceSamples") *ids = 5;
     else if (n == L"ValidatePassword")  *ids = 6;
     else if (n == L"SaveEnrollment")    *ids = 7;
-    else if (n == L"GetLatestFrameBase64") *ids = 8;
-    else if (n == L"GetLatestFacesJson")   *ids = 9;
-    else if (n == L"IsRunning")         *ids = 10;
-    else if (n == L"IsLivenessPassed")  *ids = 11;
-    else if (n == L"IsLivenessChecking") *ids = 12;
     else if (n == L"GetConfig")    *ids = 13;
     else if (n == L"SetConfig")    *ids = 14;
     else if (n == L"GetLogLines")  *ids = 15;
@@ -499,7 +497,6 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         switch (id) {
         case 1:  if (res) *res = MakeBool(m_wizard->StartPreview()); break;
         case 2:  m_wizard->StopPreview(); break;
-        case 3:  if (res) *res = MakeInt(m_wizard->GetSampleCount()); break;
         case 4:  if (res) *res = MakeStr(m_wizard->GetUsername()); break;
         case 5: {
             // Multi-angle capture: optional int argument = angle index
@@ -542,11 +539,6 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
             if (res) *res = MakeBool(m_wizard->SaveEnrollment(pass, label));
             break;
         }
-        case 8:  if (res) *res = MakeStr(m_wizard->GetLatestFrameBase64()); break;
-        case 9:  if (res) *res = MakeStr(m_wizard->GetLatestFacesJson()); break;
-        case 10: if (res) *res = MakeBool(m_wizard->IsPreviewRunning()); break;
-        case 11: if (res) *res = MakeBool(m_wizard->IsLivenessPassed()); break;
-        case 12: if (res) *res = MakeBool(m_wizard->IsLivenessChecking()); break;
         case 13: if (res) *res = MakeStr(m_wizard->GetConfig()); break;
         case 14: {
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
