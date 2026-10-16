@@ -1,6 +1,6 @@
 # 代码质量评估与改善待办
 
-2026-10-15 对全库做了一次可读性 / 可维护性 / 可扩展性评估，覆盖 C++ 核心（face_service、common、vision、storage）、Credential Provider、注册界面（enrollment_app）、安装器（Go）、构建系统、文档与测试体系，证据定位到文件与行号。本文件收纳由评估产生的改善建议并登记完成情况；与 [`todo.md`](todo.md) 重叠的项只跟踪状态，详细描述以该处为准。全部清零后本文件移入 `../completed/`。
+2026-10-15 对全库做了一次可读性 / 可维护性 / 可扩展性评估，覆盖 C++ 核心（face_service、common、vision、storage）、Credential Provider、注册界面（enrollment_app）、安装器（Go）、构建系统、文档与测试体系，证据定位到文件与行号。本文件收纳由评估产生的改善建议并登记完成情况；与 [`todo.md`](todo.md) 重叠的项只跟踪状态，详细描述以该处为准。全部清零后本文件移入 `../completed/`。2026-10-15 第二轮：第一梯队 6 项（#1/#3/#4/#5/#6/#9）完成后全库复评，更新结论并新增 #13-#19。
 
 ## 评估结论（2026-10-15）
 
@@ -12,6 +12,21 @@
 | 综合 | 7 | 文档（9）、安装器（8.5）、构建（8）、C++ 核心（7~7.5）、credential_provider（6~8）、enrollment_app（5~7）、测试（7）。 |
 
 整体判断：工程素养部分（文档、注释、安全纪律、测试策略）是强项；短板集中在"多份事实源"与"无抽象的可替换点"。第一梯队完成后可维护性预计可到 8；相机抽象与 dispId 单表化落地后可扩展性有望到 7.5。
+
+## 复评结论（2026-10-15 第二轮，第一梯队完成后）
+
+第一梯队 6 项经逐项核实全部落地且质量高：067b9c0 拆分逐路径等价、实测注释零流失；a6e58df 具名常量与全部使用点一一对应；efc0ed1 收口后全仓样板残留 grep 为零；#1 的 Go 测试实测通过且已做三方向破坏性验证。
+
+| 维度 | 初评 | 复评 | 变化依据 |
+|---|---|---|---|
+| 可读性 | 7.5 | 8.5 | 超百行函数从约 10 个降到 7 个（最长 395→259 行；`AuthPipeline::Run` 89 行、worker 主线 116 行）；魔法数字主力具名；陈旧引用与缩进错位清零。app.js 1428 行、face_gain_tune.h 1185 行仍在。 |
+| 可维护性 | 7 | 7.5 | CLSID/配置默认值有测试守护、service_client 三重复制收拢、CMake 样板收口；DataPath 五处与 config 默认值三处重复仍在，credential_provider 近零测试，新发现 bump_version.ps1 断链（#13）。 |
+| 可扩展性 | 6 | 6.5 | 扩展性主线（相机抽象、dispId 单表、字段 ID 具名）本轮未动；#5 拆分后认证流水线各阶段可独立演化，小幅改善。 |
+| 综合 | 7 | 7.5 | 面向「多份事实源」的第一梯队修复全部兑现。 |
+
+模块复评：C++ 核心（face_service + common/vision/storage）8.5、credential_provider 7、enrollment_app 7、安装器 8.5、构建 8、文档 9、测试 8。契约文档抽查（users-dat / ipc / auth-worker-ipc 的关键常量）与代码逐项一致。
+
+复评新发现已入清单：#13 bump_version.ps1 断链（`-Dry` 实测必失败，高）；#14 `DeleteFace` use-after-erase（真缺陷）；#15 enrollment_app 密码未清零（违反自定安全约束）；#16 app.js 两处同步 SetConfig 最长冻结 25 秒；#17 CP `g_cRefCount` 从未增减致 `DllCanUnloadNow` 失效；#18 `PrepareFrames` 252 行（#5 未覆盖的全库现存最长函数）；#19 低优先级杂项一批。
 
 ## 改善清单
 
@@ -31,6 +46,13 @@
 | 10 | A | 相机后端接口化（仅在确需 Media Foundation 或多相机差异时实施） | `vision/`、`face_service/auth_worker.cpp:336-355` | 未开始 |
 | 11 | C | app.js 模块化（优先级最低） | `enrollment_app/app.js` | 未开始 |
 | 12 | C | 同步原语不一致：收敛或在文档豁免 | `face_service/authentication_residency.cpp` | 未开始 |
+| 13 | C | 修复 bump_version.ps1 断链（AGENTS.md 规则失配 + 尾注过时） | `scripts/bump_version.ps1:72-84` | 未开始 |
+| 14 | C | DeleteFace use-after-erase 修复并补测试 | `storage/credential_store.cpp:489-490` | 未开始 |
+| 15 | C | enrollment_app 密码局部变量清零（SecureWStringGuard） | `enrollment_app/` 3 个文件 | 未开始 |
+| 16 | C | app.js 长超时 COM 调用防冻结（套用既有禁用按钮模式） | `enrollment_app/app.js:382-406、1354-1378` | 未开始 |
+| 17 | C | CP 引用计数接入 g_cRefCount（DllCanUnloadNow 契约） | `credential_provider/dllmain.cpp:18、143` | 未开始 |
+| 18 | B | 拆分 PrepareFrames（#5 延伸，全库现存最长 252 行） | `face_service/auth_frame_preparation.cpp:63` | 未开始 |
+| 19 | C | 复评低优先级杂项 | 见下文 | 未开始 |
 
 ### 1 — 跨语言常量一致性校验（C）
 
@@ -68,7 +90,7 @@ tools/ 13 个 CMakeLists 与 5 个库目标各自重复 `MSVC_RUNTIME_LIBRARY "M
 ### 7 — dispId 单表化与凭据字段 ID 具名（B）
 
 - `enrollment_app/WebviewHost.cpp:391-434`（GetIDsOfNames 名称→id，38 项）与 `:498-606`（Invoke id→分支）是两份手工平行表，case 顺序已乱（32/33 插在 17 前，`:556-559`）。合并为共享名称→id 映射（宏或生成 enum），加 static_assert 保证两处等长。
-- credential_provider 凭据字段 ID 0-4 为魔法数，散布 `FaceLoginProvider.cpp:21-51`（描述符表）、`FaceLoginCredential.cpp:486-524`（GetFieldState）、`:530-574`（GetStringValue）、`:583-589`、`:630-645`，加字段需同步 5 处 switch。定义具名常量。
+- credential_provider 凭据字段 ID 0-4 为魔法数，散布 `FaceLoginProvider.cpp:21-51`（描述符表）、`FaceLoginCredential.cpp:486-524`（GetFieldState）、`:530-574`（GetStringValue）、`:583-589`、`:630-645`，加字段需同步 5 处 switch。定义具名常量。复评实测：除上述 5 个分支点外另有 8 个写侧调用点共 12 个裸字面量（`SetFieldString/SetFieldState(this, 1/3/4, ...)`，`FaceLoginCredential.cpp:465、821、1108、1139、1223-1226、1245-1248`），实际需同步 13 处；具名化为 C 级纯机械改动。
 
 验收：`npm run build`（如有前端构建）与 enrollment UI 冒烟通过；删改一处表条目编译期报错。
 
@@ -90,11 +112,43 @@ credential_provider 目前几乎零自动化覆盖。照 `tools/enrollment_suppo
 
 ### 11 — app.js 模块化（C，优先级最低）
 
-`enrollment_app/app.js` 1428 行单全局作用域、约 50 个顶层函数，靠横幅注释分 12 区段。WebView2 支持 ES modules，可拆为模块文件再由 CMake 合成链拼接。有 `tools/enrollment_ui/capture_flow_test.cjs` 与注释护航，痛点真实但不紧急。注意 `index.html.in` 含用户手工改动，勿覆盖。
+`enrollment_app/app.js` 1428 行单全局作用域、51 个顶层函数，靠横幅注释分 4 区段（复评实测；初评记 12 区段系误计）。WebView2 支持 ES modules，可拆为模块文件再由 CMake 合成链拼接。有 `tools/enrollment_ui/capture_flow_test.cjs` 与注释护航，痛点真实但不紧急。注意 `index.html.in` 含用户手工改动，勿覆盖。
 
 ### 12 — 同步原语不一致（C）
 
 `face_service/authentication_residency.cpp:14、98-104` 使用 `std::mutex` + `std::condition_variable`，其余全部模块遵循 Win32 临界区 + 事件 + 原子变量的项目约定（AGENTS.md「编码与安全约束」）。收敛为 Win32 方式，或在 AGENTS.md 明确豁免该模块并注明原因。改动涉及线程生命周期，需过 `authentication_residency_test`。
+
+### 13 — 修复 bump_version.ps1 断链（C）
+
+AGENTS.md 在 865255f 重写后不再含 `**Windows 专属桌面应用**` 字样，`bump_version.ps1:72-74` 规则匹配 0 次，`-Dry` 实测在该规则处 throw；非 dry 模式下 CMakeLists/wails.json/main.go/README 已被逐文件先行写入（`Update-File` 无事务性），留下半同步状态。AGENTS.md 现已入库（git ls-files 确认），脚本尾注「AGENTS.md and info.json are gitignored」前半过时；BUILD.md:134「同步 CMake、Wails、README 和构建资源」与脚本实际 6 处目标不符。修复：更新或删除该规则，同步 BUILD.md 描述与尾注。
+
+### 14 — DeleteFace use-after-erase（C）
+
+`credential_store.cpp:489` erase 之后 490 行仍用 `rec.username.c_str()`：idx 为末元素时是 UB，否则把下一账户的用户名记进「Removed account」日志。照 `DeleteUserBySid:518-520` 先拷贝再 erase 的写法补齐；tools/credential_store 现有 8 个测试无一覆盖 DeleteFace，补用例（含删除末位账户）。
+
+### 15 — enrollment_app 密码清零（C）
+
+密码以 `std::wstring` 局部变量流经 COM 入口→校验→DPAPI 全链路（`WebviewHost.cpp:517、529-535、600`、`enrollment_accounts.cpp:148、334`、`session_identity.cpp:285、300`），目录内零处使用 `common/secure_clear.h` 的 `SecureWStringGuard/SecureClearWString`——face_service 与 credential_provider 均已使用，此处违反 AGENTS.md「所有退出路径都要清零」。用 RAII 守卫包住各局部点。
+
+### 16 — app.js 长超时 COM 调用防冻结（C）
+
+`H.SetConfig` 服务侧含 worker 替换握手，最长 25s（`service_client.cpp:197-202`）。app.js `onSaveSettings`（:382-406）与 `onCamPickerConfirm`（:1354-1378）同步调用，期间窗口冻结且可重复点击；`onSave`（:1100）与 `onAppendConfirm`（:1010）已有「setTimeout 延迟 + 禁用按钮」模式，套用即可。顺带可提 `restartPreview()` 辅助函数（「StartPreview + 三分支错误横幅」现存 6 份复制）。
+
+### 17 — CP 引用计数接入（C）
+
+`dllmain.cpp:18` 的 `g_cRefCount` 声明后从未被任何 AddRef/Release 增减，`DllCanUnloadNow:143` 恒视对象数为 0，「对象存活则 DLL 不可卸载」的 COM 契约失效（风险被 LogonUI 极少调用该接口掩盖）。最小修：class factory 与凭据对象的 AddRef/Release 接 DllAddRef/DllRelease。同区观察项：DLL_PROCESS_ATTACH 内做注册表读 + 目录创建 + 日志开文件（:97-112，loader lock 下非平凡 I/O，装机实测可用），改动时一并评估；SetUsageScenario 重入直接 `new` 覆盖旧凭据指针不 Release（`FaceLoginProvider.cpp:194-198`）。
+
+### 18 — 拆分 PrepareFrames（B，#5 延伸）
+
+`auth_frame_preparation.cpp:63` PrepareFrames 252 行，为全库现存最长函数；warmup / replay-settle / trigger / tune 四阶段天然是阶段函数。验收同 #5：单函数 ≤100 行，`AuthPipelineTest`/`LivenessTimingTest` 全绿，日志字面量不变。
+
+### 19 — 复评低优先级杂项（C，按模块）
+
+- face_service：`pipe_server.cpp:198-376` 三份 overlapped I/O 样板（约 3×40 行）可提泛型助手；`auth_pipeline.cpp:210-213、326-329` FaceRect 构造两处重复（#5 拆分引入），可提 `FaceRectFromDetection`；`auth_worker_client.cpp:91-198` Spawn 手动清理阶梯 5 处可 RAII，协议超时字面量（10000/1000/2000/5000/15000/200）未具名；`FaceService.cpp:794-868` `WorkerConsumed(true)` 重复 7 次可 scope guard；FaceService.cpp 996 行可按「认证会话 / 控制命令 / 安装」三块再拆。
+- vision/storage：face_gain_tune.h 1185 行 header-only 被 6 处 include（改动触发全量重编译的可维护性单点），日志缓冲容量 96 重复 8+ 处；onnx_models.cpp 输入尺寸 112/512 未具名（112 约 15 处）；`config_util.cpp:145` 钳制字面量 0.70f/1.00f 应引用 `recognizer_profile.h` 的 kMin/kMaxMatchThreshold；`credential_store.cpp:190` version>=5 死分支（v4/v5 已提前拒绝）、`:444-445` old→new 日志两处均传新值、`credential_store.h:253` 默认参数 0.30f 为 dlib 时代陈迹；face_align 纯数学却无测试（补测成本最低收益明显）。
+- enrollment_app：`EnrollmentWizard.cpp:342` label 拼 JSON 未转义（当前恒为固定三值，来源放开即成注入点）；`WebviewHost.cpp:510` 角度参数类型不符应返回 DISP_E_TYPEMISMATCH（现 BADPARAMCOUNT）；`EnrollmentWizard.h:157` rAF 注释陈旧（实为 setTimeout 33ms 轮询）。
+- credential_provider：DllRegisterServer 忽略全部 RegSetValueExW 返回值（`dllmain.cpp:167-210`）；两处头文件注释漂移（状态机只列 4 态、字段表漏字段 4）；`FaceLoginCredential.h:134` m_pProvider 死成员；CMake 对 SHARED 库设 WIN32_EXECUTABLE 无效、netapi32/secur32 无对应符号。
+- installer：`app.go:107-109、130-132、147-152` 三步失败不先 emit "fail" 事件（与其余步骤不一致，前端进度条停 running 态）；`com.go:84-159` 混放 COM 注册与文件系统 ACL 两职责（registry ACL 却在 security.go）。
 
 ## 完成记录
 
