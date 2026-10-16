@@ -24,7 +24,7 @@ function fixture() {
   };
   const context = vm.createContext({});
   vm.runInContext(fs.readFileSync(path.join(__dirname,
-    '../../enrollment_app/capture_flow.js'), 'utf8'), context);
+    '../../enrollment_app/js/capture_flow.js'), 'utf8'), context);
   return { flow: context.createCaptureFlow(timers), pending };
 }
 
@@ -78,7 +78,7 @@ function page(overrides) {
     Image: function() {}, console
   });
   for (const file of PAGE_SOURCES) {
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '../../enrollment_app', file), 'utf8'), context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../../enrollment_app/js', file), 'utf8'), context);
   }
   return { context, intervals, timeouts, elements, element, calls, state };
 }

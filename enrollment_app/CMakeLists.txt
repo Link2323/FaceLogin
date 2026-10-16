@@ -3,17 +3,17 @@
 # app_main.js last: top-level wiring references earlier files' functions);
 # tools/enrollment_ui/capture_flow_test.cjs mirrors this list.
 set(ENROLLMENT_JS_SOURCES
-    capture_flow.js
-    ui_common.js
-    preview.js
-    capture_ui.js
-    navigation.js
-    settings.js
-    faces.js
-    account_refresh.js
-    enroll_save.js
-    logs.js
-    app_main.js)
+    js/capture_flow.js
+    js/ui_common.js
+    js/preview.js
+    js/capture_ui.js
+    js/navigation.js
+    js/settings.js
+    js/faces.js
+    js/account_refresh.js
+    js/enroll_save.js
+    js/logs.js
+    js/app_main.js)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/styles.css")
 foreach(js IN LISTS ENROLLMENT_JS_SOURCES)

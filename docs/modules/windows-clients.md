@@ -144,4 +144,4 @@ Enrollment 改动：
 - 保存、热重载、删除/重命名人脸
 - 修改页面模板、样式或脚本后确认实际重建并嵌入新 UI
 
-采集页面由 `capture_flow.js` 管理整轮状态、轮询与角度间延迟。取消、失败和完成统一结束本轮，清理定时器并使旧回调失效；下一轮保留独立代次，避免快速重试时旧回调启动下一角度或覆盖提示。页面其余逻辑按领域拆分为同目录 JS 模块（`ui_common`/`preview`/`capture_ui`/`navigation`/`settings`/`faces`/`account_refresh`/`enroll_save`/`logs`/`app_main`），宿主调用与呈现分散其中；跨模块共享状态收在所属模块闭包内（`previewCtl`、`captureCtl`、`navCtl` 等），HTML 内联 onclick 引用的处理器保持全局函数。
+采集页面由 `capture_flow.js` 管理整轮状态、轮询与角度间延迟。取消、失败和完成统一结束本轮，清理定时器并使旧回调失效；下一轮保留独立代次，避免快速重试时旧回调启动下一角度或覆盖提示。页面其余逻辑按领域拆分为 `enrollment_app/js/` 下的 JS 模块（`ui_common`/`preview`/`capture_ui`/`navigation`/`settings`/`faces`/`account_refresh`/`enroll_save`/`logs`/`app_main`），宿主调用与呈现分散其中；跨模块共享状态收在所属模块闭包内（`previewCtl`、`captureCtl`、`navCtl` 等），HTML 内联 onclick 引用的处理器保持全局函数。
