@@ -1,14 +1,12 @@
 #include "log_viewer.h"
-#include "enrollment_text.h"
 #include "../common/logger.h"
+#include "../common/text_util.h"
 
 #include <cstring>
 #include <sstream>
 #include <vector>
 
 namespace facelogin {
-
-using enrollment_detail::WstrToUtf8;
 
 static const wchar_t* LogFileName(EnrollmentLogSource source) {
     switch (source) {

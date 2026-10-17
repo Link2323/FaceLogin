@@ -93,15 +93,11 @@ SFace 自 2026-10-04 起使用清理 initializer graph inputs 的规范化 FP32 
 
 ### 资源白名单
 
-`resources/` 根目录只放以下文件：
+载荷白名单的单一事实源是 [`installer/FaceLoginSetup/internal/payload_manifest.txt`](../installer/FaceLoginSetup/internal/payload_manifest.txt)：根目录的产品 EXE、五个运行时 DLL、三份法律文件与 `models/` 下的正式 ONNX 模型各占一行。`scripts/build_installer.ps1` 按它暂存与清理 `resources/`；Go 安装器将其嵌入为静态卸载清单（slim 卸载器同样嵌入该 manifest）；`payload_zip_test.go` 校验 `payload.zip` 内容与它逐项一致，`payload_manifest_test.go` 钉住它与 `requiredModels` 的模型集合一致。
 
-- `FaceLoginService.exe`、`FaceLoginCredentialProvider.dll`、`FaceLoginConsole.exe`、`uninstall.exe`
-- 五个运行时 DLL：`onnxruntime.dll`、`libprotobuf.dll`、`libprotobuf-lite.dll`、`re2.dll`、`abseil_dll.dll`
-- `LICENSE.txt`、`THIRD_PARTY_NOTICES.txt`、`MODEL_LICENSES.txt`
+新增载荷文件只需在 manifest 加一行。新增模型还需在 `internal/extract.go` 的 `requiredModels` 补大小与 SHA-256（安装期安全校验需要哈希，故为独立清单，测试保证两表不漂移）。离线工具、旧 DLL、临时文件和其他残留都不得打包。
 
-`resources/models/` 只放四个正式 ONNX 模型。离线工具、旧 DLL、临时文件和其他残留都不得打包。新增载荷文件时同步更新静态卸载清单与测试。
-
-服务和 Console 依赖的运行时 DLL 闭包就是上述五个文件；Credential Provider 使用静态 CRT，不需要额外运行时 DLL。DLL 清单或依赖变化时重新检查依赖闭包。
+服务和 Console 依赖的运行时 DLL 闭包就是清单中的五个文件；Credential Provider 使用静态 CRT，不需要额外运行时 DLL。DLL 清单或依赖变化时重新检查依赖闭包。
 
 ### 许可文件
 

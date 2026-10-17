@@ -1,13 +1,11 @@
 #include "service_client.h"
-#include "enrollment_text.h"
 #include "../common/ipc_protocol.h"
 #include "../common/logger.h"
+#include "../common/text_util.h"
 
 #include <utility>
 
 namespace facelogin {
-
-using enrollment_detail::WstrToUtf8;
 
 EnrollmentServiceClient::EnrollmentServiceClient()
     : EnrollmentServiceClient(ipc::PIPE_NAME) {}

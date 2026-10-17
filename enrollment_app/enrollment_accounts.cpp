@@ -1,6 +1,8 @@
 #include "enrollment_accounts.h"
 #include "../common/dpapi_util.h"
 #include "../common/logger.h"
+#include "../common/json_util.h"
+#include "../common/embedding_math.h"
 
 #include <cmath>
 #include <cstdio>
@@ -8,38 +10,6 @@
 #include <utility>
 
 namespace facelogin {
-namespace {
-// Helper: UTF-8 string with JSON escaping — safe to embed directly inside a
-// JSON string literal for the face list and account-change responses. Escapes
-// per RFC 8259: quote, backslash, and the mandatory control characters
-// (U+0000–U+001F). Forward slash is intentionally NOT escaped (legal in JSON
-// and never needed for these fields). Other characters pass through UTF-8.
-static std::string WstrToUtf8Escaped(const std::wstring& ws) {
-    static const char* kHex = "0123456789abcdef";
-    std::string out;
-    for (wchar_t ch : ws) {
-        if (ch == L'"')            out += "\\\"";
-        else if (ch == L'\\')      out += "\\\\";
-        else if (ch == L'\b')      out += "\\b";
-        else if (ch == L'\f')      out += "\\f";
-        else if (ch == L'\n')      out += "\\n";
-        else if (ch == L'\r')      out += "\\r";
-        else if (ch == L'\t')      out += "\\t";
-        else if (ch < 0x20) {      // other C0 control chars → \uXXXX
-            out += "\\u00";
-            out += kHex[(ch >> 4) & 0xF];
-            out += kHex[ch & 0xF];
-        }
-        else {
-            char mb[4] = {};
-            int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, mb, 4, nullptr, nullptr);
-            if (n > 0) out.append(mb, static_cast<size_t>(n));
-        }
-    }
-    return out;
-}
-
-} // namespace
 
 EnrollmentAccounts::EnrollmentAccounts(const std::wstring& dataDir,
     session_identity::SessionIdentity identity, const EnrollmentServiceClient& serviceClient)
@@ -198,12 +168,10 @@ std::string EnrollmentAccounts::BuildAngleHint() const {
                 for (size_t j = i + 1; j < faces.size(); j++) {
                     if (faces[i].embedding.size() != faces[j].embedding.size() ||
                         faces[i].embedding.empty()) continue;
-                    double sum = 0.0;
-                    for (size_t k = 0; k < faces[i].embedding.size(); k++) {
-                        double diff = faces[i].embedding[k] - faces[j].embedding[k];
-                        sum += diff * diff;
-                    }
-                    const float d = static_cast<float>(std::sqrt(sum));
+                    const float d = static_cast<float>(
+                        EuclideanDistance(faces[i].embedding.data(),
+                                          faces[j].embedding.data(),
+                                          faces[i].embedding.size()));
                     if (minPair < 0.0f || d < minPair) minPair = d;
                 }
             }
@@ -244,7 +212,7 @@ std::string EnrollmentAccounts::GetFacesJson() {
         if (i > 0) js << ",";
         const auto& f = faces[i];
         js << "{\"id\":" << f.id
-           << ",\"label\":\"" << WstrToUtf8Escaped(f.label) << "\"}";
+           << ",\"label\":\"" << JsonEscapeUtf8(f.label) << "\"}";
     }
     js << "]";
     return js.str();
@@ -305,7 +273,7 @@ std::string EnrollmentAccounts::CheckAccountTypeChanged() {
     if (change.state == 0) return "{\"state\":0}";
     std::string json = "{\"state\":" + std::to_string(change.state) +
         ",\"faces\":" + std::to_string(change.faces);
-    if (change.state == 2) json += ",\"upn\":\"" + WstrToUtf8Escaped(change.currentUpn) + "\"";
+    if (change.state == 2) json += ",\"upn\":\"" + JsonEscapeUtf8(change.currentUpn) + "\"";
     return json + "}";
 }
 

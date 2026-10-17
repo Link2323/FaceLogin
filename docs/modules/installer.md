@@ -34,7 +34,7 @@
 
 完整安装器只嵌入 `payload.zip`；压缩结构、资源白名单与同步步骤见 [`BUILD.md`](../BUILD.md)。`resources/` 是 gitignore 目录，不能据它的当前内容推断正式载荷。
 
-完整安装器从嵌入资源发现待卸载文件；slim 卸载器不含资源包，使用 `internal/extract.go` 的 `currentRootPayloadFiles` 和 `requiredModels` 静态清单。增加载荷文件时，确认完整与 slim 两条卸载路径及对应测试。
+完整安装器从嵌入资源发现待卸载文件；slim 卸载器不含资源包，使用由 `internal/payload_manifest.txt` 派生的静态清单（`currentRootPayloadFiles`，见 `payload_manifest.go`；slim 构建同样嵌入该 manifest）和 `requiredModels`。载荷白名单的单一事实源与各消费方见 [`BUILD.md`](../BUILD.md#资源白名单)，增加载荷文件时测试会强制 zip、卸载清单与 manifest 三方一致。
 
 提取器会校验模型哈希，并按相对路径枚举文件。调整资源目录布局时，同时检查提取、安装后校验和卸载清单。模型固定标识与资源白名单以代码和 BUILD 指南为准，不在此重复。
 

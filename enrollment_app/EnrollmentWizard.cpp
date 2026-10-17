@@ -1,5 +1,4 @@
 #include "EnrollmentWizard.h"
-#include "enrollment_text.h"
 #include "preview_exposure.h"
 #include "preview_frame_encoder.h"
 #include "enrollment_templates.h"
@@ -8,6 +7,8 @@
 #include "../common/logger.h"
 #include "../common/registry_util.h"
 #include "../common/config_util.h"
+#include "../common/text_util.h"
+#include "../common/json_util.h"
 #include "../common/frame_image.h"
 #include "../common/model_hashes.h"
 #include "../common/sha256_util.h"
@@ -21,9 +22,6 @@
 #pragma comment(lib, "ole32.lib")
 
 namespace facelogin {
-
-using enrollment_detail::Utf8ToWstr;
-using enrollment_detail::WstrToUtf8;
 
 EnrollmentWizard::EnrollmentWizard() {
     std::wstring regData = ReadRegString(REGVAL_DATA_PATH, L"");
@@ -308,10 +306,7 @@ std::string EnrollmentWizard::FacesToJson(
 std::string EnrollmentWizard::GetUsername() const {
     // Return UPN for MSA accounts, SAM name for local accounts
     const std::wstring& display = m_identity.upn.empty() ? m_identity.username : m_identity.upn;
-    int len = WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string result(len - 1, ' ');
-    WideCharToMultiByte(CP_UTF8, 0, display.c_str(), -1, &result[0], len, nullptr, nullptr);
-    return result;
+    return WstrToUtf8(display);
 }
 
 bool EnrollmentWizard::CaptureFaceSamples(int angleIndex) {
@@ -410,18 +405,8 @@ std::string EnrollmentWizard::GetCameraList() {
     for (size_t i = 0; i < devices.size(); i++) {
         if (i > 0) js << ",";
         // JSON-escape name/path (device paths contain backslashes).
-        auto esc = [](const std::wstring& ws) -> std::string {
-            std::string out;
-            for (wchar_t ch : ws) {
-                if (ch == L'"' || ch == L'\\') out.push_back('\\');
-                char mb[4] = {};
-                int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, mb, 4, nullptr, nullptr);
-                if (n > 0) out.append(mb, static_cast<size_t>(n));
-            }
-            return out;
-        };
-        js << "{\"path\":\"" << esc(devices[i].devicePath)
-           << "\",\"name\":\"" << esc(devices[i].friendlyName) << "\"}";
+        js << "{\"path\":\"" << JsonEscapeUtf8(devices[i].devicePath)
+           << "\",\"name\":\"" << JsonEscapeUtf8(devices[i].friendlyName) << "\"}";
     }
     js << "]";
     return js.str();

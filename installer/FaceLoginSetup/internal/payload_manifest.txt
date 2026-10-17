@@ -1,0 +1,26 @@
+# FaceLogin installer payload allow-list — the single source shared by:
+#   * scripts/build_installer.ps1  (staging + prune of resources/)
+#   * installer/FaceLoginSetup/internal (embedded static uninstall manifest,
+#     including the slim uninstaller build which ships no payload)
+#   * payload_zip_test.go / payload_manifest_test.go (consistency pins)
+# One file per line; a "models/" prefix places the file under models/.
+# Lines starting with # are comments. Adding a payload file means adding a
+# line here — nothing else. Model entries must also carry size+SHA-256 in
+# extract.go's requiredModels (security manifest); a test pins the two lists
+# together.
+FaceLoginService.exe
+FaceLoginCredentialProvider.dll
+FaceLoginConsole.exe
+uninstall.exe
+onnxruntime.dll
+libprotobuf.dll
+libprotobuf-lite.dll
+re2.dll
+abseil_dll.dll
+LICENSE.txt
+THIRD_PARTY_NOTICES.txt
+MODEL_LICENSES.txt
+models/det_10g_gnkps.onnx
+models/face_recognition_sface_2021dec.onnx
+models/MiniFASNetV2.onnx
+models/MiniFASNetV1SE.onnx

@@ -1,6 +1,7 @@
 #include "enrollment_templates.h"
 
 #include "../common/logger.h"
+#include "../common/embedding_math.h"
 #include "../storage/credential_store.h"
 
 #include <algorithm>
@@ -24,12 +25,8 @@ bool BuildAngleTemplate(const EnrollmentSamples& samples,
         int pairs = 0;
         for (size_t i = g.begin; i < g.begin + g.count; i++) {
             for (size_t j = i + 1; j < g.begin + g.count; j++) {
-                double sum = 0.0;
-                for (size_t k = 0; k < dim; k++) {
-                    double diff = embeddings[i][k] - embeddings[j][k];
-                    sum += diff * diff;
-                }
-                totalDist += std::sqrt(sum);
+                totalDist += EuclideanDistance(embeddings[i].data(),
+                                               embeddings[j].data(), dim);
                 pairs++;
             }
         }
@@ -52,9 +49,7 @@ bool BuildAngleTemplate(const EnrollmentSamples& samples,
         for (size_t k = 0; k < dim; k++) avgEmbedding[k] += emb[k];
     }
     for (float& v : avgEmbedding) v /= static_cast<float>(g.count);
-    double squaredNorm = 0.0;
-    for (float v : avgEmbedding) squaredNorm += static_cast<double>(v) * v;
-    const double averageNorm = std::sqrt(squaredNorm);
+    const double averageNorm = L2Norm(avgEmbedding);
     if (!std::isfinite(averageNorm) || averageNorm <= 1e-8) {
         FACELOGIN_ERROR(L"Enrollment template preparation: invalid mean norm [%ls]", g.label);
         return false;

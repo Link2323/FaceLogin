@@ -22,6 +22,7 @@
 #include <dshow.h>
 #include <strmif.h>
 #include <uuids.h>
+#include <wrl/client.h>
 
 #include "camera_types.h"
 
@@ -154,10 +155,13 @@ private:
 
     // Enumeration only: resolve the moniker for the configured DevicePath
     // (or the first device). Registry reads — never activates the camera.
-    bool FindMoniker(const std::wstring& devicePath, IMoniker** ppMoniker);
+    bool FindMoniker(const std::wstring& devicePath,
+                     Microsoft::WRL::ComPtr<IMoniker>& moniker);
     // Bind a moniker to the capture filter. THIS is the device activation.
-    bool BindMoniker(IMoniker* pMoniker, IBaseFilter** ppFilter);
-    bool FindCamera(const std::wstring& devicePath, IBaseFilter** ppFilter);
+    bool BindMoniker(IMoniker* pMoniker,
+                     Microsoft::WRL::ComPtr<IBaseFilter>& filter);
+    bool FindCamera(const std::wstring& devicePath,
+                    Microsoft::WRL::ComPtr<IBaseFilter>& filter);
     // Device-independent graph construction (FilterGraph/SampleGrabber/Null
     // Renderer); AttachCapture adds the capture filter, negotiates the
     // format, connects the pins and queries IMediaControl.
@@ -168,13 +172,17 @@ private:
     // COM reference; callers that own their COM init pair it separately.
     void DiscardPreload();
 
-    IGraphBuilder*   m_pGraph        = nullptr;
-    IMediaControl*   m_pControl      = nullptr;
-    IBaseFilter*     m_pCapture      = nullptr;
-    ISampleGrabber*  m_pGrabber      = nullptr;
-    IBaseFilter*     m_pNullRenderer = nullptr;
-    IBaseFilter*     m_pDecoder      = nullptr;
-    IMoniker*        m_pMoniker      = nullptr;
+    // Graph interfaces are owning references (WRL ComPtr — no manual
+    // Release chains). Shutdown()/DiscardPreload() still reset them in a
+    // deliberate order: stop streaming, detach the callback, then let the
+    // graph tear down the filters.
+    Microsoft::WRL::ComPtr<IGraphBuilder>   m_pGraph;
+    Microsoft::WRL::ComPtr<IMediaControl>   m_pControl;
+    Microsoft::WRL::ComPtr<IBaseFilter>     m_pCapture;
+    Microsoft::WRL::ComPtr<ISampleGrabber>  m_pGrabber;
+    Microsoft::WRL::ComPtr<IBaseFilter>     m_pNullRenderer;
+    Microsoft::WRL::ComPtr<IBaseFilter>     m_pDecoder;
+    Microsoft::WRL::ComPtr<IMoniker>        m_pMoniker;
     std::wstring     m_preloadDevicePath;
     bool             m_preloadValid  = false;
     bool             m_directDecoder = false;

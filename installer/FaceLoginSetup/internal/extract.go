@@ -60,24 +60,13 @@ var requiredModels = []requiredModel{
 	},
 }
 
-// Root-level payload in the current installer. Keep this aligned with the
-// allow-list in docs/BUILD.md; it is also the fallback removal manifest if the
-// embedded filesystem cannot be enumerated during uninstall — which is the
-// ONLY manifest the slim uninstaller build has (no embedded resources).
-var currentRootPayloadFiles = []string{
-	"FaceLoginService.exe",
-	"FaceLoginCredentialProvider.dll",
-	"FaceLoginConsole.exe",
-	"uninstall.exe",
-	"abseil_dll.dll",
-	"libprotobuf-lite.dll",
-	"libprotobuf.dll",
-	"onnxruntime.dll",
-	"re2.dll",
-	"LICENSE.txt",
-	"THIRD_PARTY_NOTICES.txt",
-	"MODEL_LICENSES.txt",
-}
+// Root-level payload in the current installer, derived from the embedded
+// payload_manifest.txt — the single allow-list that build_installer.ps1 also
+// reads (see payload_manifest.go). It is the fallback removal manifest if the
+// embedded filesystem cannot be enumerated during uninstall — and the ONLY
+// manifest the slim uninstaller build has (it embeds no payload, but does
+// embed the manifest itself).
+var currentRootPayloadFiles = PayloadManifestRootFiles()
 
 // Created at runtime beside data/ and log/, not shipped in the payload.
 // Upgrades preserve these files; full uninstall removes them by exact name.

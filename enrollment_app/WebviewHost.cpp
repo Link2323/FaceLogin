@@ -2,6 +2,7 @@
 #include "EnrollmentWizard.h"
 #include "../common/logger.h"
 #include "../common/secure_clear.h"
+#include "../common/text_util.h"
 #include "resource.h"
 #include "version.h"
 #include <wtsapi32.h>
@@ -121,10 +122,7 @@ STDMETHODIMP CtrlCallback::Invoke(HRESULT hr, ICoreWebView2Controller* ctrl) {
         htmlContent.replace(pos, versionPh.size(), FACELOGIN_APP_VERSION);
     }
 
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, htmlContent.c_str(), -1, nullptr, 0);
-    std::wstring whtml(wlen, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, htmlContent.c_str(), -1, &whtml[0], wlen);
-    self->m_webview->NavigateToString(whtml.c_str());
+    self->m_webview->NavigateToString(facelogin::Utf8ToWstr(htmlContent).c_str());
 
     self->ResizeWebView(hWnd);
     return S_OK;
@@ -543,10 +541,8 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         case 14: {
             if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
             std::string json;
-            if (p->rgvarg[0].vt == VT_BSTR) {
-                int len = WideCharToMultiByte(CP_UTF8, 0, p->rgvarg[0].bstrVal, -1, nullptr, 0, nullptr, nullptr);
-                json.resize(len > 0 ? len - 1 : 0);
-                if (len > 0) WideCharToMultiByte(CP_UTF8, 0, p->rgvarg[0].bstrVal, -1, &json[0], len, nullptr, nullptr);
+            if (p->rgvarg[0].vt == VT_BSTR && p->rgvarg[0].bstrVal) {
+                json = facelogin::WstrToUtf8(p->rgvarg[0].bstrVal);
             }
             if (res) *res = MakeBool(m_wizard->SetConfig(json));
             break;

@@ -8,6 +8,9 @@
 #pragma comment(lib, "strmiids.lib")
 
 namespace facelogin {
+
+using Microsoft::WRL::ComPtr;
+
 namespace {
 LONGLONG CaptureTicks() {
     LARGE_INTEGER ticks{};
@@ -133,45 +136,38 @@ STDMETHODIMP WebcamCaptureDS::GrabberCB::BufferCB(double, BYTE* buffer, long len
 // Camera enumeration
 // ============================================================================
 
-static bool GetPin(IBaseFilter* pFilter, PIN_DIRECTION dir, IPin** ppPin) {
-    *ppPin = nullptr;
-    IEnumPins* pEnum = nullptr;
-    if (FAILED(pFilter->EnumPins(&pEnum))) return false;
+static bool GetPin(IBaseFilter* pFilter, PIN_DIRECTION dir, ComPtr<IPin>& pin) {
+    ComPtr<IEnumPins> enumPins;
+    if (FAILED(pFilter->EnumPins(enumPins.GetAddressOf()))) return false;
 
-    IPin* pPin = nullptr;
-    while (pEnum->Next(1, &pPin, nullptr) == S_OK) {
+    ComPtr<IPin> current;
+    while (enumPins->Next(1, current.ReleaseAndGetAddressOf(), nullptr) == S_OK) {
         PIN_DIRECTION pinDir;
-        if (SUCCEEDED(pPin->QueryDirection(&pinDir)) && pinDir == dir) {
-            *ppPin = pPin;
-            pEnum->Release();
+        if (SUCCEEDED(current->QueryDirection(&pinDir)) && pinDir == dir) {
+            pin = std::move(current);
             return true;
         }
-        pPin->Release();
     }
-    pEnum->Release();
     return false;
 }
 
 bool WebcamCaptureDS::FindMoniker(const std::wstring& devicePath,
-                                  IMoniker** ppMoniker) {
-    *ppMoniker = nullptr;
-
-    ICreateDevEnum* pDevEnum = nullptr;
+                                  ComPtr<IMoniker>& chosen) {
+    ComPtr<ICreateDevEnum> devEnum;
     HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
                                   CLSCTX_INPROC_SERVER,
-                                  IID_PPV_ARGS(&pDevEnum));
+                                  IID_PPV_ARGS(&devEnum));
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS CoCreateInstance(SystemDeviceEnum) failed: 0x%08X", hr);
         return false;
     }
 
-    IEnumMoniker* pEnum = nullptr;
-    hr = pDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnum, 0);
-    pDevEnum->Release();
-
-    if (FAILED(hr) || pEnum == nullptr) {
+    ComPtr<IEnumMoniker> enumMoniker;
+    hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory,
+                                        enumMoniker.GetAddressOf(), 0);
+    if (FAILED(hr) || !enumMoniker) {
         FACELOGIN_WARN(L"DS: no video capture devices found (pEnum=%p, hr=0x%08X)",
-                       (void*)pEnum, hr);
+                       (void*)enumMoniker.Get(), hr);
         return false;
     }
 
@@ -185,73 +181,66 @@ bool WebcamCaptureDS::FindMoniker(const std::wstring& devicePath,
     // configured camera now fails fast into the existing "摄像头不可用"
     // report; only a host with no camera configured at all may take the
     // first device.
-    IMoniker* pMatch = nullptr;
+    ComPtr<IMoniker> match;
     std::wstring matchName;
-    IMoniker* pFirst = nullptr;
+    ComPtr<IMoniker> first;
     std::wstring firstName;
-    IMoniker* pMoniker = nullptr;
+    ComPtr<IMoniker> moniker;
     ULONG fetched = 0;
-    while (pEnum->Next(1, &pMoniker, &fetched) == S_OK && fetched == 1) {
-        IPropertyBag* pBag = nullptr;
+    while (enumMoniker->Next(1, moniker.ReleaseAndGetAddressOf(), &fetched) == S_OK &&
+           fetched == 1) {
+        ComPtr<IPropertyBag> bag;
         std::wstring friendly;
         std::wstring dsPath;
-        if (SUCCEEDED(pMoniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&pBag)))) {
+        if (SUCCEEDED(moniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&bag)))) {
             VARIANT var; VariantInit(&var);
-            if (SUCCEEDED(pBag->Read(L"FriendlyName", &var, nullptr)) && var.vt == VT_BSTR) {
+            if (SUCCEEDED(bag->Read(L"FriendlyName", &var, nullptr)) && var.vt == VT_BSTR) {
                 friendly = var.bstrVal;
             }
             VariantClear(&var);
             if (!devicePath.empty()) {
-                if (SUCCEEDED(pBag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
+                if (SUCCEEDED(bag->Read(L"DevicePath", &var, nullptr)) && var.vt == VT_BSTR) {
                     dsPath = var.bstrVal;
                 }
                 VariantClear(&var);
             }
-            pBag->Release();
         }
-        if (!pFirst) {
-            pFirst = pMoniker;
-            pFirst->AddRef();
+        if (!first) {
+            first = moniker;
             firstName = friendly;
         }
-        if (!devicePath.empty() && !pMatch && dsPath == devicePath) {
-            pMatch = pMoniker;
-            pMatch->AddRef();
+        if (!devicePath.empty() && !match && dsPath == devicePath) {
+            match = moniker;
             matchName = friendly;
         }
-        pMoniker->Release();
         fetched = 0;
     }
-    pEnum->Release();
 
-    IMoniker* chosen = nullptr;
-    if (pMatch) {
-        chosen = pMatch;
-        if (pFirst) pFirst->Release();
+    if (match) {
+        chosen = std::move(match);
         FACELOGIN_INFO(L"DS: using configured camera (matched DevicePath, \"%s\")",
                        matchName.c_str());
-    } else if (pFirst && devicePath.empty()) {
-        chosen = pFirst;
+    } else if (first && devicePath.empty()) {
+        chosen = std::move(first);
         FACELOGIN_INFO(L"DS: no camera configured — using first device (\"%s\")",
                        firstName.c_str());
     } else {
-        if (pFirst) pFirst->Release();
         FACELOGIN_WARN(L"DS: configured camera not found in enumeration "
                        L"(device absent or not ready)");
         return false;
     }
-    *ppMoniker = chosen;
     return true;
 }
 
-bool WebcamCaptureDS::BindMoniker(IMoniker* pMoniker, IBaseFilter** ppFilter) {
-    *ppFilter = nullptr;
+bool WebcamCaptureDS::BindMoniker(IMoniker* pMoniker, ComPtr<IBaseFilter>& filter) {
+    IBaseFilter* raw = nullptr;
     const HRESULT hr = pMoniker->BindToObject(nullptr, nullptr, IID_IBaseFilter,
-                                               (void**)ppFilter);
+                                               (void**)&raw);
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS BindToObject (camera) failed: 0x%08X", hr);
         return false;
     }
+    filter.Attach(raw);
     // Graph-build step detail — DEBUG; the final "DirectShow webcam
     // initialized" line at the end of Initialize() is the INFO-level summary.
     FACELOGIN_DEBUG(L"DS: bound video capture device");
@@ -259,21 +248,19 @@ bool WebcamCaptureDS::BindMoniker(IMoniker* pMoniker, IBaseFilter** ppFilter) {
 }
 
 bool WebcamCaptureDS::FindCamera(const std::wstring& devicePath,
-                                 IBaseFilter** ppFilter) {
-    IMoniker* pMoniker = nullptr;
-    if (!FindMoniker(devicePath, &pMoniker)) {
+                                 ComPtr<IBaseFilter>& filter) {
+    ComPtr<IMoniker> moniker;
+    if (!FindMoniker(devicePath, moniker)) {
         return false;
     }
-    const bool bound = BindMoniker(pMoniker, ppFilter);
-    pMoniker->Release();
-    return bound;
+    return BindMoniker(moniker.Get(), filter);
 }
 
 std::vector<CameraDeviceInfo> WebcamCaptureDS::ListCameras() {
     std::vector<CameraDeviceInfo> devices;
     if (!InitializeCOM()) return devices;
 
-    ICreateDevEnum* devEnum = nullptr;
+    ComPtr<ICreateDevEnum> devEnum;
     HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr,
                                   CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&devEnum));
@@ -282,19 +269,19 @@ std::vector<CameraDeviceInfo> WebcamCaptureDS::ListCameras() {
         return devices;
     }
 
-    IEnumMoniker* enumerator = nullptr;
+    ComPtr<IEnumMoniker> enumerator;
     hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory,
-                                        &enumerator, 0);
-    devEnum->Release();
+                                        enumerator.GetAddressOf(), 0);
     if (FAILED(hr) || !enumerator) {
         ShutdownCOM();
         return devices;
     }
 
-    IMoniker* moniker = nullptr;
+    ComPtr<IMoniker> moniker;
     ULONG fetched = 0;
-    while (enumerator->Next(1, &moniker, &fetched) == S_OK && fetched == 1) {
-        IPropertyBag* bag = nullptr;
+    while (enumerator->Next(1, moniker.ReleaseAndGetAddressOf(), &fetched) == S_OK &&
+           fetched == 1) {
+        ComPtr<IPropertyBag> bag;
         if (SUCCEEDED(moniker->BindToStorage(nullptr, nullptr,
                                              IID_PPV_ARGS(&bag)))) {
             CameraDeviceInfo info;
@@ -311,16 +298,12 @@ std::vector<CameraDeviceInfo> WebcamCaptureDS::ListCameras() {
                 info.friendlyName = value.bstrVal;
             }
             VariantClear(&value);
-            bag->Release();
             if (!info.devicePath.empty() || !info.friendlyName.empty()) {
                 devices.push_back(std::move(info));
             }
         }
-        moniker->Release();
-        moniker = nullptr;
         fetched = 0;
     }
-    enumerator->Release();
     ShutdownCOM();
     return devices;
 }
@@ -340,22 +323,24 @@ bool WebcamCaptureDS::BuildSkeleton() {
         return false;
     }
 
-    IBaseFilter* pGrabberFilter = nullptr;
+    ComPtr<IBaseFilter> grabberFilter;
     hr = CoCreateInstance(CLSID_SampleGrabber, nullptr, CLSCTX_INPROC_SERVER,
-                          IID_PPV_ARGS(&pGrabberFilter));
+                          IID_PPV_ARGS(&grabberFilter));
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS CoCreateInstance(SampleGrabber) failed: 0x%08X", hr);
         return false;
     }
 
-    hr = m_pGraph->AddFilter(pGrabberFilter, L"Sample Grabber");
+    hr = m_pGraph->AddFilter(grabberFilter.Get(), L"Sample Grabber");
     if (FAILED(hr)) {
-        pGrabberFilter->Release();
         return false;
     }
 
-    hr = pGrabberFilter->QueryInterface(IID_ISampleGrabber, (void**)&m_pGrabber);
-    pGrabberFilter->Release();  // graph owns the ref now
+    // ISampleGrabber is the locally declared minimal interface (Win10+ SDK
+    // dropped it), so QI goes through its explicit IID — no __uuidof.
+    hr = grabberFilter->QueryInterface(
+        IID_ISampleGrabber, reinterpret_cast<void**>(m_pGrabber.ReleaseAndGetAddressOf()));
+    // grabberFilter releases on scope exit — the graph owns its reference now
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS QueryInterface(ISampleGrabber) failed: 0x%08X", hr);
         return false;
@@ -393,7 +378,7 @@ bool WebcamCaptureDS::BuildSkeleton() {
         return false;
     }
 
-    hr = m_pGraph->AddFilter(m_pNullRenderer, L"Null Renderer");
+    hr = m_pGraph->AddFilter(m_pNullRenderer.Get(), L"Null Renderer");
     if (FAILED(hr)) {
         FACELOGIN_ERROR(L"DS AddFilter(NullRenderer) failed: 0x%08X", hr);
         return false;
@@ -404,10 +389,9 @@ bool WebcamCaptureDS::BuildSkeleton() {
     hr = CoCreateInstance(CLSID_AVIDec, nullptr, CLSCTX_INPROC_SERVER,
                           IID_PPV_ARGS(&m_pDecoder));
     if (SUCCEEDED(hr)) {
-        hr = m_pGraph->AddFilter(m_pDecoder, L"AVI Decompressor");
+        hr = m_pGraph->AddFilter(m_pDecoder.Get(), L"AVI Decompressor");
         if (FAILED(hr)) {
-            m_pDecoder->Release();
-            m_pDecoder = nullptr;
+            m_pDecoder.Reset();
         }
     }
     if (FAILED(hr)) {
@@ -421,20 +405,18 @@ bool WebcamCaptureDS::ConnectCapture(IPin* pCaptureOut, IPin* pGrabberIn,
                                       bool preferDecoder) {
     m_directDecoder = false;
     if (m_pDecoder) {
-        IPin* pDecoderIn = nullptr;
-        IPin* pDecoderOut = nullptr;
+        ComPtr<IPin> decoderIn;
+        ComPtr<IPin> decoderOut;
         HRESULT directHr = VFW_E_TYPE_NOT_ACCEPTED;
         if (preferDecoder &&
-            GetPin(m_pDecoder, PINDIR_INPUT, &pDecoderIn) &&
-            GetPin(m_pDecoder, PINDIR_OUTPUT, &pDecoderOut)) {
-            directHr = m_pGraph->ConnectDirect(pCaptureOut, pDecoderIn, nullptr);
+            GetPin(m_pDecoder.Get(), PINDIR_INPUT, decoderIn) &&
+            GetPin(m_pDecoder.Get(), PINDIR_OUTPUT, decoderOut)) {
+            directHr = m_pGraph->ConnectDirect(pCaptureOut, decoderIn.Get(), nullptr);
             if (SUCCEEDED(directHr)) {
-                directHr = m_pGraph->ConnectDirect(pDecoderOut, pGrabberIn, nullptr);
+                directHr = m_pGraph->ConnectDirect(decoderOut.Get(), pGrabberIn, nullptr);
             }
             if (SUCCEEDED(directHr)) {
                 m_directDecoder = true;
-                pDecoderIn->Release();
-                pDecoderOut->Release();
                 return true;
             }
         }
@@ -442,7 +424,7 @@ bool WebcamCaptureDS::ConnectCapture(IPin* pCaptureOut, IPin* pGrabberIn,
         // Both ends must be disconnected, including the successful first
         // leg when the second fails. Never retry with a partially wired graph.
         bool disconnected = true;
-        for (IPin* pin : {pCaptureOut, pDecoderIn, pDecoderOut, pGrabberIn}) {
+        for (IPin* pin : {pCaptureOut, decoderIn.Get(), decoderOut.Get(), pGrabberIn}) {
             if (pin) {
                 const HRESULT hr = m_pGraph->Disconnect(pin);
                 if (FAILED(hr)) {
@@ -451,15 +433,12 @@ bool WebcamCaptureDS::ConnectCapture(IPin* pCaptureOut, IPin* pGrabberIn,
                 }
             }
         }
-        if (pDecoderIn) pDecoderIn->Release();
-        if (pDecoderOut) pDecoderOut->Release();
-        const HRESULT removeHr = m_pGraph->RemoveFilter(m_pDecoder);
+        const HRESULT removeHr = m_pGraph->RemoveFilter(m_pDecoder.Get());
         if (FAILED(removeHr)) {
             FACELOGIN_ERROR(L"DS decoder rollback RemoveFilter failed: 0x%08X", removeHr);
             return false;
         }
-        m_pDecoder->Release();
-        m_pDecoder = nullptr;
+        m_pDecoder.Reset();
         if (!disconnected) return false;
         if (preferDecoder) {
             FACELOGIN_DEBUG(L"DS: direct AVI connection unavailable: 0x%08X; "
@@ -488,13 +467,13 @@ bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height
 
     // Try to set resolution via IAMStreamConfig
     {
-        IPin* pCaptureOut = nullptr;
-        if (GetPin(pCapture, PINDIR_OUTPUT, &pCaptureOut)) {
-            IAMStreamConfig* pConfig = nullptr;
-            hr = pCaptureOut->QueryInterface(IID_PPV_ARGS(&pConfig));
+        ComPtr<IPin> captureOut;
+        if (GetPin(pCapture, PINDIR_OUTPUT, captureOut)) {
+            ComPtr<IAMStreamConfig> config;
+            hr = captureOut->QueryInterface(IID_PPV_ARGS(&config));
             if (SUCCEEDED(hr)) {
                 AM_MEDIA_TYPE* pmt = nullptr;
-                hr = pConfig->GetFormat(&pmt);
+                hr = config->GetFormat(&pmt);
                 if (SUCCEEDED(hr) && pmt) {
                     // Limit the shortcut to the native format measured in
                     // the A/B. RGB/MJPEG and unknown formats keep legacy wiring.
@@ -504,7 +483,7 @@ bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height
                         pVih->bmiHeader.biWidth  = width;
                         pVih->bmiHeader.biHeight = height;
                         pVih->bmiHeader.biSizeImage = width * height * 3;
-                        hr = pConfig->SetFormat(pmt);
+                        hr = config->SetFormat(pmt);
                         if (SUCCEEDED(hr))
                             FACELOGIN_DEBUG(L"DS: set capture format %dx%d", width, height);
                         else
@@ -513,9 +492,7 @@ bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height
                     FreeMediaType(*pmt);
                     CoTaskMemFree(pmt);
                 }
-                pConfig->Release();
             }
-            pCaptureOut->Release();
         }
     }
 
@@ -524,54 +501,39 @@ bool WebcamCaptureDS::AttachCapture(IBaseFilter* pCapture, int width, int height
     //    SampleGrabber output → Null Renderer input
     // This ensures data flows through the SampleGrabber so BufferCB fires.
     {
-        IPin* pGrabberIn  = nullptr;
-        IPin* pGrabberOut = nullptr;
-        IPin* pNullIn     = nullptr;
-        IBaseFilter* pGrabberFilter = nullptr;
-
         // The skeleton added the grabber under a known name; recover its
         // IBaseFilter from the graph for pin lookup.
-        hr = m_pGraph->FindFilterByName(L"Sample Grabber", &pGrabberFilter);
-        if (FAILED(hr) || !pGrabberFilter) {
+        ComPtr<IBaseFilter> grabberFilter;
+        hr = m_pGraph->FindFilterByName(L"Sample Grabber",
+                                        grabberFilter.GetAddressOf());
+        if (FAILED(hr) || !grabberFilter) {
             FACELOGIN_ERROR(L"DS: Sample Grabber filter missing from graph");
-            if (pGrabberFilter) pGrabberFilter->Release();
             return false;
         }
 
-        if (!GetPin(pGrabberFilter,  PINDIR_INPUT,  &pGrabberIn)  ||
-            !GetPin(pGrabberFilter,  PINDIR_OUTPUT, &pGrabberOut) ||
-            !GetPin(m_pNullRenderer, PINDIR_INPUT,  &pNullIn)) {
+        ComPtr<IPin> grabberIn;
+        ComPtr<IPin> grabberOut;
+        ComPtr<IPin> nullIn;
+        if (!GetPin(grabberFilter.Get(), PINDIR_INPUT, grabberIn) ||
+            !GetPin(grabberFilter.Get(), PINDIR_OUTPUT, grabberOut) ||
+            !GetPin(m_pNullRenderer.Get(), PINDIR_INPUT, nullIn)) {
             FACELOGIN_ERROR(L"DS: failed to get pins for graph connection");
-            pGrabberFilter->Release();
-            if (pGrabberIn) pGrabberIn->Release();
-            if (pGrabberOut) pGrabberOut->Release();
-            if (pNullIn) pNullIn->Release();
             return false;
         }
-        pGrabberFilter->Release();
 
-        IPin* pCaptureOut = nullptr;
-        if (!GetPin(pCapture, PINDIR_OUTPUT, &pCaptureOut)) {
+        ComPtr<IPin> captureOut;
+        if (!GetPin(pCapture, PINDIR_OUTPUT, captureOut)) {
             FACELOGIN_ERROR(L"DS: failed to get pins for graph connection");
-            pGrabberIn->Release(); pGrabberOut->Release(); pNullIn->Release();
             return false;
         }
 
         // Connect capture → grabber
-        const bool connected = ConnectCapture(pCaptureOut, pGrabberIn, preferDecoder);
-        pCaptureOut->Release();
-        if (!connected) {
-            pGrabberIn->Release();
-            pGrabberOut->Release();
-            pNullIn->Release();
+        if (!ConnectCapture(captureOut.Get(), grabberIn.Get(), preferDecoder)) {
             return false;
         }
-        pGrabberIn->Release();
 
         // Connect grabber → null renderer
-        hr = m_pGraph->Connect(pGrabberOut, pNullIn);
-        pGrabberOut->Release();
-        pNullIn->Release();
+        hr = m_pGraph->Connect(grabberOut.Get(), nullIn.Get());
         if (FAILED(hr)) {
             FACELOGIN_ERROR(L"DS Connect(grabber→null) failed: 0x%08X", hr);
             return false;
@@ -601,7 +563,7 @@ bool WebcamCaptureDS::Preload(const std::wstring& devicePath) {
         FACELOGIN_ERROR(L"DS: COM init failed (preload)");
         return false;
     }
-    if (!FindMoniker(devicePath, &m_pMoniker)) {
+    if (!FindMoniker(devicePath, m_pMoniker)) {
         ShutdownCOM();
         return false;
     }
@@ -619,13 +581,13 @@ bool WebcamCaptureDS::Preload(const std::wstring& devicePath) {
 }
 
 void WebcamCaptureDS::DiscardPreload() {
-    if (m_pControl) { m_pControl->Release(); m_pControl = nullptr; }
-    if (m_pGrabber) { m_pGrabber->Release(); m_pGrabber = nullptr; }
-    if (m_pNullRenderer) { m_pNullRenderer->Release(); m_pNullRenderer = nullptr; }
-    if (m_pCapture) { m_pCapture->Release(); m_pCapture = nullptr; }
-    if (m_pDecoder) { m_pDecoder->Release(); m_pDecoder = nullptr; }
-    if (m_pGraph) { m_pGraph->Release(); m_pGraph = nullptr; }
-    if (m_pMoniker) { m_pMoniker->Release(); m_pMoniker = nullptr; }
+    m_pControl.Reset();
+    m_pGrabber.Reset();
+    m_pNullRenderer.Reset();
+    m_pCapture.Reset();
+    m_pDecoder.Reset();
+    m_pGraph.Reset();
+    m_pMoniker.Reset();
     m_preloadDevicePath.clear();
     m_preloadValid = false;
     m_directDecoder = false;
@@ -649,17 +611,15 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
     // locked) re-enumerates; a preload mismatch or failure falls through to
     // the full legacy construction.
     if (m_preloadValid && devicePath == m_preloadDevicePath) {
-        if (BindMoniker(m_pMoniker, &m_pCapture)) {
+        if (BindMoniker(m_pMoniker.Get(), m_pCapture)) {
             // The activation is done; the moniker (a device-registry pointer)
             // is no longer needed while the graph streams.
-            m_pMoniker->Release();
-            m_pMoniker = nullptr;
+            m_pMoniker.Reset();
         } else {
             FACELOGIN_WARN(L"DS: preloaded moniker no longer binds — re-enumerating");
-            IMoniker* fresh = nullptr;
-            const bool rebound = FindMoniker(devicePath, &fresh) &&
-                                 BindMoniker(fresh, &m_pCapture);
-            if (fresh) fresh->Release();
+            ComPtr<IMoniker> fresh;
+            const bool rebound = FindMoniker(devicePath, fresh) &&
+                                 BindMoniker(fresh.Get(), m_pCapture);
             if (!rebound) DiscardPreload();
         }
     } else {
@@ -672,14 +632,14 @@ bool WebcamCaptureDS::Initialize(int preferredWidth, int preferredHeight,
         ShutdownCOM();
         return false;
     }
-    if (!m_pCapture && !FindCamera(devicePath, &m_pCapture)) {
+    if (!m_pCapture && !FindCamera(devicePath, m_pCapture)) {
         FACELOGIN_ERROR(L"DS: no camera found — check if camera is connected and "
                         L"drivers are installed.");
         DiscardPreload();
         ShutdownCOM();
         return false;
     }
-    if (!AttachCapture(m_pCapture, m_width, m_height)) {
+    if (!AttachCapture(m_pCapture.Get(), m_width, m_height)) {
         FACELOGIN_ERROR(L"DS: failed to build capture graph");
         DiscardPreload();
         ShutdownCOM();
@@ -793,39 +753,35 @@ bool WebcamCaptureDS::GrabFrame(FrameImage& outFrame, unsigned long long* frameS
 bool WebcamCaptureDS::GetGainRange(long* pMin, long* pMax, long* pStep) {
     *pMin = *pMax = *pStep = 0;
     if (!m_pCapture) return false;
-    IAMVideoProcAmp* procAmp = nullptr;
-    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
+    ComPtr<IAMVideoProcAmp> procAmp;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))))
         return false;
     long def = 0, caps = 0;
-    const bool ok = SUCCEEDED(procAmp->GetRange(VideoProcAmp_Gain,
-                                                pMin, pMax, pStep, &def, &caps));
-    procAmp->Release();
-    return ok;
+    return SUCCEEDED(procAmp->GetRange(VideoProcAmp_Gain,
+                                       pMin, pMax, pStep, &def, &caps));
 }
 
 bool WebcamCaptureDS::GetGain(long* pValue, bool* pManual) {
     *pValue = 0;
     if (pManual) *pManual = false;
     if (!m_pCapture) return false;
-    IAMVideoProcAmp* procAmp = nullptr;
-    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
+    ComPtr<IAMVideoProcAmp> procAmp;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))))
         return false;
     long flags = 0;
     const bool ok = SUCCEEDED(procAmp->Get(VideoProcAmp_Gain, pValue, &flags));
     if (ok && pManual) *pManual = (flags & VideoProcAmp_Flags_Manual) != 0;
-    procAmp->Release();
     return ok;
 }
 
 bool WebcamCaptureDS::SetGain(long value, bool manual) {
     if (!m_pCapture) return false;
-    IAMVideoProcAmp* procAmp = nullptr;
-    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))) || !procAmp)
+    ComPtr<IAMVideoProcAmp> procAmp;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&procAmp))))
         return false;
-    const bool ok = SUCCEEDED(procAmp->Set(VideoProcAmp_Gain, value,
-                                             manual ? VideoProcAmp_Flags_Manual : VideoProcAmp_Flags_Auto));
-    procAmp->Release();
-    return ok;
+    return SUCCEEDED(procAmp->Set(VideoProcAmp_Gain, value,
+                                  manual ? VideoProcAmp_Flags_Manual
+                                         : VideoProcAmp_Flags_Auto));
 }
 
 // Exposure time lives on IAMCameraControl (a separate interface from the
@@ -833,77 +789,56 @@ bool WebcamCaptureDS::SetGain(long value, bool manual) {
 bool WebcamCaptureDS::GetExposureRange(long* pMin, long* pMax, long* pStep) {
     *pMin = *pMax = *pStep = 0;
     if (!m_pCapture) return false;
-    IAMCameraControl* camCtrl = nullptr;
-    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
+    ComPtr<IAMCameraControl> camCtrl;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))))
         return false;
     long def = 0, caps = 0;
-    const bool ok = SUCCEEDED(camCtrl->GetRange(CameraControl_Exposure,
-                                                pMin, pMax, pStep, &def, &caps));
-    camCtrl->Release();
-    return ok;
+    return SUCCEEDED(camCtrl->GetRange(CameraControl_Exposure,
+                                       pMin, pMax, pStep, &def, &caps));
 }
 
 bool WebcamCaptureDS::GetExposure(long* pValue, bool* pManual) {
     *pValue = 0;
     if (pManual) *pManual = false;
     if (!m_pCapture) return false;
-    IAMCameraControl* camCtrl = nullptr;
-    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
+    ComPtr<IAMCameraControl> camCtrl;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))))
         return false;
     long flags = 0;
     const bool ok = SUCCEEDED(camCtrl->Get(CameraControl_Exposure, pValue, &flags));
     if (ok && pManual) *pManual = (flags & CameraControl_Flags_Manual) != 0;
-    camCtrl->Release();
     return ok;
 }
 
 bool WebcamCaptureDS::SetExposure(long value, bool manual) {
     if (!m_pCapture) return false;
-    IAMCameraControl* camCtrl = nullptr;
-    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))) || !camCtrl)
+    ComPtr<IAMCameraControl> camCtrl;
+    if (FAILED(m_pCapture->QueryInterface(IID_PPV_ARGS(&camCtrl))))
         return false;
-    const bool ok = SUCCEEDED(camCtrl->Set(CameraControl_Exposure, value,
-                                            manual ? CameraControl_Flags_Manual : CameraControl_Flags_Auto));
-    camCtrl->Release();
-    return ok;
+    return SUCCEEDED(camCtrl->Set(CameraControl_Exposure, value,
+                                  manual ? CameraControl_Flags_Manual
+                                         : CameraControl_Flags_Auto));
 }
 
 void WebcamCaptureDS::Shutdown() {
     // Stop streaming first so BufferCB stops firing
     if (m_pControl) {
         m_pControl->Stop();
-        m_pControl->Release();
-        m_pControl = nullptr;
     }
+    m_pControl.Reset();
 
     // Break the callback reference before releasing the graph. Relying on the
     // filter's final destruction to detach it retained callback/filter state on
     // some camera drivers across repeated auth cycles.
     if (m_pGrabber) {
         m_pGrabber->SetCallback(nullptr, 1);
-        m_pGrabber->Release();
-        m_pGrabber = nullptr;
     }
-    if (m_pNullRenderer) {
-        m_pNullRenderer->Release();
-        m_pNullRenderer = nullptr;
-    }
-    if (m_pCapture) {
-        m_pCapture->Release();
-        m_pCapture = nullptr;
-    }
-    if (m_pDecoder) {
-        m_pDecoder->Release();
-        m_pDecoder = nullptr;
-    }
-    if (m_pGraph) {
-        m_pGraph->Release();
-        m_pGraph = nullptr;
-    }
-    if (m_pMoniker) {
-        m_pMoniker->Release();
-        m_pMoniker = nullptr;
-    }
+    m_pGrabber.Reset();
+    m_pNullRenderer.Reset();
+    m_pCapture.Reset();
+    m_pDecoder.Reset();
+    m_pGraph.Reset();
+    m_pMoniker.Reset();
     m_preloadDevicePath.clear();
     m_preloadValid = false;
     m_directDecoder = false;

@@ -1,6 +1,7 @@
 #include "credential_store.h"
 #include "../common/logger.h"
 #include "../common/dpapi_util.h"
+#include "../common/embedding_math.h"
 #include <shlobj.h>
 #include <fstream>
 #include <algorithm>
@@ -577,12 +578,8 @@ std::optional<CredentialStore::IdentityMatch> CredentialStore::FindBestIdentity(
             // R50 and SFace have different dimensions and metric spaces.
             if (face.embedding.size() != probeDim) continue;
 
-            float sum = 0.0f;
-            for (size_t j = 0; j < probeDim; j++) {
-                float diff = probeEmbedding[j] - face.embedding[j];
-                sum += diff * diff;
-            }
-            float dist = std::sqrt(sum);
+            const float dist = static_cast<float>(
+                EuclideanDistance(probeEmbedding, face.embedding.data(), probeDim));
 
             if (dist < accountBest) {
                 accountSecond = accountBest;
@@ -671,17 +668,13 @@ CredentialStore::GetAccountFaceDistances(const std::wstring& sid,
         // Same dimensionality rule as FindBestIdentity: a non-comparable
         // embedding belongs to a different metric space and has no distance.
         if (face.embedding.size() != probeDim) continue;
-        float sum = 0.0f;
-        for (size_t j = 0; j < probeDim; j++) {
-            float diff = probeEmbedding[j] - face.embedding[j];
-            sum += diff * diff;
-        }
         AccountFaceDistance& d = out.emplace_back();
         d.faceId = face.id;
         d.label = face.label;
         d.nominalYaw = face.nominalYaw;
         d.nominalPitch = face.nominalPitch;
-        d.distance = std::sqrt(sum);
+        d.distance = static_cast<float>(
+            EuclideanDistance(probeEmbedding, face.embedding.data(), probeDim));
     }
     return out;
 }
@@ -722,12 +715,8 @@ bool CredentialStore::UpdateTemplateFace(const std::wstring& sid, uint32_t faceI
             const auto& a = faces[i].embedding;
             const auto& b = faces[j].embedding;
             if (a.size() != b.size() || a.empty()) continue;
-            float sum = 0.0f;
-            for (size_t k = 0; k < a.size(); k++) {
-                float diff = a[k] - b[k];
-                sum += diff * diff;
-            }
-            float dist = std::sqrt(sum);
+            const float dist = static_cast<float>(
+                EuclideanDistance(a.data(), b.data(), a.size()));
             if (minPairDist < 0.0f || dist < minPairDist) {
                 minPairDist = dist;
                 pairA = faces[i].id;

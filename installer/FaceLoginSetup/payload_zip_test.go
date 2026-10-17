@@ -7,6 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"sort"
 	"testing"
 
 	"FaceLoginSetup/internal"
@@ -16,8 +19,9 @@ import (
 // fs.FS view as the old uncompressed embed (explicit directory entries with
 // the "resources/..." prefix — scripts/make_payload.ps1 uses .NET ZipFile
 // precisely because Compress-Archive writes no directory entries and would
-// break ReadDir), and extracting it must yield models whose SHA-256s match
-// the calibration-critical hashes.
+// break ReadDir), and its contents must match the payload allow-list
+// (internal/payload_manifest.txt) file for file — the same list the
+// uninstaller's static manifest is derived from.
 func TestPayloadZipExtractionChain(t *testing.T) {
 	internal.EmbeddedFS = resources
 
@@ -25,17 +29,14 @@ func TestPayloadZipExtractionChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir resources: %v", err)
 	}
-	files := 0
 	hasModelsDir := false
+	var zipRoot []string
 	for _, e := range entries {
 		if e.IsDir() {
 			hasModelsDir = hasModelsDir || e.Name() == "models"
 			continue
 		}
-		files++
-	}
-	if files < 9 { // 3 product binaries + uninstall.exe + 5 runtime DLLs
-		t.Errorf("expected at least 9 root payload files, got %d", files)
+		zipRoot = append(zipRoot, e.Name())
 	}
 	if !hasModelsDir {
 		t.Error("resources/models directory not enumerable — zip lost its directory entries?")
@@ -45,8 +46,28 @@ func TestPayloadZipExtractionChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir resources/models: %v", err)
 	}
-	if len(models) != 4 {
-		t.Errorf("expected 4 models, got %d", len(models))
+	var zipModels []string
+	for _, e := range models {
+		if !e.IsDir() {
+			zipModels = append(zipModels, e.Name())
+		}
+	}
+
+	// Zip contents ↔ allow-list equality: an entry on either side alone
+	// means a stale zip or a half-updated manifest.
+	sort.Strings(zipRoot)
+	wantRoot := slices.Clone(internal.PayloadManifestRootFiles())
+	sort.Strings(wantRoot)
+	if !reflect.DeepEqual(zipRoot, wantRoot) {
+		t.Errorf("payload.zip root files != payload manifest:\n zip:    %v\n manifest: %v",
+			zipRoot, wantRoot)
+	}
+	sort.Strings(zipModels)
+	wantModels := slices.Clone(internal.PayloadManifestModelFiles())
+	sort.Strings(wantModels)
+	if !reflect.DeepEqual(zipModels, wantModels) {
+		t.Errorf("payload.zip models != payload manifest:\n zip:    %v\n manifest: %v",
+			zipModels, wantModels)
 	}
 
 	dest := t.TempDir()

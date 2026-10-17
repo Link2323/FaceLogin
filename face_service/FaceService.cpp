@@ -7,6 +7,10 @@
 #include "../common/config_util.h"
 #include "../common/data_path.h"
 #include "../common/secure_clear.h"
+#include "../common/text_util.h"
+#include "../common/json_util.h"
+#include "../common/embedding_math.h"
+#include "../common/time_util.h"
 #include <shlobj.h>
 #include <algorithm>
 #include <chrono>
@@ -21,16 +25,6 @@
 namespace facelogin {
 
 static constexpr wchar_t SERVICE_NAME[] = L"FaceLoginService";
-
-// UTF-8 → wide string, for passing config.camera_device to the camera backends.
-static std::wstring Utf8ToWstr(const std::string& s) {
-    if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    if (len <= 0) return L"";
-    std::wstring ws(len - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
-    return ws;
-}
 
 // Decide whether the service should preload models immediately. At the sign-in
 // screen or an already-locked console we preserve cold-logon responsiveness;
@@ -198,14 +192,12 @@ DWORD WINAPI FaceService::HandlerEx(DWORD control, DWORD eventType,
 static void LogTemplateNorms(const CredentialStore& store, const wchar_t* when) {
     for (const auto& u : store.GetUsers()) {
         for (const auto& f : u.faces) {
-            double sq = 0.0;
-            for (float v : f.embedding) sq += static_cast<double>(v) * v;
             const wchar_t* cone = IsValidNominalAngle(f.nominalYaw)
                 ? L"cone on" : L"no cone";
             FACELOGIN_INFO(L"Template stats [%s]: user=%s face#%u(%s) dim=%zu "
                            L"norm=%.4f nominalYaw=%.0f nominalPitch=%.0f (%s)",
                            when, u.username.c_str(), f.id, f.label.c_str(),
-                           f.embedding.size(), std::sqrt(sq),
+                           f.embedding.size(), L2Norm(f.embedding),
                            f.nominalYaw, f.nominalPitch, cone);
         }
     }
@@ -217,9 +209,7 @@ static void LogTemplateNorms(const CredentialStore& store, const wchar_t* when) 
 // best-effort and must never block the write path).
 void FaceService::FlushLearnedTemplates() {
     if (!m_store) return;
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    const int today = static_cast<int>(st.wYear) * 10000 + st.wMonth * 100 + st.wDay;
+    const int today = LocalDayStamp();
     EnterCriticalSection(&m_storeLock);
     if (m_learningBakDay != today) {
         m_learningBakDay = today;
@@ -251,23 +241,6 @@ void FaceService::SubmitLearningCandidate(const LearningSample& best) {
 // printing): the public pipe has no fragmentation, so the payload has to
 // stay well inside the client's fixed read buffer.
 std::wstring FaceService::BuildLearningStatusJson() {
-    auto jsonEscape = [](const std::wstring& s) {
-        std::wstring out;
-        out.reserve(s.size() + 2);
-        for (wchar_t c : s) {
-            if (c == L'"' || c == L'\\') {
-                out.push_back(L'\\');
-                out.push_back(c);
-            } else if (c < 0x20) {
-                wchar_t buf[8];
-                swprintf_s(buf, L"\\u%04x", static_cast<unsigned>(c));
-                out += buf;
-            } else {
-                out.push_back(c);
-            }
-        }
-        return out;
-    };
     auto localTime = [](std::chrono::system_clock::time_point tp,
                         wchar_t* buf, size_t len) {
         const std::time_t tt = std::chrono::system_clock::to_time_t(tp);
@@ -298,9 +271,9 @@ std::wstring FaceService::BuildLearningStatusJson() {
             // Slot-level era window (2026-09-05): the p20 of THIS slot's
             // processed distances, or -1 while it holds fewer than 5 entries
             // (the gate then falls back to the account's pooled window).
-            ss << L"{\"user\":\"" << jsonEscape(st.username) << L"\""
+            ss << L"{\"user\":\"" << JsonEscape(st.username) << L"\""
                << L",\"face\":" << st.faceId
-               << L",\"label\":\"" << jsonEscape(st.faceLabel) << L"\""
+               << L",\"label\":\"" << JsonEscape(st.faceLabel) << L"\""
                << L",\"total\":" << st.acceptedTotal
                << L",\"today\":" << st.acceptedToday
                << L",\"last\":\"" << last << L"\""
@@ -320,9 +293,9 @@ std::wstring FaceService::BuildLearningStatusJson() {
             wchar_t t[24] = L"";
             localTime(ev.time, t, 24);
             ss << L"{\"t\":\"" << t << L"\""
-               << L",\"user\":\"" << jsonEscape(ev.username) << L"\""
+               << L",\"user\":\"" << JsonEscape(ev.username) << L"\""
                << L",\"face\":" << ev.faceId
-               << L",\"label\":\"" << jsonEscape(ev.faceLabel) << L"\""
+               << L",\"label\":\"" << JsonEscape(ev.faceLabel) << L"\""
                << L",\"ok\":" << (ev.accepted ? L"true" : L"false")
                << L",\"reason\":\"" << (ev.reason ? ev.reason : L"") << L"\""
                << L",\"d\":" << ev.distance

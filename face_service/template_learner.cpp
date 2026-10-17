@@ -1,6 +1,8 @@
 #include "template_learner.h"
 
 #include "../common/logger.h"
+#include "../common/embedding_math.h"
+#include "../common/time_util.h"
 #include "../vision/face_align.h"
 
 #include <algorithm>
@@ -11,19 +13,6 @@
 namespace facelogin {
 
 namespace {
-
-float L2Norm(const std::vector<float>& v) {
-    double sum = 0.0;
-    for (float x : v) sum += static_cast<double>(x) * x;
-    return static_cast<float>(std::sqrt(sum));
-}
-
-// Local calendar day as yyyymmdd — the α decay counter resets at midnight.
-int LocalDayStamp() {
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    return static_cast<int>(st.wYear) * 10000 + st.wMonth * 100 + st.wDay;
-}
 
 // Nearest-rank p20 of a non-empty distance window (the conventional
 // percentile the adaptive gate has always used).
@@ -123,12 +112,10 @@ std::vector<float> TemplateLearner::BlendEMA(const std::vector<float>& tmpl,
                                              float alpha) {
     if (tmpl.size() != sample.size() || tmpl.empty()) return {};
     std::vector<float> out(tmpl.size());
-    double sum = 0.0;
     for (size_t i = 0; i < tmpl.size(); i++) {
         out[i] = alpha * sample[i] + (1.0f - alpha) * tmpl[i];
-        sum += static_cast<double>(out[i]) * out[i];
     }
-    const double norm = std::sqrt(sum);
+    const double norm = L2Norm(out);
     if (norm > 1e-12) {
         for (float& v : out) v = static_cast<float>(v / norm);
     }
@@ -255,13 +242,9 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
     // stricter than a gate on the matched distance — the poisoning bound
     // still refers to the template actually being blended.
     if (poseSelected) {
-        double sum = 0.0;
         const size_t n = std::min(snapshot.embedding.size(), eff.embedding.size());
-        for (size_t i = 0; i < n; i++) {
-            const double diff = eff.embedding[i] - snapshot.embedding[i];
-            sum += diff * diff;
-        }
-        eff.distance = static_cast<float>(std::sqrt(sum));
+        eff.distance = static_cast<float>(
+            EuclideanDistance(eff.embedding.data(), snapshot.embedding.data(), n));
     }
     // Red line 1 (2026-09-05 per-slot revision): the effective gate follows
     // the TARGET slot's own era distribution; while that window is still
@@ -364,8 +347,8 @@ void TemplateLearner::ApplySample(const LearningSample& sample) {
         return;
     }
 
-    const float oldNorm = L2Norm(tmpl);
-    const float newNorm = L2Norm(blended);
+    const float oldNorm = static_cast<float>(L2Norm(tmpl));
+    const float newNorm = static_cast<float>(L2Norm(blended));
     if (!m_hooks.commit(eff, blended, alphaUsed)) {
         // The target vanished between fetch and commit — logged upstream.
         // Deliberately no retry: the next auth round re-derives.

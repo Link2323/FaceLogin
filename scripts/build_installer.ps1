@@ -74,15 +74,24 @@ $npm = Find-Tool "npm.cmd" ""
 # to a protected user profile. Honor an explicitly configured cache.
 if (-not $env:NPM_CONFIG_CACHE) { $env:NPM_CONFIG_CACHE = Join-Path $root "build/npm-cache" }
 
-# Exactly the payload allow-list from docs/BUILD.md — anything else in
-# resources/ ends up inside payload.zip and ships.
-$rootAllow = @(
-    "FaceLoginService.exe", "FaceLoginCredentialProvider.dll", "FaceLoginConsole.exe",
-    "uninstall.exe", "onnxruntime.dll", "libprotobuf.dll", "libprotobuf-lite.dll",
-    "re2.dll", "abseil_dll.dll",
-    "LICENSE.txt", "THIRD_PARTY_NOTICES.txt", "MODEL_LICENSES.txt"
-)
-$modelAllow = @("det_10g_gnkps.onnx", "face_recognition_sface_2021dec.onnx", "MiniFASNetV2.onnx", "MiniFASNetV1SE.onnx")
+# Payload allow-list, single source: internal/payload_manifest.txt (also
+# embedded by the Go installer as its static uninstall manifest). Anything
+# else in resources/ ends up inside payload.zip and ships — step 3 prunes.
+$manifestPath = Join-Path $inst "internal/payload_manifest.txt"
+$payloadAllow = @()
+foreach ($line in Get-Content -LiteralPath $manifestPath) {
+    $entry = $line.Trim()
+    if ($entry -and -not $entry.StartsWith('#')) { $payloadAllow += $entry }
+}
+$rootAllow  = @($payloadAllow | Where-Object { -not $_.Contains('/') })
+$modelAllow = @($payloadAllow | Where-Object { $_.StartsWith('models/') } |
+                ForEach-Object { $_.Substring('models/'.Length) })
+if ($payloadAllow.Count -ne ($rootAllow.Count + $modelAllow.Count)) {
+    throw "payload_manifest.txt has an entry outside root/ or models/: $manifestPath"
+}
+if ($rootAllow.Count -eq 0 -or $modelAllow.Count -eq 0) {
+    throw "payload_manifest.txt parse failed (empty root or model list): $manifestPath"
+}
 
 $total = [System.Diagnostics.Stopwatch]::StartNew()
 function Step([string]$Title, [scriptblock]$Body) {

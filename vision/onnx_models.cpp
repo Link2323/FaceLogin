@@ -2,6 +2,7 @@
 #include "face_align.h"
 #include "../common/logger.h"
 #include "../common/recognizer_profile.h"
+#include "../common/embedding_math.h"
 #include <fstream>
 #include <algorithm>
 #include <array>
@@ -175,17 +176,13 @@ std::vector<float> OnnxRecognizer::ComputeEmbedding(
         std::vector<float> embedding(data, data + dim);
 
         // L2 normalize
-        float norm = 0.0f;
         for (float v : embedding) {
             if (!std::isfinite(v)) return {};
-            norm += v * v;
         }
-        norm = std::sqrt(norm);
+        const float norm = static_cast<float>(L2Norm(embedding));
         if (!std::isfinite(norm) || norm <= 1e-8f) return {};
         if (outPreNorm) *outPreNorm = norm;
-        if (norm > 1e-8f) {
-            for (float& v : embedding) v /= norm;
-        }
+        for (float& v : embedding) v /= norm;
 
         return embedding;
     } catch (const std::exception& e) {
