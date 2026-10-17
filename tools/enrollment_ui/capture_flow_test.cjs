@@ -4,16 +4,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-// Mirrors ENROLLMENT_JS_SOURCES in enrollment_app/CMakeLists.txt — the files
-// are evaluated one by one here, so app_main.js (the composition root and the
-// only file with executable top-level code) must stay last; it builds the app
-// against these mocks and leaves it on the context as consoleApp. Keep both
-// lists in sync.
-const PAGE_SOURCES = [
-  'capture_flow.js', 'ui_common.js', 'preview.js', 'capture_ui.js',
-  'navigation.js', 'settings.js', 'faces.js', 'account_refresh.js',
-  'enroll_save.js', 'logs.js', 'app_main.js'
-];
+// The page file list is parsed from ENROLLMENT_JS_SOURCES in
+// enrollment_app/CMakeLists.txt — the single source of truth. The files are
+// evaluated one by one here in that build order (concatenation order IS the
+// script's dependency order), so app_main.js (the composition root and the
+// only file with executable top-level code) must stay last in the CMake
+// list; it builds the app against these mocks and leaves it on the context
+// as consoleApp. Renaming/removing a module breaks this parse loudly, so no
+// parallel list to keep in sync.
+const CMAKE_JS_LIST = fs.readFileSync(
+  path.join(__dirname, '../../enrollment_app/CMakeLists.txt'), 'utf8'
+).match(/set\(ENROLLMENT_JS_SOURCES\s*([^)]*)\)/);
+assert.ok(CMAKE_JS_LIST, 'ENROLLMENT_JS_SOURCES not found in enrollment_app/CMakeLists.txt');
+const PAGE_SOURCES = [...CMAKE_JS_LIST[1].matchAll(/js\/([\w.-]+\.js)/g)].map(m => m[1]);
 
 function fixture() {
   let id = 0;

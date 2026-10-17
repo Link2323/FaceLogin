@@ -20,7 +20,7 @@ namespace facelogin {
 //
 // Lifecycle:
 //   1. ServiceMain called by SCM
-//   2. HandlerEx handles start/stop/pause
+//   2. HandlerEx handles stop/shutdown and session-change events
 //   3. Run() is the main loop: accept pipe connections, process auth requests
 //
 // The face recognition pipeline:
@@ -111,15 +111,14 @@ private:
     std::unique_ptr<TemplateLearner> m_learner;
     int m_learningBakDay = 0;   // local yyyymmdd of the last users.dat.bak
 
-    // Configuration
+    // Configuration. Single source of truth: mirror members were removed —
+    // readers go through m_config directly (all reads and the CONFIG_RELOAD
+    // write happen on the public-pipe thread; the auth deadline constant is
+    // ipc::AUTH_TIMEOUT_SECONDS).
     AppConfig m_config;
-    float m_antiSpoofThreshold = 0.28f;
 
-    // Settings
     std::wstring m_dataDir;
     std::wstring m_modelsDir;
-    float m_matchThreshold = 0.30f;
-    int m_authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
 
     AuthenticationResidency m_residency;
 

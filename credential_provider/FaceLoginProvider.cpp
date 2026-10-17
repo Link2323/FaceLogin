@@ -17,38 +17,36 @@ extern const GUID CLSID_FaceLoginProvider;
 FaceLoginProvider::FaceLoginProvider() {
     // Define fields for our credential tile (no tile image — text only)
 
-    // Field 0: Large text ("人脸登录")
-    m_rgFieldDescriptors[0].dwFieldID = 0;
-    m_rgFieldDescriptors[0].cpft = CPFT_LARGE_TEXT;
-    m_rgFieldDescriptors[0].pszLabel = const_cast<LPWSTR>(L"人脸登录");
-    m_rgFieldDescriptors[0].guidFieldType = GUID_NULL;
+    m_rgFieldDescriptors[kFieldTitle].dwFieldID = kFieldTitle;
+    m_rgFieldDescriptors[kFieldTitle].cpft = CPFT_LARGE_TEXT;
+    m_rgFieldDescriptors[kFieldTitle].pszLabel = const_cast<LPWSTR>(L"人脸登录");
+    m_rgFieldDescriptors[kFieldTitle].guidFieldType = GUID_NULL;
 
-    // Field 1: Small text (status message)
-    m_rgFieldDescriptors[1].dwFieldID = 1;
-    m_rgFieldDescriptors[1].cpft = CPFT_SMALL_TEXT;
-    m_rgFieldDescriptors[1].pszLabel = const_cast<LPWSTR>(L"状态");
-    m_rgFieldDescriptors[1].guidFieldType = GUID_NULL;
+    m_rgFieldDescriptors[kFieldStatus].dwFieldID = kFieldStatus;
+    m_rgFieldDescriptors[kFieldStatus].cpft = CPFT_SMALL_TEXT;
+    m_rgFieldDescriptors[kFieldStatus].pszLabel = const_cast<LPWSTR>(L"状态");
+    m_rgFieldDescriptors[kFieldStatus].guidFieldType = GUID_NULL;
 
-    // Field 2: Submit button (hidden, auto-logon handles submission)
-    m_rgFieldDescriptors[2].dwFieldID = 2;
-    m_rgFieldDescriptors[2].cpft = CPFT_SUBMIT_BUTTON;
-    m_rgFieldDescriptors[2].pszLabel = const_cast<LPWSTR>(L"提交");
-    m_rgFieldDescriptors[2].guidFieldType = GUID_NULL;
+    // Submit button (hidden, auto-logon handles submission)
+    m_rgFieldDescriptors[kFieldSubmit].dwFieldID = kFieldSubmit;
+    m_rgFieldDescriptors[kFieldSubmit].cpft = CPFT_SUBMIT_BUTTON;
+    m_rgFieldDescriptors[kFieldSubmit].pszLabel = const_cast<LPWSTR>(L"提交");
+    m_rgFieldDescriptors[kFieldSubmit].guidFieldType = GUID_NULL;
 
-    // Field 3: Command link (switch to password)
-    m_rgFieldDescriptors[3].dwFieldID = 3;
-    m_rgFieldDescriptors[3].cpft = CPFT_COMMAND_LINK;
-    m_rgFieldDescriptors[3].pszLabel = const_cast<LPWSTR>(L"切换到密码登录");
-    m_rgFieldDescriptors[3].guidFieldType = GUID_NULL;
+    // Command link (switch to password)
+    m_rgFieldDescriptors[kFieldSwitchLink].dwFieldID = kFieldSwitchLink;
+    m_rgFieldDescriptors[kFieldSwitchLink].cpft = CPFT_COMMAND_LINK;
+    m_rgFieldDescriptors[kFieldSwitchLink].pszLabel = const_cast<LPWSTR>(L"切换到密码登录");
+    m_rgFieldDescriptors[kFieldSwitchLink].guidFieldType = GUID_NULL;
 
-    // Field 4: Small text — the "请按任意键重试" hint line on failure tiles.
+    // Small text — the "请按任意键重试" hint line on failure tiles.
     // Tile text fields do not render "\r\n" as a line break (装机实测
     // 2026-08-29), so the two-line layout (reason / hint) needs its own
     // field instead of an embedded newline in the status text.
-    m_rgFieldDescriptors[4].dwFieldID = 4;
-    m_rgFieldDescriptors[4].cpft = CPFT_SMALL_TEXT;
-    m_rgFieldDescriptors[4].pszLabel = const_cast<LPWSTR>(L"重试提示");
-    m_rgFieldDescriptors[4].guidFieldType = GUID_NULL;
+    m_rgFieldDescriptors[kFieldRetryHint].dwFieldID = kFieldRetryHint;
+    m_rgFieldDescriptors[kFieldRetryHint].cpft = CPFT_SMALL_TEXT;
+    m_rgFieldDescriptors[kFieldRetryHint].pszLabel = const_cast<LPWSTR>(L"重试提示");
+    m_rgFieldDescriptors[kFieldRetryHint].guidFieldType = GUID_NULL;
 }
 
 FaceLoginProvider::~FaceLoginProvider() {

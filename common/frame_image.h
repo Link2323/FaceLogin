@@ -35,6 +35,13 @@ struct RgbPixel {
 };
 static_assert(sizeof(RgbPixel) == 3, "RgbPixel must be tightly packed (like dlib::rgb_pixel)");
 
+// Rec.601 luma — the one brightness formula the vision pipeline uses
+// (exposure warmup, scene whiteout/darkness heuristics). Kept here next to
+// the pixel type so the coefficients exist exactly once.
+constexpr double Rec601Luma(const RgbPixel& p) {
+    return 0.299 * p.red + 0.587 * p.green + 0.114 * p.blue;
+}
+
 // Integer rectangle, dlib::rectangle convention: right/bottom INCLUSIVE,
 // default-constructed is empty (left > right). Member-FUNCTION API mirrors
 // dlib::rectangle (left()/top()/right()/bottom()/width()/height()/is_empty())

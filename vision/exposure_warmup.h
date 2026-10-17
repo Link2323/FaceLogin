@@ -81,7 +81,7 @@ inline float MeanLuma(const FrameImage& image) {
     for (long r = 0; r < image.nr(); r += 4) {
         for (long c = 0; c < image.nc(); c += 4) {
             const RgbPixel& px = image(r, c);
-            sum += 0.299 * px.red + 0.587 * px.green + 0.114 * px.blue;
+            sum += Rec601Luma(px);
             ++count;
         }
     }

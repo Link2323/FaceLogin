@@ -103,6 +103,7 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	// Step 1: Stop and delete existing service
 	a.emit(0, "停止并删除已有服务", "running", "")
 	if err = internal.StopAndDeleteService(); err != nil {
+		a.emit(0, "停止并删除已有服务", "fail", err.Error())
 		return result(false, err.Error())
 	}
 	a.emit(12, "停止并删除已有服务", "done", "")
@@ -126,6 +127,7 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	// Step 2: Create directories
 	a.emit(12, "创建目标目录", "running", "")
 	if err = os.MkdirAll(installDir, 0755); err != nil {
+		a.emit(12, "创建目标目录", "fail", err.Error())
 		return result(false, err.Error())
 	}
 	a.emit(25, "创建目标目录", "done", "")
@@ -143,9 +145,11 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	// Step 3: Write registry paths — DataPath is the install dir itself, C++ appends \models
 	a.emit(30, "配置注册表路径", "running", "")
 	if err = internal.WriteRegString(REGVAL_INSTALL_PATH, installDir); err != nil {
+		a.emit(30, "配置注册表路径", "fail", err.Error())
 		return result(false, fmt.Sprintf("写入安装路径失败: %v", err))
 	}
 	if err = internal.WriteRegString(REGVAL_DATA_PATH, installDir); err != nil {
+		a.emit(30, "配置注册表路径", "fail", err.Error())
 		return result(false, fmt.Sprintf("写入数据路径失败: %v", err))
 	}
 	a.emit(35, "配置注册表路径", "done", "")
@@ -155,22 +159,23 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	// redirection. Failure is fatal — an unprotected key leaves the data
 	// directory redirectable, which the C++ allow-list alone only partially
 	// mitigates.
-	a.emit(36, "保护注册表", "running", "")
+	a.emit(35, "保护注册表", "running", "")
 	if err = internal.SetRegistryKeyACL(); err != nil {
-		a.emit(36, "保护注册表", "fail", err.Error())
+		a.emit(35, "保护注册表", "fail", err.Error())
 		return result(false, fmt.Sprintf("注册表安全保护失败: %v", err))
 	}
-	a.emit(38, "保护注册表", "done", "")
+	a.emit(36, "保护注册表", "done", "")
 
 	// Step 4: Extract all embedded resources
-	a.emit(35, "复制文件", "running", "")
+	a.emit(36, "复制文件", "running", "")
 	if err = internal.ExtractAll(installDir, func(step, total int, name string) {
-		a.emit(35+step*25/total, "复制文件", "running", name)
+		a.emit(36+step*24/total, "复制文件", "running", name)
 	}); err != nil {
+		a.emit(36, "复制文件", "fail", err.Error())
 		return result(false, fmt.Sprintf("复制文件失败: %v", err))
 	}
 	if err = internal.ValidateInstalledModels(installDir); err != nil {
-		a.emit(30, "校验已复制模型", "fail", err.Error())
+		a.emit(60, "校验已复制模型", "fail", err.Error())
 		return result(false, fmt.Sprintf("模型文件校验失败: %v", err))
 	}
 	// Step 4.5: Create data/ and log/ directories, ensure config.json defaults
@@ -225,13 +230,10 @@ func (a *App) Install(installDir string) map[string]interface{} {
 	}
 	a.emit(90, "安装并启动认证服务", "done", "")
 
-	// Step 8: Finalize
-	enrollDest := filepath.Join(installDir, "FaceLoginConsole.exe")
-	_ = internal.ExtractResource("resources/FaceLoginConsole.exe", enrollDest)
-
-	// Step 9: Register in Add/Remove Programs. uninstall.exe itself is part
-	// of the payload (ExtractAll deployed it); the entry only points at it.
-	// Failure here leaves the install fully functional — warn, don't fail.
+	// Step 8: Register in Add/Remove Programs. uninstall.exe and
+	// FaceLoginConsole.exe are part of the payload (ExtractAll deployed them
+	// per the manifest); the entry only points at the uninstaller. Failure
+	// here leaves the install fully functional — warn, don't fail.
 	if entryErr := internal.WriteUninstallEntry(installDir, appVersion); entryErr != nil {
 		a.emit(100, "完成", "warn", "写入应用列表条目失败："+entryErr.Error())
 	}

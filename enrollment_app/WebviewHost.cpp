@@ -374,9 +374,127 @@ void WebviewHost::ResizeWebView(HWND hWnd) {
 // HostObject
 // ==========================================================================
 
-// GetIDsOfNames resolves names at runtime (WebView2 host objects have no
-// static type library), so DISPID values are internal only and gaps left by
-// removed methods are fine.
+// Single source of truth for the host-object method surface. Each X() row is
+// one JS-callable method: script-visible name, internal DISPID, and the
+// statement(s) its DISPATCH_METHOD invocation runs. GetIDsOfNames and the
+// Invoke switch below are both generated from this table, so name, id and
+// dispatch cannot drift apart. Names resolve at runtime (WebView2 host
+// objects have no static type library), so DISPID values are internal only
+// and gaps left by removed methods are fine. Bodies may `return` an HRESULT
+// directly (argument errors) or fall through to the common S_OK. Keep
+// comments inside the table /* */-style: the rows are backslash-continued
+// macro arguments, where // would eat the continuation.
+#define WEBVIEW_HOST_METHODS(X) \
+    X(StartPreview, 1, if (res) *res = MakeBool(m_wizard->StartPreview())) \
+    X(StopPreview, 2, m_wizard->StopPreview()) \
+    X(GetUsername, 4, if (res) *res = MakeStr(m_wizard->GetUsername())) \
+    X(CaptureFaceSamples, 5, { \
+        /* Multi-angle capture: optional int argument = angle index */ \
+        /* (0=front, 1=left +30°, 2=right −30°); defaults to 0 when absent. */ \
+        int angle = 0; \
+        if (p->cArgs >= 1) { \
+            if (p->rgvarg[0].vt == VT_I4)      angle = p->rgvarg[0].lVal; \
+            else if (p->rgvarg[0].vt == VT_R8) angle = static_cast<int>(p->rgvarg[0].dblVal); \
+            else return DISP_E_BADPARAMCOUNT; \
+        } \
+        if (res) *res = MakeBool(m_wizard->CaptureFaceSamples(angle)); \
+    }) \
+    X(ValidatePassword, 6, { \
+        if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT; \
+        std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L""); \
+        /* The COM entry point owns the only plaintext password buffer on */ \
+        /* this path (everything downstream takes it by const&) — the */ \
+        /* guard zeroes it on every exit, including the DISP_E returns. */ \
+        facelogin::SecureWStringGuard passGuard(pass); \
+        if (res) *res = MakeBool(m_wizard->ValidatePassword(pass)); \
+    }) \
+    X(SaveEnrollment, 7, { \
+        /* DISPPARAMS.rgvarg is in REVERSE order: rgvarg[0] is the LAST JS */ \
+        /* argument. JS calls SaveEnrollment(password, label), so rgvarg[0] */ \
+        /* is the label and rgvarg[1] is the password. (Reading them the */ \
+        /* other way round stored the password as the face label — see the */ \
+        /* first-enrollment password bug.) */ \
+        if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT; \
+        std::wstring label = OptionalArg(p, 0); \
+        std::wstring pass; \
+        facelogin::SecureWStringGuard passGuard(pass); \
+        if (p->cArgs >= 2) { \
+            pass = (p->rgvarg[1].vt == VT_BSTR) ? std::wstring(p->rgvarg[1].bstrVal) : L""; \
+        } else { \
+            /* Backward compat: a single-argument call is the password. */ \
+            pass = (p->rgvarg[0].vt == VT_BSTR) ? std::wstring(p->rgvarg[0].bstrVal) : L""; \
+        } \
+        if (res) *res = MakeBool(m_wizard->SaveEnrollment(pass, label)); \
+    }) \
+    X(GetConfig, 13, if (res) *res = MakeStr(m_wizard->GetConfig())) \
+    X(SetConfig, 14, { \
+        if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT; \
+        std::string json; \
+        if (p->rgvarg[0].vt == VT_BSTR && p->rgvarg[0].bstrVal) { \
+            json = facelogin::WstrToUtf8(p->rgvarg[0].bstrVal); \
+        } \
+        if (res) *res = MakeBool(m_wizard->SetConfig(json)); \
+    }) \
+    X(GetLogLines, 15, if (res) *res = MakeStr(m_wizard->GetLogLines())) \
+    X(GetServiceLogLines, 16, if (res) *res = MakeStr(m_wizard->GetServiceLogLines())) \
+    X(ClearLog, 17, m_wizard->ClearLog()) \
+    X(GetUserSid, 18, if (res) *res = MakeStr(m_wizard->GetUserSid())) \
+    X(GetAccountType, 19, if (res) *res = MakeStr(m_wizard->GetAccountType())) \
+    X(GetLatestFrameAndFaces, 20, if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces())) \
+    X(GetCameraList, 21, if (res) *res = MakeStr(m_wizard->GetCameraList())) \
+    X(GetFaceCount, 22, if (res) *res = MakeInt(m_wizard->GetFaceCount())) \
+    X(GetFacesJson, 23, if (res) *res = MakeStr(m_wizard->GetFacesJson())) \
+    X(SaveEnrollmentAppend, 24, { \
+        std::wstring label = OptionalArg(p, 0); /* face label */ \
+        if (res) *res = MakeBool(m_wizard->SaveEnrollmentAppend(label)); \
+    }) \
+    X(DeleteFace, 25, { \
+        if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT; \
+        if (p->rgvarg[0].vt != VT_I4) return DISP_E_TYPEMISMATCH; \
+        if (res) *res = MakeBool(m_wizard->DeleteFace(p->rgvarg[0].lVal)); \
+    }) \
+    X(ClearAllFaces, 26, if (res) *res = MakeBool(m_wizard->ClearAllFaces())) \
+    X(RenameFace, 27, { \
+        if (p->cArgs < 2) return DISP_E_BADPARAMCOUNT; \
+        if (p->rgvarg[1].vt != VT_I4) return DISP_E_TYPEMISMATCH; \
+        std::wstring label = OptionalArg(p, 0); \
+        if (res) *res = MakeBool(m_wizard->RenameFace(p->rgvarg[1].lVal, label)); \
+    }) \
+    X(CheckAccountTypeChanged, 28, if (res) *res = MakeStr(m_wizard->CheckAccountTypeChanged())) \
+    X(RefreshAccountIdentity, 29, { \
+        /* Single argument (password), so rgvarg[0] is it — no reverse-order */ \
+        /* ambiguity. Same access pattern as ValidatePassword. */ \
+        if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT; \
+        std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L""); \
+        facelogin::SecureWStringGuard passGuard(pass); \
+        if (res) *res = MakeBool(m_wizard->RefreshAccountIdentity(pass)); \
+    }) \
+    X(GetCaptureStatus, 30, if (res) *res = MakeStr(m_wizard->GetCaptureStatus())) \
+    X(ClearStaleAccountUpn, 31, if (res) *res = MakeBool(m_wizard->ClearStaleAccountUpn())) \
+    X(GetAuthWorkerLogLines, 32, if (res) *res = MakeStr(m_wizard->GetAuthWorkerLogLines())) \
+    X(GetCredentialProviderLogLines, 33, if (res) *res = MakeStr(m_wizard->GetCredentialProviderLogLines())) \
+    X(ClearFileLog, 34, { \
+        std::wstring source = OptionalArg(p, 0); /* "service" | "worker" | "cp" */ \
+        if (res) *res = MakeBool(m_wizard->ClearFileLog(source)); \
+    }) \
+    X(CancelCapture, 35, m_wizard->CancelCapture()) \
+    X(GetEnrollmentHint, 36, if (res) *res = MakeStr(m_wizard->GetEnrollmentHint())) \
+    X(GetLearningStatus, 37, if (res) *res = MakeStr(m_wizard->GetLearningStatus())) \
+    X(GetLicenseDocument, 38, if (res) *res = MakeStr(ReadLicenseDocument(OptionalArg(p, 0))))
+
+struct HostMethodEntry { const wchar_t* name; DISPID id; };
+static constexpr HostMethodEntry kHostMethods[] = {
+#define HOST_METHOD_ROW(name, id, body) { L#name, id },
+    WEBVIEW_HOST_METHODS(HOST_METHOD_ROW)
+#undef HOST_METHOD_ROW
+};
+static constexpr bool HostMethodIdsUnique() {
+    for (size_t i = 0; i < sizeof(kHostMethods) / sizeof(kHostMethods[0]); ++i)
+        for (size_t j = i + 1; j < sizeof(kHostMethods) / sizeof(kHostMethods[0]); ++j)
+            if (kHostMethods[i].id == kHostMethods[j].id) return false;
+    return true;
+}
+static_assert(HostMethodIdsUnique(), "duplicate DISPID in WEBVIEW_HOST_METHODS");
 
 STDMETHODIMP HostObject::QueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
@@ -394,40 +512,10 @@ STDMETHODIMP_(ULONG) HostObject::Release() {
 STDMETHODIMP HostObject::GetIDsOfNames(REFIID, LPOLESTR* names, UINT cNames, LCID, DISPID* ids) {
     if (cNames != 1) return E_INVALIDARG;
     std::wstring n(names[0]);
-    if (n == L"StartPreview")           *ids = 1;
-    else if (n == L"StopPreview")       *ids = 2;
-    else if (n == L"GetUsername")       *ids = 4;
-    else if (n == L"CaptureFaceSamples") *ids = 5;
-    else if (n == L"ValidatePassword")  *ids = 6;
-    else if (n == L"SaveEnrollment")    *ids = 7;
-    else if (n == L"GetConfig")    *ids = 13;
-    else if (n == L"SetConfig")    *ids = 14;
-    else if (n == L"GetLogLines")  *ids = 15;
-    else if (n == L"GetServiceLogLines") *ids = 16;
-    else if (n == L"ClearLog")     *ids = 17;
-    else if (n == L"GetUserSid")   *ids = 18;
-    else if (n == L"GetAccountType") *ids = 19;
-    else if (n == L"GetLatestFrameAndFaces") *ids = 20;
-    else if (n == L"GetCameraList") *ids = 21;
-    else if (n == L"GetFaceCount") *ids = 22;
-    else if (n == L"GetFacesJson") *ids = 23;
-    else if (n == L"SaveEnrollmentAppend") *ids = 24;
-    else if (n == L"DeleteFace") *ids = 25;
-    else if (n == L"ClearAllFaces") *ids = 26;
-    else if (n == L"RenameFace") *ids = 27;
-    else if (n == L"CheckAccountTypeChanged") *ids = 28;
-    else if (n == L"RefreshAccountIdentity") *ids = 29;
-    else if (n == L"GetCaptureStatus") *ids = 30;
-    else if (n == L"ClearStaleAccountUpn") *ids = 31;
-    else if (n == L"GetAuthWorkerLogLines") *ids = 32;
-    else if (n == L"GetCredentialProviderLogLines") *ids = 33;
-    else if (n == L"ClearFileLog") *ids = 34;
-    else if (n == L"CancelCapture") *ids = 35;
-    else if (n == L"GetEnrollmentHint") *ids = 36;
-    else if (n == L"GetLearningStatus") *ids = 37;
-    else if (n == L"GetLicenseDocument") *ids = 38;
-    else return DISP_E_UNKNOWNNAME;
-    return S_OK;
+    for (const auto& m : kHostMethods) {
+        if (n == m.name) { *ids = m.id; return S_OK; }
+    }
+    return DISP_E_UNKNOWNNAME;
 }
 
 // Read an optional (may be absent) string argument at position argIdx from the
@@ -492,112 +580,12 @@ STDMETHODIMP HostObject::Invoke(DISPID id, REFIID, LCID, WORD wFlags, DISPPARAMS
         // DISPID_VALUE means "invoke the previously resolved method"
         if (id == DISPID_VALUE) id = m_lastDispId;
 
+        // One case per WEBVIEW_HOST_METHODS row: adding a method = adding
+        // its row there; the dispatch below cannot be left behind.
         switch (id) {
-        case 1:  if (res) *res = MakeBool(m_wizard->StartPreview()); break;
-        case 2:  m_wizard->StopPreview(); break;
-        case 4:  if (res) *res = MakeStr(m_wizard->GetUsername()); break;
-        case 5: {
-            // Multi-angle capture: optional int argument = angle index
-            // (0=front, 1=left +30°, 2=right −30°); defaults to 0 when absent.
-            int angle = 0;
-            if (p->cArgs >= 1) {
-                if (p->rgvarg[0].vt == VT_I4)      angle = p->rgvarg[0].lVal;
-                else if (p->rgvarg[0].vt == VT_R8) angle = static_cast<int>(p->rgvarg[0].dblVal);
-                else return DISP_E_BADPARAMCOUNT;
-            }
-            if (res) *res = MakeBool(m_wizard->CaptureFaceSamples(angle));
-            break;
-        }
-        case 6: {
-            if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
-            std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
-            // The COM entry point owns the only plaintext password buffer on
-            // this path (everything downstream takes it by const&) — the
-            // guard zeroes it on every exit, including the DISP_E returns.
-            facelogin::SecureWStringGuard passGuard(pass);
-            if (res) *res = MakeBool(m_wizard->ValidatePassword(pass));
-            break;
-        }
-        case 7: {
-            // DISPPARAMS.rgvarg is in REVERSE order: rgvarg[0] is the LAST JS
-            // argument. JS calls SaveEnrollment(password, label), so rgvarg[0]
-            // is the label and rgvarg[1] is the password. (Reading them the
-            // other way round stored the password as the face label — see the
-            // first-enrollment password bug.)
-            if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
-            std::wstring label = OptionalArg(p, 0);
-            std::wstring pass;
-            facelogin::SecureWStringGuard passGuard(pass);
-            if (p->cArgs >= 2) {
-                pass = (p->rgvarg[1].vt == VT_BSTR) ? std::wstring(p->rgvarg[1].bstrVal) : L"";
-            } else {
-                // Backward compat: a single-argument call is the password.
-                pass = (p->rgvarg[0].vt == VT_BSTR) ? std::wstring(p->rgvarg[0].bstrVal) : L"";
-            }
-            if (res) *res = MakeBool(m_wizard->SaveEnrollment(pass, label));
-            break;
-        }
-        case 13: if (res) *res = MakeStr(m_wizard->GetConfig()); break;
-        case 14: {
-            if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
-            std::string json;
-            if (p->rgvarg[0].vt == VT_BSTR && p->rgvarg[0].bstrVal) {
-                json = facelogin::WstrToUtf8(p->rgvarg[0].bstrVal);
-            }
-            if (res) *res = MakeBool(m_wizard->SetConfig(json));
-            break;
-        }
-        case 15: if (res) *res = MakeStr(m_wizard->GetLogLines()); break;
-        case 16: if (res) *res = MakeStr(m_wizard->GetServiceLogLines()); break;
-        case 32: if (res) *res = MakeStr(m_wizard->GetAuthWorkerLogLines()); break;
-        case 33: if (res) *res = MakeStr(m_wizard->GetCredentialProviderLogLines()); break;
-        case 17: m_wizard->ClearLog(); break;
-        case 34: {
-            std::wstring source = OptionalArg(p, 0);  // "service" | "worker" | "cp"
-            if (res) *res = MakeBool(m_wizard->ClearFileLog(source));
-            break;
-        }
-        case 35: m_wizard->CancelCapture(); break;
-        case 36: if (res) *res = MakeStr(m_wizard->GetEnrollmentHint()); break;
-        case 37: if (res) *res = MakeStr(m_wizard->GetLearningStatus()); break;
-        case 38: if (res) *res = MakeStr(ReadLicenseDocument(OptionalArg(p, 0))); break;
-        case 18: if (res) *res = MakeStr(m_wizard->GetUserSid()); break;
-        case 19: if (res) *res = MakeStr(m_wizard->GetAccountType()); break;
-        case 20: if (res) *res = MakeStr(m_wizard->GetLatestFrameAndFaces()); break;
-        case 21: if (res) *res = MakeStr(m_wizard->GetCameraList()); break;
-        case 22: if (res) *res = MakeInt(m_wizard->GetFaceCount()); break;
-        case 23: if (res) *res = MakeStr(m_wizard->GetFacesJson()); break;
-        case 24: {
-            std::wstring label = OptionalArg(p, 0);  // face label
-            if (res) *res = MakeBool(m_wizard->SaveEnrollmentAppend(label));
-            break;
-        }
-        case 25: {
-            if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
-            if (p->rgvarg[0].vt != VT_I4) return DISP_E_TYPEMISMATCH;
-            if (res) *res = MakeBool(m_wizard->DeleteFace(p->rgvarg[0].lVal));
-            break;
-        }
-        case 26: if (res) *res = MakeBool(m_wizard->ClearAllFaces()); break;
-        case 27: {
-            if (p->cArgs < 2) return DISP_E_BADPARAMCOUNT;
-            if (p->rgvarg[1].vt != VT_I4) return DISP_E_TYPEMISMATCH;
-            std::wstring label = OptionalArg(p, 0);
-            if (res) *res = MakeBool(m_wizard->RenameFace(p->rgvarg[1].lVal, label));
-            break;
-        }
-        case 28: if (res) *res = MakeStr(m_wizard->CheckAccountTypeChanged()); break;
-        case 29: {
-            // Single argument (password), so rgvarg[0] is it — no reverse-order
-            // ambiguity. Same access pattern as case 6.
-            if (p->cArgs < 1) return DISP_E_BADPARAMCOUNT;
-            std::wstring pass(p->rgvarg[0].vt == VT_BSTR ? p->rgvarg[0].bstrVal : L"");
-            facelogin::SecureWStringGuard passGuard(pass);
-            if (res) *res = MakeBool(m_wizard->RefreshAccountIdentity(pass));
-            break;
-        }
-        case 30: if (res) *res = MakeStr(m_wizard->GetCaptureStatus()); break;
-        case 31: if (res) *res = MakeBool(m_wizard->ClearStaleAccountUpn()); break;
+#define HOST_METHOD_CASE(name, did, body) case did: { body; break; }
+        WEBVIEW_HOST_METHODS(HOST_METHOD_CASE)
+#undef HOST_METHOD_CASE
         default: return DISP_E_MEMBERNOTFOUND;
         }
         return S_OK;

@@ -13,13 +13,21 @@ class FaceLoginCredential;
 // one credential tile that supports auto-logon once credentials are ready.
 // Recognition is always triggered by user input (keyboard/mouse), for both
 // LOGON (boot / switch user) and UNLOCK — see FaceLoginCredential::Advise.
-//
-// Field layout (no tile image):
-//   0: CPFT_LARGE_TEXT — "Face Login"
-//   1: CPFT_SMALL_TEXT — Status message
-//   2: CPFT_SUBMIT_BUTTON — Submit (hidden, auto-logon)
-//   3: CPFT_COMMAND_LINK — "Switch to password login"
 // ============================================================================
+
+// Credential tile field indices, shared by the descriptor table below and
+// every GetFieldState/GetStringValue/SetField* call in FaceLoginCredential.
+// Field 0 is pinned by the failure-tile design (keep first, CPFT_LARGE_TEXT);
+// field 3 doubles as the password-switch command link and carries retry-tile
+// visibility state. Indices are the wire contract with LogonUI — inserting
+// or reordering fields changes what the tile renders, not just our code.
+enum CredentialField {
+    kFieldTitle      = 0,  // CPFT_LARGE_TEXT — "人脸登录"
+    kFieldStatus     = 1,  // CPFT_SMALL_TEXT — status / failure reason
+    kFieldSubmit     = 2,  // CPFT_SUBMIT_BUTTON — hidden, auto-logon path
+    kFieldSwitchLink = 3,  // CPFT_COMMAND_LINK — "切换到密码登录"
+    kFieldRetryHint  = 4,  // CPFT_SMALL_TEXT — "请按任意键重试" hint line
+};
 
 class FaceLoginProvider : public ICredentialProvider {
 public:

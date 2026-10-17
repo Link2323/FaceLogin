@@ -36,7 +36,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 - 构建、依赖和打包流程以 [`docs/BUILD.md`](docs/BUILD.md) 为准。优先使用 `scripts/build_installer.ps1`；版本同步使用 `scripts/bump_version.ps1`。
 - `installer/FaceLoginSetup/resources/` 中的二进制和模型按文件类型被 Git 忽略。打包脚本按白名单复制并清理资源；手工打包前按 `docs/BUILD.md` 核对。安装包需要的 5 个运行时 DLL 来自 `build/face_service/Release/`；Credential Provider 使用静态 CRT，不依赖这些 DLL。
 - 完整安装器嵌入由 `resources/` 生成的 `payload.zip`，打包前按白名单清除意外残留；slim 卸载器不嵌入载荷。`tools/` 中的离线工具不属于安装载荷。
-- 注册页面修改 `enrollment_app/index.html.in`、`styles.css` 和 `enrollment_app/js/` 下的 JS 模块（`enrollment_app/CMakeLists.txt` 的 `ENROLLMENT_JS_SOURCES` 即拼接与依赖顺序，新增模块须同步 `tools/enrollment_ui/capture_flow_test.cjs` 的文件列表）；CMake 合成并嵌入页面，不编辑 `build/enrollment_app/index.html`。构建与验证见 [`docs/BUILD.md`](docs/BUILD.md)。
+- 注册页面修改 `enrollment_app/index.html.in`、`styles.css` 和 `enrollment_app/js/` 下的 JS 模块（`enrollment_app/CMakeLists.txt` 的 `ENROLLMENT_JS_SOURCES` 即拼接与依赖顺序，新增模块只需加进该列表，`tools/enrollment_ui/capture_flow_test.cjs` 运行时解析它）；CMake 合成并嵌入页面，不编辑 `build/enrollment_app/index.html`。构建与验证见 [`docs/BUILD.md`](docs/BUILD.md)。
 - 不编辑 `installer/FaceLoginSetup/frontend/wailsjs/` 下的生成绑定；通过 Wails 命令重新生成。
 - 普通构建和打包复用现有模型文件，不重复下载或量化。只有新克隆缺模型、哈希校验失败或任务明确要求升级时，才运行模型下载脚本。模型来源、哈希和转换规则见 `third_party/models/` 与 [`DEVELOPMENT.md`](DEVELOPMENT.md#sec-models)。
 - 依赖或模型变更时，同步更新适用的许可、来源记录和随包声明；事实源及更新脚本见 `docs/BUILD.md`、`third_party/sources.json`。
@@ -50,7 +50,7 @@ FaceLogin 是 Windows x64 桌面应用，核心为 C++20，安装器使用 Go/Wa
 - 服务 worker 使用 MTA；Credential Provider 和 WebView2 注册界面使用 Apartment 线程。DirectShow 必须复用当前线程已初始化的 COM 公寓；只有在同一线程初始化 COM 的代码才能调用 `CoUninitialize`。
 - 公共管道、worker 管道和 `users.dat` 格式以 `docs/contracts/` 中的契约文档为准。不要在本文件复制字段表或字节布局。
 - `users.dat` 当前格式和模型标识见 [`docs/contracts/users-dat.md`](docs/contracts/users-dat.md)。格式、识别模型或模型标识变更可能影响现有录入，实施前先核对契约和迁移行为；多角度记录分别保存，不跨角度平均嵌入。
-- Credential Provider CLSID 同时出现在 `credential_provider/resource.h`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp`、`installer/FaceLoginSetup/internal/com.go` 和 `scripts/unregister_dev.bat`；前四处由安装器的跨语言一致性测试钉住，改动时全部同步。
+- Credential Provider CLSID 同时出现在 `credential_provider/resource.h`、`credential_provider/dllmain.cpp`、`credential_provider/FaceLoginProvider.cpp`、`installer/FaceLoginSetup/internal/com.go`、`scripts/unregister_dev.bat` 和 `docs/modules/windows-clients.md`（共 6 处）；前四处由安装器的跨语言一致性测试钉住，改动时全部同步。
 
 ## 编码与安全约束
 

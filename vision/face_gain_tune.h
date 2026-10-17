@@ -916,7 +916,7 @@ inline bool IsSceneWhiteout(const FrameImage& frame) {
                 for (long x = tx * frame.nc() / 5; x < (tx + 1) * frame.nc() / 5; x += 4) {
                     const auto& p = frame(y, x);
                     ++count;
-                    if (0.299 * p.red + 0.587 * p.green + 0.114 * p.blue >= kWhiteoutClipLuma) ++clipped;
+                    if (Rec601Luma(p) >= kWhiteoutClipLuma) ++clipped;
                 }
             }
             const bool saturated = count > 0 && clipped * 100 >= count * kWhiteoutTileClipPercent;
@@ -944,7 +944,7 @@ inline float CentralSceneLuma(const FrameImage& frame) {
         for (long x = frame.nc() / 3; x < 2 * frame.nc() / 3; x += 2) {
             const auto& p = frame(y, x);
             const int luma = std::clamp(static_cast<int>(
-                0.299 * p.red + 0.587 * p.green + 0.114 * p.blue + 0.5), 0, 255);
+                Rec601Luma(p) + 0.5), 0, 255);
             ++histogram[luma];
             ++count;
         }

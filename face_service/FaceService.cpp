@@ -339,8 +339,6 @@ bool FaceService::Initialize() {
     // Must happen before camera init — the configured camera_device is used
     // below.
     m_config = LoadConfig(m_dataDir);
-    m_matchThreshold = m_config.match_threshold;
-    m_antiSpoofThreshold = m_config.anti_spoof_threshold;
 
     FACELOGIN_INFO(L"=== FaceLoginService initializing ===");
     FACELOGIN_INFO(L"Data dir: %s", m_dataDir.c_str());
@@ -420,7 +418,7 @@ bool FaceService::Initialize() {
     }
 
     FACELOGIN_INFO(L"Liveness method: antispoof (mandatory, fail-closed; session-aware model residency)");
-    FACELOGIN_INFO(L"Match threshold: %.3f", m_matchThreshold);
+    FACELOGIN_INFO(L"Match threshold: %.3f", m_config.match_threshold);
     FACELOGIN_INFO(L"Initialization complete (pipe listening; model worker ready)");
 
     return true;
@@ -437,7 +435,7 @@ std::shared_ptr<AuthWorkerClient> FaceService::LoadAuthenticationWorker(
     // uses the proven DirectShow path.
     workerConfig.cameraRotation = appConfig.camera_rotation;
     workerConfig.antiSpoofThreshold = appConfig.anti_spoof_threshold;
-    workerConfig.authTimeoutSeconds = m_authTimeoutSeconds;
+    workerConfig.authTimeoutSeconds = ipc::AUTH_TIMEOUT_SECONDS;
     workerConfig.cameraDevice = Utf8ToWstr(appConfig.camera_device);
     workerConfig.fastUnlock = appConfig.fast_unlock;
 
@@ -482,12 +480,16 @@ void FaceService::Run() {
             // decay survive; only the windows clear.
             if (m_learner) m_learner->ResetEraWindows();
             if (reloaded) {
-                SendControlResponse(ipc::MSG_RELOAD_OK);
+                if (!SendControlResponse(ipc::MSG_RELOAD_OK)) {
+                    FACELOGIN_WARN(L"RELOAD_DB: control response delivery failed");
+                }
                 m_pipeServer->Disconnect();
                 FACELOGIN_INFO(L"Database reloaded");
                 LogTemplateNorms(*m_store, L"reload");
             } else {
-                SendControlResponse(ipc::MSG_CONFIG_RELOAD_ERROR);
+                if (!SendControlResponse(ipc::MSG_CONFIG_RELOAD_ERROR)) {
+                    FACELOGIN_WARN(L"RELOAD_DB: failure response delivery failed");
+                }
                 m_pipeServer->Disconnect();
                 FACELOGIN_ERROR(L"Database reload failed — users.dat parse error; "
                                 L"previous in-memory database retained");
@@ -496,8 +498,6 @@ void FaceService::Run() {
         else if (request == ipc::MSG_CONFIG_RELOAD) {
             AppConfig reloadedConfig = LoadConfig(m_dataDir);
             m_config = std::move(reloadedConfig);
-            m_matchThreshold = m_config.match_threshold;
-            m_antiSpoofThreshold = m_config.anti_spoof_threshold;
             if (m_learner) {
                 LearningConfig learning;
                 learning.enabled = m_config.ema_learning;
@@ -510,12 +510,14 @@ void FaceService::Run() {
 
             const bool modelStateOk = m_residency.ReloadConfig(m_config);
 
-            SendControlResponse(modelStateOk
-                ? ipc::MSG_CONFIG_RELOAD_OK
-                : ipc::MSG_CONFIG_RELOAD_ERROR);
+            if (!SendControlResponse(modelStateOk
+                    ? ipc::MSG_CONFIG_RELOAD_OK
+                    : ipc::MSG_CONFIG_RELOAD_ERROR)) {
+                FACELOGIN_WARN(L"CONFIG_RELOAD: control response delivery failed");
+            }
             m_pipeServer->Disconnect();
             FACELOGIN_INFO(L"Configuration reloaded: thr=%.2f antiSpoof=%.3f rotation=%d",
-                          m_matchThreshold, m_antiSpoofThreshold,
+                          m_config.match_threshold, m_config.anti_spoof_threshold,
                           m_config.camera_rotation);
         }
         else if (request == ipc::MSG_LEARNING_STATUS) {
@@ -523,7 +525,9 @@ void FaceService::Run() {
             // view. In-memory snapshot + era windows; both are owned by this
             // (public-pipe) thread, so no extra locking is needed beyond the
             // learner's own status critical section.
-            SendControlResponse(BuildLearningStatusJson());
+            if (!SendControlResponse(BuildLearningStatusJson())) {
+                FACELOGIN_WARN(L"LEARNING_STATUS: response delivery failed");
+            }
             m_pipeServer->Disconnect();
         }
         else if (request == ipc::MSG_AUTH_REQUEST) {
@@ -582,7 +586,7 @@ BindingDecision FaceService::VerifyIdentityBinding(
         // access shares this lock (single-writer, shared-read).
         EnterCriticalSection(&m_storeLock);
         identity = m_store->FindBestIdentity(embedding.data(), embedding.size(),
-                                             m_matchThreshold, &bestDistance);
+                                             m_config.match_threshold, &bestDistance);
         LeaveCriticalSection(&m_storeLock);
     }
     if (!identity) {
@@ -776,7 +780,7 @@ bool FaceService::ProcessAuthRequest() {
             : workerResult.errorMessage;
         if (identityMissDistance >= 0.0f) {
             FACELOGIN_WARN(L"Authentication worker failed: %s (closest identity distance=%.3f, threshold=%.3f)",
-                           message.c_str(), identityMissDistance, m_matchThreshold);
+                           message.c_str(), identityMissDistance, m_config.match_threshold);
         } else {
             FACELOGIN_WARN(L"Authentication worker failed: %s", message.c_str());
         }
@@ -931,7 +935,10 @@ bool FaceService::Install(const std::wstring& exePath) {
 
 bool FaceService::Uninstall() {
     SC_HANDLE hSCManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
-    if (!hSCManager) return false;
+    if (!hSCManager) {
+        FACELOGIN_ERROR(L"Uninstall: OpenSCManager failed err=%lu", GetLastError());
+        return false;
+    }
 
     SC_HANDLE hService = OpenServiceW(hSCManager, SERVICE_NAME, SERVICE_STOP | DELETE);
     if (!hService) {
@@ -940,6 +947,7 @@ bool FaceService::Uninstall() {
             CloseServiceHandle(hSCManager);
             return true;
         }
+        FACELOGIN_ERROR(L"Uninstall: OpenService failed err=%lu", err);
         CloseServiceHandle(hSCManager);
         return false;
     }
@@ -953,7 +961,13 @@ bool FaceService::Uninstall() {
         Sleep(1000);
     }
 
-    DeleteService(hService);
+    if (!DeleteService(hService)) {
+        // Marks-for-deletion failures (service still running, handle held by
+        // another process) leave the registration behind — say so instead of
+        // logging "uninstalled".
+        FACELOGIN_WARN(L"Uninstall: DeleteService failed err=%lu (service may "
+                       L"remain registered until reboot)", GetLastError());
+    }
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCManager);
 

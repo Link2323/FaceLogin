@@ -1,7 +1,7 @@
 # Assemble a single embedded page without runtime asset dependencies.
 # Concatenation order IS the script's dependency order (capture_flow.js first,
 # app_main.js last: top-level wiring references earlier files' functions);
-# tools/enrollment_ui/capture_flow_test.cjs mirrors this list.
+# tools/enrollment_ui/capture_flow_test.cjs parses this list at run time.
 set(ENROLLMENT_JS_SOURCES
     js/capture_flow.js
     js/ui_common.js

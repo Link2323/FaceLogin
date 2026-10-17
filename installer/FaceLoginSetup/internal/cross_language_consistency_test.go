@@ -13,8 +13,9 @@ import (
 )
 
 // The installer hard-codes values that also live in the C++ tree (CLSID,
-// config defaults). These tests pin the copies together so a one-side edit
-// fails the build instead of shipping silently inconsistent binaries.
+// config defaults), and the enrollment web UI hard-codes constants from the
+// C++ collector and store. These tests pin the copies together so a one-side
+// edit fails the build instead of shipping silently inconsistent binaries.
 //
 // go test runs with the package directory (internal/) as the working
 // directory, so the repository root is three levels up.
@@ -185,6 +186,108 @@ func TestInstallerConfigDefaultsMatchCPlusPlus(t *testing.T) {
 		}
 		if got != want {
 			t.Errorf("config %q = %v, C++ default is %v", key, got, want)
+		}
+	}
+}
+
+// TestEnrollmentUIConstantsMatchCpp pins the constants the enrollment web UI
+// hard-codes against their C++ definitions: the angle labels and ±30°
+// instruction copy against kAngleTargets/kAngleLabels in
+// enrollment_capture.h, the ±10° yaw gate in preview.js against
+// kYawTolerance in enrollment_capture.cpp, and the 3-faces-per-account copy
+// in faces.js/capture_ui.js against kMaxFacesPerUser in credential_store.h.
+// The JS side cannot include C++ headers, so the duplicated literals are
+// intentional — this test is what keeps them honest. If a regex no longer
+// matches, the JS copy was refactored: update the test, do not delete it.
+func TestEnrollmentUIConstantsMatchCpp(t *testing.T) {
+	captureH := repoRead(t, "enrollment_app", "enrollment_capture.h")
+	captureCpp := repoRead(t, "enrollment_app", "enrollment_capture.cpp")
+	storeH := repoRead(t, "storage", "credential_store.h")
+	captureUI := repoRead(t, "enrollment_app", "js", "capture_ui.js")
+	previewJS := repoRead(t, "enrollment_app", "js", "preview.js")
+	facesJS := repoRead(t, "enrollment_app", "js", "faces.js")
+
+	// mustParseOne returns the first capture group of re in src, failing the
+	// test with a "copy was refactored" message when the pattern is gone.
+	mustParseOne := func(name, src string, re *regexp.Regexp) string {
+		t.Helper()
+		m := re.FindStringSubmatch(src)
+		if m == nil {
+			t.Errorf("%s: pattern %v not found — the copy was refactored; update this test", name, re)
+			return ""
+		}
+		return m[1]
+	}
+
+	// --- Angle labels: kAngleLabels {L"正面", L"左转", L"右转"} ↔ ANGLE_LABELS.
+	cppLabelsM := regexp.MustCompile(`kAngleLabels\[[^\]]*\]\s*=\s*\{([^}]*)\}`).
+		FindStringSubmatch(captureH)
+	if cppLabelsM == nil {
+		t.Fatal("cannot parse kAngleLabels in enrollment_app/enrollment_capture.h")
+	}
+	cppLabels := regexp.MustCompile(`L"([^"]+)"`).FindAllStringSubmatch(cppLabelsM[1], -1)
+	jsLabelsM := regexp.MustCompile(`ANGLE_LABELS\s*=\s*\[([^\]]*)\]`).FindStringSubmatch(captureUI)
+	if jsLabelsM == nil {
+		t.Fatal("cannot parse ANGLE_LABELS in enrollment_app/js/capture_ui.js")
+	}
+	jsLabels := regexp.MustCompile(`'([^']+)'`).FindAllStringSubmatch(jsLabelsM[1], -1)
+	if len(cppLabels) != len(jsLabels) {
+		t.Fatalf("angle label count: C++ %d vs JS %d", len(cppLabels), len(jsLabels))
+	}
+	for i := range cppLabels {
+		if cppLabels[i][1] != jsLabels[i][1] {
+			t.Errorf("angle label %d: C++ %q vs JS %q", i, cppLabels[i][1], jsLabels[i][1])
+		}
+	}
+	wantAngles := strconv.Itoa(len(cppLabels))
+
+	// --- ±30° targets: {0, +30, −30} with +yaw meaning "turn left".
+	targetsM := regexp.MustCompile(`kAngleTargets\[[^\]]*\]\s*=\s*\{([^}]*)\}`).
+		FindStringSubmatch(captureH)
+	if targetsM == nil {
+		t.Fatal("cannot parse kAngleTargets in enrollment_app/enrollment_capture.h")
+	}
+	targets := regexp.MustCompile(`-?\d+`).FindAllString(targetsM[1], -1)
+	if len(targets) != 3 || targets[0] != "0" {
+		t.Fatalf("kAngleTargets = %v, want 3 entries starting at 0", targets)
+	}
+	leftDeg := strings.TrimPrefix(targets[1], "-")
+	rightDeg := strings.TrimPrefix(targets[2], "-")
+	if leftDeg != mustParseOne("left instruction degrees", captureUI,
+		regexp.MustCompile(`左侧约 (\d+)°`)) {
+		t.Errorf("left instruction copy does not match |kAngleTargets[1]| = %s", leftDeg)
+	}
+	if rightDeg != mustParseOne("right instruction degrees", captureUI,
+		regexp.MustCompile(`右侧约 (\d+)°`)) {
+		t.Errorf("right instruction copy does not match |kAngleTargets[2]| = %s", rightDeg)
+	}
+	// Multi-angle capture iterates exactly the angle-table length.
+	if wantAngles != mustParseOne("multi-angle angle count", captureUI,
+		regexp.MustCompile(`multi\)\s*angles = (\d+);`)) {
+		t.Errorf("capture_ui multi-angle count is not the angle table length %s", wantAngles)
+	}
+
+	// --- ±10° yaw gate in the preview overlay.
+	yaw := mustParseOne("kYawTolerance", captureCpp, regexp.MustCompile(`kYawTolerance = ([\d.]+)f`))
+	gate := mustParseOne("preview.js yaw gate", previewJS, regexp.MustCompile(`Math\.abs\(diff\) <= (\d+)`))
+	yawF, err1 := strconv.ParseFloat(yaw, 64)
+	gateF, err2 := strconv.ParseFloat(gate, 64)
+	if err1 != nil || err2 != nil || yawF != gateF {
+		t.Errorf("yaw gate: preview.js %s vs kYawTolerance %s", gate, yaw)
+	}
+
+	// --- Faces-per-account cap in the UI copy.
+	maxFaces := mustParseOne("kMaxFacesPerUser", storeH, regexp.MustCompile(`kMaxFacesPerUser = (\d+)`))
+	for _, site := range []struct{ name, src, re string }{
+		{"faces.js counter text", facesJS, `' / (\d+) 张'`},
+		{"faces.js append pre-check", facesJS, `faceCount >= (\d+)`},
+		{"faces.js cap modal copy", facesJS, `已有 (\d+) 张人脸`},
+		{"capture_ui.js single-angle pre-check", captureUI, `faceCount >= (\d+)`},
+		{"capture_ui.js cap banner copy", captureUI, `上限（(\d+) 张脸）`},
+	} {
+		got := mustParseOne(site.name, site.src, regexp.MustCompile(site.re))
+		if got != "" && got != maxFaces {
+			t.Errorf("%s = %s, kMaxFacesPerUser = %s", site.name, got, maxFaces)
 		}
 	}
 }
